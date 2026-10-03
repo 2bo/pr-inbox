@@ -24,7 +24,13 @@ Run `pnpm run check` before every commit; all of it must pass.
 
 - The API changes between Claude Code versions. Check `.claude-plugin/types/claude-code/index.d.ts` (generated for the installed version, gitignored) and https://code.claude.com/docs/en/plugins/mods/ before relying on memory
 - If `.claude-plugin/types/` is missing, `tsc` fails: load the mod once with `claude --plugin-dir .`
-- Installed copies are cached per version. Bump `version` in `plugin.json` when releasing a change
+
+## Releasing
+
+- Installed copies are cached per version, so users get a change only when `version` in `.claude-plugin/plugin.json` goes up
+- Bump it in the same change whenever what users run changes (`hooks/`, `.claude-plugin/plugin.json`). Changes to README, docs or tests alone need no bump
+- Semantic versioning: patch for fixes, minor for new features or settings, major for breaking changes (a removed or renamed setting, command or key)
+- After the change lands on `main`, tag it: `git tag v<version> && git push origin v<version>`
 
 ## Security rules (do not weaken)
 
