@@ -88,3 +88,7 @@ pnpm run check          # validate (--strict) → tsc → Biome → claude plugi
 ```
 
 Tests live in `tests/*.test.ts`. GitHub, the model, the store and the environment are all stubbed, so tests make no network calls.
+
+## License
+
+MIT

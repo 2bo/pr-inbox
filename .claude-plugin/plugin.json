@@ -5,6 +5,7 @@
   "author": {
     "name": "2bo"
   },
+  "license": "MIT",
   "userConfig": {
     "org_filter": {
       "type": "string",
