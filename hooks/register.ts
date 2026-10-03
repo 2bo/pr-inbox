@@ -20,10 +20,16 @@ type PR = {
   author: { login: string; __typename: string } | null
   reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN'
-  commits: { nodes: { commit: { statusCheckRollup: { state: string } | null } }[] }
+  commits: { nodes: { commit: { statusCheckRollup: { state: string; contexts?: { nodes: (CheckContext | null)[] } } | null } }[] }
   // レビュー依頼にだけ付く
   timelineItems?: { nodes: ({ createdAt: string; requestedReviewer: { __typename: string; login?: string } | null } | null)[] }
 }
+
+// CI のチェック1件。GitHub Actions などの CheckRun と、旧形式のコミットステータス (StatusContext)
+type CheckContext =
+  | { __typename: 'CheckRun'; name: string; conclusion: string | null; detailsUrl: string | null }
+  | { __typename: 'StatusContext'; context: string; state: string; targetUrl: string | null }
+  | { __typename: string }
 
 type Group = 'humans' | 'bots' | 'action' | 'ready' | 'waiting' | 'stale'
 
@@ -56,7 +62,7 @@ const INDENT = 6
 const QUERY = `query($review: String!, $mine: String!) {
   viewer { login }
   review: search(query: $review, type: ISSUE, first: 50) { nodes { ...pr ...requested } }
-  mine: search(query: $mine, type: ISSUE, first: 50) { nodes { ...pr } }
+  mine: search(query: $mine, type: ISSUE, first: 50) { nodes { ...pr ...checks } }
 }
 fragment pr on PullRequest {
   number title url isDraft createdAt updatedAt additions deletions
@@ -64,6 +70,13 @@ fragment pr on PullRequest {
   author { login __typename }
   reviewDecision mergeable
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+}
+fragment checks on PullRequest {
+  commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+    __typename
+    ... on CheckRun { name conclusion detailsUrl }
+    ... on StatusContext { context state targetUrl }
+  } } } } } }
 }
 fragment requested on PullRequest {
   timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 20) {
@@ -225,6 +238,33 @@ function elapsed(iso: string, now: number): string {
   if (ms < DAY) return `${Math.floor(ms / HOUR)}時間`
   return `${Math.floor(ms / DAY)}日`
 }
+
+// 失敗したチェックの名前とリンク。取り消し (CANCELLED) は新しい push で打ち切られただけのことが多いので含めない
+const FAILED_CONCLUSIONS = new Set(['FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE', 'ACTION_REQUIRED'])
+
+function failedChecks(pr: PR): { name: string; url?: string }[] {
+  const contexts = pr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes ?? []
+  const out: { name: string; url?: string }[] = []
+  for (const c of contexts) {
+    if (!c) continue
+    let name: string | undefined
+    let url: string | null | undefined
+    if ('name' in c && c.__typename === 'CheckRun' && FAILED_CONCLUSIONS.has(c.conclusion ?? '')) {
+      name = c.name
+      url = c.detailsUrl
+    } else if ('context' in c && c.__typename === 'StatusContext' && (c.state === 'FAILURE' || c.state === 'ERROR')) {
+      name = c.context
+      url = c.targetUrl
+    }
+    if (name === undefined) continue
+    // リンクにするのは https の URL だけ
+    out.push({ name: clean(name) || '(名前なし)', ...(url && /^https:\/\//.test(url) ? { url } : {}) })
+  }
+  return out
+}
+
+// 行の下に出す失敗チェックの件数の上限
+const MAX_FAILED_CHECKS = 3
 
 function ciMark(pr: PR): string {
   const ci = ciState(pr)
@@ -546,7 +586,7 @@ export function register(on: On, options: PluginOptions) {
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Link } = $.ui.resolve(e)
     type El = ReturnType<typeof Box>
     const redraw = () => $.ui.invalidate('ui.render')
     const columns = Math.max(40, e.props.bodyColumns ?? 80)
@@ -565,6 +605,10 @@ export function register(on: On, options: PluginOptions) {
     }
     if (e.props.placement === 'dock' && bodyRows > 0) paneLimit = bodyRows
     else if (bodyRows > 0 && lastHeight > bodyRows) paneLimit = bodyRows
+
+    // リンクらしく青と下線で描く。端末ではハイパーリンク (OSC 8) になり、Cmd+クリックで開ける
+    const link = (href: string, text: string, bold = false) =>
+      Link({ href, children: [Text({ color: 'blue', underline: true, bold, children: [text] })] })
 
     const small = (key: string, label: string, hotkey: string, onPress: () => void) =>
       Button({ key, label, hotkey, plain: true, dimColor: true, onPress })
@@ -673,7 +717,10 @@ export function register(on: On, options: PluginOptions) {
     }
 
     const linesOf = (p: PR): number => {
-      if (tab !== 'review') return 1 + wrappedLines(metaLine(p), bodyColumns)
+      if (tab !== 'review') {
+        const failed = failedChecks(p).length
+        return 1 + wrappedLines(metaLine(p), bodyColumns) + Math.min(failed, MAX_FAILED_CHECKS) + (failed > MAX_FAILED_CHECKS ? 1 : 0)
+      }
       const impact = impactLine(p)
       return (
         1 +
@@ -686,8 +733,24 @@ export function register(on: On, options: PluginOptions) {
     const line = (p: PR) => {
       const isSelected = selected === p.url
       const repo = p.repository.nameWithOwner.split('/')[1] ?? p.repository.nameWithOwner
-      const title = `${isSelected ? '▶' : ' '} ${icon(p)} ${repo}#${p.number} ${p.isDraft ? '[draft] ' : ''}${p.title}`
-      const children: El[] = [Text({ inverse: isSelected, bold: isSelected, children: [fit(title, columns)] })]
+      // タイトル行: 選択印とアイコン、PR 番号のリンク (Cmd+クリックで GitHub)、タイトル
+      const prefix = `${isSelected ? '▶' : ' '} ${icon(p)} `
+      const label = `${repo}#${p.number}`
+      const title = ` ${p.isDraft ? '[draft] ' : ''}${p.title}`
+      const children: El[] = [
+        Box({
+          flexDirection: 'row',
+          children: [
+            Text({ inverse: isSelected, bold: isSelected, children: [prefix] }),
+            link(p.url, label, isSelected),
+            Text({
+              inverse: isSelected,
+              bold: isSelected,
+              children: [fit(title, Math.max(10, columns - textWidth(prefix) - textWidth(label)))],
+            }),
+          ],
+        }),
+      ]
       if (tab === 'review') {
         const a = analysisLine(p)
         children.push(
@@ -702,6 +765,30 @@ export function register(on: On, options: PluginOptions) {
         }
       }
       children.push(Box({ paddingLeft: INDENT, children: [Text({ wrap: 'wrap', dimColor: true, children: [metaLine(p)] })] }))
+      // 自分の PR: 失敗したチェックを名前とリンクで
+      if (tab === 'mine') {
+        const failed = failedChecks(p)
+        for (const c of failed.slice(0, MAX_FAILED_CHECKS)) {
+          children.push(
+            Box({
+              paddingLeft: INDENT,
+              flexDirection: 'row',
+              children: [
+                Text({ color: 'red', children: ['✗ '] }),
+                c.url ? link(c.url, fit(c.name, bodyColumns - 2)) : Text({ children: [fit(c.name, bodyColumns - 2)] }),
+              ],
+            }),
+          )
+        }
+        if (failed.length > MAX_FAILED_CHECKS) {
+          children.push(
+            Box({
+              paddingLeft: INDENT,
+              children: [Text({ dimColor: true, children: [`ほか ${failed.length - MAX_FAILED_CHECKS} 件のチェックが失敗`] })],
+            }),
+          )
+        }
+      }
       return Box({ key: `line-${p.url}`, flexDirection: 'column', children })
     }
 
