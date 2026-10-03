@@ -1,6 +1,6 @@
 // pr-inbox: レビュー依頼と自分の PR を「次にやること」順に並べる受信箱
 //
-// - プロンプト下の1行に件数を常時表示し、/prs でペインを開く
+// - プロンプト下の1行に件数を常時表示し、/pr-inbox でペインを開く
 // - レビュー依頼は依頼から時間が経っている順に並べ、PR ごとに要約・危険性・リリース時の影響を自動で付ける
 // - ペインで PR を選び (j/k)、e: Claude に解説を依頼 / a: approve / o: ブラウザ
 // - approve は人がボタンを押して確認ダイアログで OK したときだけ実行する
@@ -520,18 +520,18 @@ export function register(on: On, options: PluginOptions) {
     $.clock.every(Math.max(1, Number(cfg.refresh_minutes)) * MINUTE, () => refresh($))
     try {
       await $.command.register({
-        name: 'prs',
-        description: 'レビュー依頼と自分の PR の受信箱を開く (/prs refresh で再取得)',
+        name: 'pr-inbox',
+        description: 'レビュー依頼と自分の PR の受信箱を開く (/pr-inbox refresh で再取得)',
         argumentHint: '[refresh]',
         immediate: true,
       })
     } catch (err) {
-      $.ui.log(`/prs を登録できませんでした: ${messageOf(err)}`, { to: 'debug' })
+      $.ui.log(`/pr-inbox を登録できませんでした: ${messageOf(err)}`, { to: 'debug' })
     }
     return next(e)
   })
 
-  on('command.run', { command: 'prs' }, async ($, e) => {
+  on('command.run', { command: 'pr-inbox' }, async ($, e) => {
     if (e.args.trim() === 'refresh') {
       await refresh($)
       return { text: error ? `取得に失敗: ${error}` : summary(groups(fetchedAt)) }
