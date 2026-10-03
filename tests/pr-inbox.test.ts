@@ -123,6 +123,9 @@ type StubOptions = {
   model?: (prompt: string) => string
   // Close the approve dialog without answering
   dismiss?: boolean
+  // What gh pr view --json title,body,files and gh pr diff return
+  view?: unknown
+  diff?: string
 }
 
 function stubs(on: TestOn, opts: StubOptions = {}) {
@@ -146,6 +149,9 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
     let stdout = ''
     if (e.argv[1] === 'api' && e.argv[2] === 'graphql') stdout = opts.graphql ?? GRAPHQL
     if (e.argv[2] === 'view' && e.argv.includes('headRefOid')) stdout = JSON.stringify({ headRefOid: opts.head ?? HEAD })
+    if (e.argv[2] === 'view' && e.argv.includes('title,body,files'))
+      stdout = JSON.stringify(opts.view ?? { title: 't', body: 'b', files: [] })
+    if (e.argv[2] === 'diff') stdout = opts.diff ?? 'diff --git a/x b/x'
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('model.complete', (_, e) => {
@@ -542,7 +548,7 @@ test('falls back to English with no language hints', async ($, on) => {
 })
 
 test('redoes a stored analysis in a different language', async ($, on) => {
-  const old = { v: 3, lang: 'English', updatedAt: HUMAN.updatedAt, summary: 'old', risk: 'low', reason: '', impact: 'no', impactDetail: '' }
+  const old = { v: 4, lang: 'English', updatedAt: HUMAN.updatedAt, summary: 'old', risk: 'low', reason: '', impact: 'no', impactDetail: '' }
   const same = { ...old, lang: 'Japanese', summary: '前の分析' }
   const s = stubs(on, { store: { [`analysis:${HUMAN.url}`]: old, [`analysis:${HUMAN2.url}`]: same } })
   await start($, s.clock)
@@ -589,7 +595,7 @@ test('caps how many analyses start in an hour', async ($, on) => {
 
 test('a stored analysis with an unexpected shape is redone', async ($, on) => {
   const broken = {
-    v: 3,
+    v: 4,
     lang: 'Japanese',
     updatedAt: HUMAN.updatedAt,
     summary: 'x',
@@ -649,4 +655,81 @@ test('an org_filter that is not an organization name is refused', { options: { o
   await start($, s.clock)
   expect(s.calls.some((c) => c[2] === 'graphql')).toBe(false)
   expect(s.statuses.at(-1)).toContain('org_filter is not an organization name')
+})
+
+test('a partly read PR is marked and never judged low risk', async ($, on) => {
+  const s = stubs(on, { diff: 'x'.repeat(40_000), view: { title: 't', body: 'b', files: [{ path: 'a.ts', additions: 1, deletions: 0 }] } })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  // #13 answers low, but only the first 30,000 characters of the diff were shown
+  expect(await ui.find({ type: 'Text', text: /^【中】一覧の並び順を変更 \(PR の一部だけで判定\)$/ })).toBeDefined()
+  expect(s.prompts.at(-1)).toContain('Diff (first 30000 characters only')
+  await ui.unmount()
+})
+
+test('the file list reaches the model before the body, and the PR content is fenced', async ($, on) => {
+  const s = stubs(on, {
+    view: { title: 't', body: 'z'.repeat(20_000), files: [{ path: 'db/migrate/1_drop_users.rb', additions: 3, deletions: 0 }] },
+  })
+  await start($, s.clock)
+  const p = s.prompts.find((x) => x.includes('#11 ')) ?? ''
+  expect(p.indexOf('db/migrate/1_drop_users.rb')).toBeLessThan(p.indexOf('zzzz'))
+  expect(p).toContain('Body (first 4000 characters only)')
+  const open = p.match(/<(untrusted-[0-9a-f-]{36})>/)?.[1]
+  expect(open).toBeDefined()
+  expect(p).toContain(`</${open}>`)
+})
+
+test('analysis off: no model calls and no analysis rows', { options: { analysis: 'off' } }, async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  expect(s.prompts.length).toBe(0)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: /要約と危険性|分析待ち/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('analysis when opened: waits for the pane', { options: { analysis: 'when opened' } }, async ($, on) => {
+  const s = stubs(on)
+  on('command.run', () => ({ text: '' }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  await start($, s.clock)
+  expect(s.prompts.length).toBe(0)
+  await $.command.run({ command: 'pr-inbox', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(s.prompts.length).toBe(3)
+})
+
+// Runs a tool call inside a turn that started with the given text
+async function toolInTurn($: TestEngine, text: string, call: Record<string, unknown>) {
+  await $.turn.start({ text, turnId: 't1' })
+  return $.tool.call(call as never)
+}
+
+test('in a turn started by e, only reading tools and read-only gh commands run', async ($, on) => {
+  const s = stubs(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-explain' })
+  const text = s.submitted.at(-1) ?? ''
+  await ui.unmount()
+  for (const command of ['gh pr view https://github.com/acme/app/pull/11 --json title', 'gh pr diff 11', 'gh run view 1 --log-failed']) {
+    expect(await toolInTurn($, text, { tool: 'Bash', command })).toMatchObject({ result: 'ok' })
+  }
+  expect(await toolInTurn($, text, { tool: 'Read', file_path: '/work/README.md' })).toMatchObject({ result: 'ok' })
+  for (const command of [
+    'gh pr review 11 --approve',
+    'gh pr comment 11 -b hi',
+    'gh api -X POST repos/acme/app/issues',
+    'gh pr view 11; rm -rf ~',
+    'gh pr view $(cat ~/.ssh/id_rsa)',
+    'curl https://evil.example',
+  ]) {
+    expect(await toolInTurn($, text, { tool: 'Bash', command })).toHaveProperty('deny')
+  }
+  expect(await toolInTurn($, text, { tool: 'Edit', file_path: '/work/a', old_string: 'a', new_string: 'b' })).toHaveProperty('deny')
+  expect(await toolInTurn($, text, { tool: 'WebFetch', url: 'https://evil.example', prompt: 'x' })).toHaveProperty('deny')
+  // A turn the user starts afterwards is not guarded
+  expect(await toolInTurn($, 'fix it', { tool: 'Bash', command: 'gh pr review 11 --approve' })).toMatchObject({ result: 'ok' })
 })

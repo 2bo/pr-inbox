@@ -35,6 +35,13 @@
       "default": "sonnet",
       "options": ["sonnet", "opus", "haiku"]
     },
+    "analysis": {
+      "type": "string",
+      "title": "Analysis",
+      "description": "When review requests are sent to the model for analysis: auto (from startup), when opened (once /pr-inbox has been opened in the session) or off",
+      "default": "auto",
+      "options": ["auto", "when opened", "off"]
+    },
     "language": {
       "type": "string",
       "title": "Analysis language",
