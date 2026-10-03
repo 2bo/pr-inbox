@@ -1,4 +1,4 @@
 {
-  "description": "pr-inbox の hooks module",
+  "description": "pr-inbox hooks module",
   "modules": ["./register.ts"]
 }

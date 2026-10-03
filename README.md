@@ -10,11 +10,18 @@ A Claude Code mod that turns your review requests and your own pull requests int
 
 Tested with Claude Code v2.1.288. Mods need v2.1.287 or later.
 
-## Usage
+## Install
 
-```bash
-claude --plugin-dir ~/mods/pr-inbox
+In Claude Code:
+
 ```
+/plugin marketplace add 2bo/pr-inbox
+/plugin install pr-inbox@pr-inbox
+```
+
+Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin install pr-inbox@pr-inbox`.
+
+## Usage
 
 | Key | Action |
 | :- | :- |
@@ -72,7 +79,7 @@ The analysis calls the model once per PR, on your plan. Results are stored with 
 
 ```bash
 pnpm install
-claude --plugin-dir .   # loading once writes the type declarations to .claude-plugin/types/ (needed by typecheck)
+claude --plugin-dir .   # run the working copy; loading once also writes the type declarations to .claude-plugin/types/ (needed by typecheck)
 pnpm run check          # validate (--strict) → tsc → Biome → claude plugin test
 ```
 

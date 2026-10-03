@@ -1,0 +1,14 @@
+{
+  "name": "pr-inbox",
+  "description": "pr-inbox, a Claude Code mod that turns your review requests and your own PRs into an inbox",
+  "owner": {
+    "name": "2bo"
+  },
+  "plugins": [
+    {
+      "name": "pr-inbox",
+      "source": "./",
+      "description": "An inbox for review requests and your own PRs, with AI summary, risk and release impact"
+    }
+  ]
+}
