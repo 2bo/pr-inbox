@@ -1,39 +1,45 @@
 {
   "name": "pr-inbox",
   "version": "0.1.0",
-  "description": "レビュー依頼 (依頼からの経過順・要約と危険性つき) と自分の PR を「次にやること」順に並べ、解説依頼や approve まで行う受信箱",
+  "description": "An inbox for review requests (oldest first, with AI summary, risk and release impact) and your own PRs (what needs action first), with explain and approve from the pane",
   "author": {
     "name": "2bo"
   },
   "userConfig": {
     "org_filter": {
       "type": "string",
-      "title": "対象 org",
-      "description": "空なら全部。my-org のように指定するとその org の PR だけを対象にする",
+      "title": "Organization",
+      "description": "Only show PRs in this GitHub organization, such as my-org. Leave empty for all",
       "default": ""
     },
     "stale_days": {
       "type": "number",
-      "title": "放置とみなす日数",
-      "description": "この日数以上更新のない自分の PR は「放置」に折りたたむ",
+      "title": "Stale after (days)",
+      "description": "Your PRs not updated for this many days are folded under Stale",
       "default": 30,
       "min": 1,
       "max": 365
     },
     "refresh_minutes": {
       "type": "number",
-      "title": "自動更新の間隔 (分)",
-      "description": "GitHub に問い合わせる間隔",
+      "title": "Refresh interval (minutes)",
+      "description": "How often to fetch PRs from GitHub",
       "default": 5,
       "min": 1,
       "max": 60
     },
     "summary_model": {
       "type": "string",
-      "title": "要約・危険性判定のモデル",
-      "description": "レビュー依頼の PR を要約し危険性を判定するモデル。PR が新しく来たときと更新されたときに呼ぶ",
+      "title": "Analysis model",
+      "description": "The model that summarizes review requests and judges risk and release impact. Called when a PR arrives or is updated",
       "default": "sonnet",
       "options": ["sonnet", "opus", "haiku"]
+    },
+    "language": {
+      "type": "string",
+      "title": "Analysis language",
+      "description": "Language for the AI summary, risk and release impact. auto follows Claude Code's language setting, then LANG. Or a language name such as English or Japanese",
+      "default": "auto"
     }
   }
 }

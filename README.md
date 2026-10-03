@@ -1,67 +1,79 @@
 # pr-inbox
 
-レビュー依頼と自分の PR を「次にやること」順に並べる Claude Code の mod。
+A Claude Code mod that turns your review requests and your own pull requests into an inbox, ordered by what needs you next.
 
-- プロンプトの下に件数を常時表示する (`👀 レビュー 0 (+bot 2) · ⚠ 高リスク 1 · 🔴 要対応 2 · ✅ マージ可 0 · ⏳ 待ち 9`)
-- `/pr-inbox` でペインを開く
-  - **レビュー依頼**: 依頼から時間が経っている順。PR ごとに要約・危険性 (低/中/高)・リリース時の影響 (あり/なし/判定不能、フィーチャーフラグを考慮) を自動で付ける
-  - **自分の PR**: 要対応 (変更依頼・CI 失敗・コンフリクト) → マージ可 → レビュー待ち → 放置 の順
-- 新しいレビュー依頼や、自分の PR の承認・変更依頼・CI 失敗をトーストで知らせる
+- A status line under the prompt keeps the counts in view (`👀 To review 0 (+2 bot) · ⚠ High risk 1 · 🔴 Needs action 2 · ✅ Ready 0 · ⏳ Waiting 9`)
+- `/pr-inbox` opens a pane with two tabs
+  - **To review**: review requests, the longest-waiting first. Each PR gets an AI summary, a risk level (low / medium / high) and its impact on release (visible to users / not visible / cannot tell), taking feature flags into account
+  - **My PRs**: needs action (changes requested, CI failed, conflict) → ready to merge → waiting for review → stale. Failed CI checks are listed with links to their runs
+- A toast tells you about new review requests, and when your PRs are approved, get changes requested or fail CI
 
-動作確認した Claude Code: v2.1.288 (mods は v2.1.287 以降が必要)
+Tested with Claude Code v2.1.288. Mods need v2.1.287 or later.
 
-## 使い方
+## Usage
 
 ```bash
 claude --plugin-dir ~/mods/pr-inbox
 ```
 
-| キー | 操作 |
+| Key | Action |
 | :- | :- |
-| `1` / `2` | レビュー依頼 / 自分の PR |
-| `j` / `k` | 次 / 前の PR を選ぶ |
-| `e` | Claude に解説 (自分の PR なら対応方法の相談) を依頼する |
-| `a` | approve する (確認ダイアログで「Approve する」を選んだときだけ実行) |
-| `o` | ブラウザで開く |
-| `b` / `s` | bot の PR / 放置中の PR を表示・畳む |
-| `r` | 再取得 |
-| `Esc` | 閉じる |
+| `1` / `2` | To review / My PRs |
+| `j` / `k` | Select the next / previous PR |
+| `e` | Ask Claude to explain the PR (for your own PR, to diagnose what blocks it) |
+| `a` | Approve (runs only after you choose **Approve** in the confirmation dialog) |
+| `o` | Open in the browser |
+| `b` / `s` | Show or hide bot PRs / stale PRs |
+| `r` | Fetch again |
+| `Esc` | Close the pane |
 
-`/pr-inbox refresh` はペインを開かずに再取得して件数を表示する。
+PR numbers and failed checks are hyperlinks: Cmd+click them in a terminal that supports hyperlinks.
 
-## 必要なもの
+`/pr-inbox refresh` fetches again and prints the counts without opening the pane.
 
-- [GitHub CLI](https://cli.github.com/) (`gh auth login` 済み)。PR の取得・diff・approve はすべて `gh` で行う
+## Requirements
 
-## 設定
+- [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`. The mod fetches, diffs and approves PRs through `gh`, as the account `gh` is signed in to
 
-`/config` (または `/plugin configure`) で変えられる。
+## Settings
 
-| 項目 | 既定値 | 内容 |
+Change them with `/config` or `/plugin configure`.
+
+| Setting | Default | What it does |
 | :- | :- | :- |
-| `org_filter` | (空) | 指定するとその org の PR だけを対象にする |
-| `stale_days` | 30 | この日数以上更新のない自分の PR を「放置」に畳む |
-| `refresh_minutes` | 5 | GitHub に問い合わせる間隔 |
-| `summary_model` | sonnet | レビュー依頼の要約・危険性・影響を判定するモデル |
+| `org_filter` | (empty) | Only show PRs in this GitHub organization |
+| `stale_days` | 30 | Fold your PRs not updated for this many days under Stale |
+| `refresh_minutes` | 5 | How often to fetch from GitHub |
+| `summary_model` | sonnet | The model that writes the summary, risk and release impact |
+| `language` | auto | The language of the AI summary, risk and release impact |
 
-要約と判定は PR ごとに 1 回モデルを呼ぶ (利用者のプランを使う)。結果は PR の更新日時と一緒に保存し、PR が更新されたときだけ作り直す。
+The menus are in English. The AI analysis and its labels follow `language`:
 
-## セキュリティと注意
+1. `language` set to anything other than `auto`, such as `English` or `Japanese`
+2. Otherwise Claude Code's [`language`](https://code.claude.com/docs/en/settings-reference#language) setting
+3. Otherwise the terminal locale (`LC_ALL`, `LC_MESSAGES`, then `LANG`)
+4. Otherwise English
 
-- **PR の中身は信用できない入力として扱う。** 誰でも PR を作ってレビューを依頼できるため、タイトル・本文・diff にモデルへの指示が仕込まれていることがある
-  - 要約と判定のモデル呼び出しはツールを持たず、文字列を返すだけ。PR 内の指示に従わないよう指示している
-  - `e` で Claude に解説を頼むときは、PR 内の指示に従わないこと、`gh` の読み取り以外 (コマンド実行・ファイル変更・push・approve・コメント投稿) をしないことを依頼文に毎回含める。それでも Claude はセッションの権限で動くので、権限モードは普段どおり慎重に
-- **判定は目安。** 危険性や影響の判定を根拠に approve しないこと。approve は確認ダイアログで「Approve する」を選んだときだけ実行する
-- **画面に出す文字列は無害化する。** PR のタイトル・作者名・モデルの出力から、端末の制御シーケンス、制御文字、表示順を入れ替える双方向制御文字を取り除いてから表示する
-- **コードの送り先。** レビュー依頼の PR の diff (先頭 30,000 文字) は、要約のために利用者自身の Claude に送られる。業務のコードで使うときは所属組織の利用ルールに従うこと
-- **権限。** GitHub へのアクセスはすべて `gh` に任せ、この mod はトークンを持たない。コマンドはシェルを通さず引数の配列で実行する
+The labels are in Japanese when the language is Japanese, and in English otherwise. The analysis itself is written in whatever language is chosen.
 
-## 開発
+The analysis calls the model once per PR, on your plan. Results are stored with the PR's update time and language, and are redone only when the PR changes or the language does.
+
+## Security
+
+- **PR content is untrusted input.** Anyone can open a PR and request your review, so the title, body and diff may carry instructions aimed at the model
+  - The analysis call has no tools and only returns text. It is told not to follow instructions in the PR
+  - When you press `e`, the request to Claude always says not to follow instructions in the PR and to use only read-only `gh` commands: no other commands, file changes, pushes, approvals or comments. Claude still runs with your session's permissions, so keep your permission mode as careful as usual
+- **The analysis is a hint.** Do not approve on the strength of the risk or impact judgment. Approve runs only after you choose **Approve** in the confirmation dialog
+- **Displayed text is sanitized.** Terminal escape sequences, control characters and bidirectional override characters are stripped from PR titles, author names, check names and model output before they are drawn
+- **Where your code goes.** The diff of each review request (its first 30,000 characters) is sent to your own Claude for analysis. Follow your organization's rules when you use it on work code
+- **Access.** All GitHub access goes through `gh`; the mod holds no token. Commands run as argument lists, without a shell
+
+## Development
 
 ```bash
 pnpm install
-claude --plugin-dir .   # 一度読み込むと .claude-plugin/types/ に型定義が生成される (typecheck に必要)
+claude --plugin-dir .   # loading once writes the type declarations to .claude-plugin/types/ (needed by typecheck)
 pnpm run check          # validate (--strict) → tsc → Biome → claude plugin test
 ```
 
-テストは `tests/*.test.ts`。GitHub・モデル・store はすべて stub に差し替えるので、ネットワークに出ない。
+Tests live in `tests/*.test.ts`. GitHub, the model, the store and the environment are all stubbed, so tests make no network calls.
