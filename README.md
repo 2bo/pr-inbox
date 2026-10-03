@@ -70,8 +70,8 @@ The analysis calls the model once per PR, on your plan. Results are stored with 
 - **PR content is untrusted input.** Anyone can open a PR and request your review, so the title, body and diff may carry instructions aimed at the model
   - The analysis call has no tools and only returns text. It is told not to follow instructions in the PR
   - When you press `e`, the request to Claude always says not to follow instructions in the PR and to use only read-only `gh` commands: no other commands, file changes, pushes, approvals or comments. Claude still runs with your session's permissions, so keep your permission mode as careful as usual
-- **The analysis is a hint.** Do not approve on the strength of the risk or impact judgment. Approve runs only after you choose **Approve** in the confirmation dialog
-- **Displayed text is sanitized.** Terminal escape sequences, control characters and bidirectional override characters are stripped from PR titles, author names, check names and model output before they are drawn
+- **The analysis is a hint.** Do not approve on the strength of the risk or impact judgment. Approve runs only after you choose **Approve** in the confirmation dialog, which names the commit on screen. The approval is pinned to that commit, and it is refused if the PR got new commits in the meantime
+- **Displayed text is sanitized.** Terminal escape sequences, control characters, bidirectional override characters and invisible characters are stripped from PR titles, author names, check names and model output before they are drawn
 - **Where your code goes.** The diff of each review request (its first 30,000 characters) is sent to your own Claude for analysis. Follow your organization's rules when you use it on work code
 - **Access.** All GitHub access goes through `gh`; the mod holds no token. Commands run as argument lists, without a shell
 

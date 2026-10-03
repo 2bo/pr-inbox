@@ -15,6 +15,7 @@ type PR = {
   isDraft: boolean
   createdAt: string
   updatedAt: string
+  headRefOid: string
   additions: number
   deletions: number
   repository: { nameWithOwner: string }
@@ -45,9 +46,21 @@ type Risk = 'low' | 'medium' | 'high'
 type Impact = 'yes' | 'no' | 'unknown'
 
 // A PR's summary, risk and release impact. Stored in $.store with the PR's updatedAt and redone when the PR is updated
-type Analysis =
-  | { v: number; lang: string; updatedAt: string; summary: string; risk: Risk; reason: string; impact: Impact; impactDetail: string }
-  | { updatedAt: string; failed: string }
+type Done = {
+  v: number
+  lang: string
+  updatedAt: string
+  summary: string
+  risk: Risk
+  reason: string
+  impact: Impact
+  impactDetail: string
+}
+
+// A failed analysis. Retried with backoff, and given up after MAX_ATTEMPTS until the PR is updated
+type Failed = { updatedAt: string; failed: string; attempts: number; retryAt: number }
+
+type Analysis = Done | Failed
 
 // Bump when the analysis changes; stored analyses from older versions are redone
 const ANALYSIS_VERSION = 3
@@ -89,6 +102,11 @@ const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 const DIFF_LIMIT = 30_000
+// Retry a failed analysis after 15 minutes, doubling each time, and stop after MAX_ATTEMPTS
+const RETRY_BASE = 15 * MINUTE
+const MAX_ATTEMPTS = 4
+// At most this many analyses start in any hour, so a flood of PRs or pushes cannot drain the plan
+const MAX_ANALYSES_PER_HOUR = 30
 // Indent for the summary and detail lines
 const INDENT = 6
 
@@ -98,7 +116,7 @@ const QUERY = `query($review: String!, $mine: String!) {
   mine: search(query: $mine, type: ISSUE, first: 50) { nodes { ...pr ...checks } }
 }
 fragment pr on PullRequest {
-  number title url isDraft createdAt updatedAt additions deletions
+  number title url isDraft createdAt updatedAt headRefOid additions deletions
   repository { nameWithOwner }
   author { login __typename }
   reviewDecision mergeable
@@ -187,6 +205,8 @@ const analyses = new Map<string, Analysis>()
 const pending = new Set<string>()
 const analysisQueue: PR[] = []
 let workers = 0
+// When recent analyses started (for MAX_ANALYSES_PER_HOUR)
+let started: number[] = []
 
 // Rows that fit in the pane, learned from bodyRows when a render overflows (Infinity until then)
 let paneLimit = Number.POSITIVE_INFINITY
@@ -200,20 +220,40 @@ function messageOf(err: unknown): string {
 }
 
 // Make a string from GitHub or the model safe to draw.
-// Strips terminal control sequences (ESC and friends), C1 control characters and bidirectional
-// override characters (Trojan Source), and turns newlines and tabs into spaces
+// Strips terminal control sequences (ESC and friends), C1 control characters, bidirectional
+// override characters (Trojan Source) and invisible characters, and turns newlines and tabs into spaces
 function clean(text: string): string {
   return (
     text
       // Drop whole control sequences: CSI (ESC [ ... final), OSC (ESC ] ... BEL or ESC \\), and any other ESC + one char
       // biome-ignore lint/suspicious/noControlCharactersInRegex: this regex exists to strip control sequences
       .replace(/\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|\u001b[@-_]?|\u009b[0-?]*[ -/]*[@-~]/g, '')
-      .replace(/[\t\n\r\v\f]+/g, ' ')
+      .replace(/[\t\n\r\v\f\u2028\u2029]+/g, ' ')
       // Remove the remaining control characters and bidirectional override characters
       // biome-ignore lint/suspicious/noControlCharactersInRegex: this regex exists to strip control characters
       .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
+      .replace(INVISIBLE, '')
+      // Cap runs of combining marks so they cannot pile up over other rows
+      .replace(/(\p{M}{3})\p{M}+/gu, '$1')
       .trim()
   )
+}
+
+// Zero-width and filler characters, and Unicode tag characters (invisible text a model can still read)
+const INVISIBLE = /[\u180e\u200b-\u200d\u2060-\u2064\ufeff\u115f\u1160\u3164]|[\u{e0000}-\u{e007f}]/gu
+const TAGS = /[\u{e0000}-\u{e007f}]/gu
+
+// Link targets must be https and in the canonical form Link accepts (printable ASCII, as new URL() writes it);
+// anything else would make the whole pane refuse to render. Returns undefined when the URL cannot be a link
+function safeHref(url: string | null | undefined): string | undefined {
+  if (!url) return undefined
+  try {
+    const u = new URL(url)
+    if (u.protocol !== 'https:' || u.username || u.password) return undefined
+    return u.href.length <= 2048 && /^[\x21-\x7e]+$/.test(u.href) ? u.href : undefined
+  } catch {
+    return undefined
+  }
 }
 
 // Sanitize every string of a PR that gets drawn
@@ -221,6 +261,7 @@ function cleanPr(pr: PR): PR {
   return {
     ...pr,
     title: clean(pr.title),
+    headRefOid: typeof pr.headRefOid === 'string' ? pr.headRefOid : '',
     author: pr.author ? { ...pr.author, login: clean(pr.author.login) } : null,
     repository: { nameWithOwner: clean(pr.repository.nameWithOwner) },
   }
@@ -320,8 +361,8 @@ function failedChecks(pr: PR): { name: string; url?: string }[] {
       url = c.targetUrl
     }
     if (name === undefined) continue
-    // Only https URLs become links
-    out.push({ name: clean(name) || '(unnamed)', ...(url && /^https:\/\//.test(url) ? { url } : {}) })
+    const href = safeHref(url)
+    out.push({ name: clean(name) || '(unnamed)', ...(href ? { url: href } : {}) })
   }
   return out
 }
@@ -389,9 +430,13 @@ function moveSelection(rows: PR[], delta: number): void {
 
 // ---- GitHub ----
 
+// A GitHub organization name, so the setting cannot add other search qualifiers
+const ORG_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
+
 function searchQuery(filter: string): string {
-  const org = cfg.org_filter.trim() ? ` org:${cfg.org_filter.trim()}` : ''
-  return `is:pr is:open archived:false ${filter}${org}`
+  const org = cfg.org_filter.trim()
+  if (org && !ORG_NAME.test(org)) throw new Error(`org_filter is not an organization name: ${org}`)
+  return `is:pr is:open archived:false ${filter}${org ? ` org:${org}` : ''}`
 }
 
 // Called during a fetch, wait for that fetch instead of starting another
@@ -406,6 +451,8 @@ async function fetchAll($: EngineInterface): Promise<void> {
   loading = true
   $.ui.invalidate('ui.render')
   try {
+    const reviewQuery = searchQuery('review-requested:@me')
+    const mineQuery = searchQuery('author:@me')
     const r = await $.process.run([
       'gh',
       'api',
@@ -413,9 +460,9 @@ async function fetchAll($: EngineInterface): Promise<void> {
       '-f',
       `query=${QUERY}`,
       '-f',
-      `review=${searchQuery('review-requested:@me')}`,
+      `review=${reviewQuery}`,
       '-f',
-      `mine=${searchQuery('author:@me')}`,
+      `mine=${mineQuery}`,
     ])
     if (r.exitCode !== 0) throw new Error(r.stderr.trim() || `gh exited with code ${r.exitCode}`)
     const data = JSON.parse(r.stdout).data as {
@@ -483,13 +530,21 @@ async function scheduleAnalyses($: EngineInterface): Promise<void> {
   }
   for (const url of [...analyses.keys()]) if (!open.has(url)) analyses.delete(url)
 
+  const now = await $.clock.now()
+  started = started.filter((t) => now - t < HOUR)
   for (const pr of review) {
-    if (isCurrent(analyses.get(pr.url), pr) || pending.has(pr.url)) continue
-    const stored = (await $.store.get(`analysis:${pr.url}`)) as Analysis | undefined
-    if (stored && isCurrent(stored, pr)) {
-      analyses.set(pr.url, stored)
-      continue
+    if (pending.has(pr.url)) continue
+    let known = analyses.get(pr.url)
+    if (!isCurrent(known, pr) && !isWaiting(known, pr, now)) {
+      const stored = asAnalysis(await $.store.get(`analysis:${pr.url}`))
+      if (stored && (isCurrent(stored, pr) || isWaiting(stored, pr, now))) {
+        analyses.set(pr.url, stored)
+        known = stored
+      }
     }
+    if (isCurrent(known, pr) || isWaiting(known, pr, now)) continue
+    // Over the hourly budget: leave it for a later fetch
+    if (started.length + analysisQueue.length >= MAX_ANALYSES_PER_HOUR) break
     pending.add(pr.url)
     analysisQueue.push(pr)
   }
@@ -505,6 +560,7 @@ async function scheduleAnalyses($: EngineInterface): Promise<void> {
 async function runAnalysisWorker($: EngineInterface): Promise<void> {
   try {
     for (let pr = analysisQueue.shift(); pr; pr = analysisQueue.shift()) {
+      started.push(await $.clock.now())
       await analyze($, pr)
       pending.delete(pr.url)
       showStatus($)
@@ -515,11 +571,14 @@ async function runAnalysisWorker($: EngineInterface): Promise<void> {
   }
 }
 
+const RISKS: readonly unknown[] = ['low', 'medium', 'high']
+const IMPACTS: readonly unknown[] = ['yes', 'no', 'unknown']
+
 function parseAnalysis(text: string, updatedAt: string, lang: string): Analysis {
   const json = text.match(/\{[\s\S]*\}/)?.[0]
   if (!json) throw new Error('the model did not return JSON')
   const v = JSON.parse(json) as { summary?: unknown; risk?: unknown; reason?: unknown; impact?: unknown; impact_detail?: unknown }
-  const risk = v.risk === 'low' || v.risk === 'medium' || v.risk === 'high' ? v.risk : undefined
+  const risk = RISKS.includes(v.risk) ? (v.risk as Risk) : undefined
   if (typeof v.summary !== 'string' || !risk) throw new Error('the JSON from the model has an unexpected shape')
   const impact = v.impact === 'yes' || v.impact === 'no' ? v.impact : 'unknown'
   const text_ = (x: unknown) => (typeof x === 'string' ? clean(x) : '')
@@ -535,8 +594,31 @@ function parseAnalysis(text: string, updatedAt: string, lang: string): Analysis 
   }
 }
 
+// Check the shape of a stored analysis before trusting it, and sanitize its strings again
+function asAnalysis(x: unknown): Analysis | undefined {
+  if (!x || typeof x !== 'object') return undefined
+  const a = x as Record<string, unknown>
+  const str = (k: string) => (typeof a[k] === 'string' ? clean(a[k] as string) : undefined)
+  const updatedAt = str('updatedAt')
+  if (updatedAt === undefined) return undefined
+  if (typeof a.failed === 'string') {
+    if (typeof a.attempts !== 'number' || typeof a.retryAt !== 'number') return undefined
+    return { updatedAt, failed: clean(a.failed), attempts: a.attempts, retryAt: a.retryAt }
+  }
+  const [lang, summary, reason, impactDetail] = [str('lang'), str('summary'), str('reason'), str('impactDetail')]
+  if (typeof a.v !== 'number' || lang === undefined || summary === undefined || reason === undefined || impactDetail === undefined)
+    return undefined
+  if (!RISKS.includes(a.risk) || !IMPACTS.includes(a.impact)) return undefined
+  return { v: a.v, lang, updatedAt, summary, risk: a.risk as Risk, reason, impact: a.impact as Impact, impactDetail }
+}
+
 function isCurrent(a: Analysis | undefined, pr: PR): boolean {
   return a !== undefined && 'v' in a && a.v === ANALYSIS_VERSION && a.lang === language && a.updatedAt === pr.updatedAt
+}
+
+// A failure for this version of the PR that is not due for a retry yet (or has run out of attempts)
+function isWaiting(a: Analysis | undefined, pr: PR, now: number): boolean {
+  return a !== undefined && 'failed' in a && a.updatedAt === pr.updatedAt && (a.attempts >= MAX_ATTEMPTS || now < a.retryAt)
 }
 
 async function analyze($: EngineInterface, pr: PR): Promise<void> {
@@ -545,6 +627,7 @@ async function analyze($: EngineInterface, pr: PR): Promise<void> {
     const diff = await $.process.run(['gh', 'pr', 'diff', pr.url])
     const diffText = diff.exitCode === 0 ? diff.stdout : `(could not get the diff: ${diff.stderr.trim()})`
     const truncated = diffText.length > DIFF_LIMIT
+    // Unicode tag characters are invisible to people but readable by the model: drop them
     const prompt = [
       `PR: ${pr.repository.nameWithOwner}#${pr.number} by ${pr.author?.login ?? '?'}`,
       `Size: +${pr.additions} -${pr.deletions}`,
@@ -552,7 +635,9 @@ async function analyze($: EngineInterface, pr: PR): Promise<void> {
       view.stdout.slice(0, 8000),
       truncated ? `--- diff (first ${DIFF_LIMIT} characters only; the rest is not shown) ---` : '--- diff ---',
       diffText.slice(0, DIFF_LIMIT),
-    ].join('\n')
+    ]
+      .join('\n')
+      .replace(TAGS, '')
     // Give up after 90 seconds
     const stop = new AbortController()
     const timer = $.clock.after(90_000, () => stop.abort())
@@ -568,17 +653,30 @@ async function analyze($: EngineInterface, pr: PR): Promise<void> {
     analyses.set(pr.url, a)
     await $.store.set(`analysis:${pr.url}`, a)
   } catch (err) {
-    // Failures are not stored (retried on the next fetch)
-    analyses.set(pr.url, { updatedAt: pr.updatedAt, failed: messageOf(err) })
+    // Store the failure so the next fetches (and the next session) back off instead of retrying at once
+    const prev = analyses.get(pr.url)
+    const attempts = prev && 'failed' in prev && prev.updatedAt === pr.updatedAt ? prev.attempts + 1 : 1
+    const retryAt = (await $.clock.now()) + Math.min(DAY, RETRY_BASE * 2 ** (attempts - 1))
+    const failed: Failed = { updatedAt: pr.updatedAt, failed: messageOf(err), attempts, retryAt }
+    analyses.set(pr.url, failed)
+    await $.store.set(`analysis:${pr.url}`, failed)
   }
 }
 
 // ---- Actions ----
 
+const REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+
+// Approve the commit that was on screen. The dialog names that commit; right before approving, the head is read
+// again and the approval is refused if new commits arrived, and the review is pinned to that commit
 async function approve($: EngineInterface, pr: PR): Promise<void> {
+  const sha = pr.headRefOid.slice(0, 7)
+  const a = analysisOf(pr)
+  const outdated = !a || 'failed' in a || a.updatedAt !== pr.updatedAt ? ' The analysis does not cover the latest update.' : ''
+  const title = fit(pr.title.replace(/["“”]/g, "'"), 80)
   let answer: string
   try {
-    answer = await $.ui.ask(`Approve ${pr.repository.nameWithOwner}#${pr.number} "${pr.title}"?`, {
+    answer = await $.ui.ask(`Approve ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (“${title}”)?${outdated}`, {
       options: ['Approve', 'Cancel'],
       header: 'Approve',
     })
@@ -587,12 +685,43 @@ async function approve($: EngineInterface, pr: PR): Promise<void> {
     return
   }
   if (answer !== 'Approve') return
-  const r = await $.process.run(['gh', 'pr', 'review', pr.url, '--approve'])
+  const fail = (why: string) => $.ui.toast(`Approve failed: ${fit(clean(why), 80)}`, { timeoutMs: 8000 })
+  if (!REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) {
+    fail('unexpected repository name or commit id')
+    return
+  }
+  const now = await $.process.run(['gh', 'pr', 'view', pr.url, '--json', 'headRefOid'])
+  let head = ''
+  try {
+    head = (JSON.parse(now.stdout) as { headRefOid?: string }).headRefOid ?? ''
+  } catch {
+    // handled below
+  }
+  if (now.exitCode !== 0 || !head) {
+    fail(now.stderr || 'could not read the PR head')
+    return
+  }
+  if (head !== pr.headRefOid) {
+    $.ui.toast(`Not approved: #${pr.number} has new commits since ${sha}. Review them first`, { timeoutMs: 8000 })
+    await refresh($)
+    return
+  }
+  const r = await $.process.run([
+    'gh',
+    'api',
+    '-X',
+    'POST',
+    `repos/${pr.repository.nameWithOwner}/pulls/${pr.number}/reviews`,
+    '-f',
+    'event=APPROVE',
+    '-f',
+    `commit_id=${pr.headRefOid}`,
+  ])
   if (r.exitCode === 0) {
-    $.ui.toast(`✅ Approved #${pr.number}`)
+    $.ui.toast(`✅ Approved #${pr.number} at ${sha}`)
     await refresh($)
   } else {
-    $.ui.toast(`Approve failed: ${fit(clean(r.stderr), 80)}`, { timeoutMs: 8000 })
+    fail(r.stderr)
   }
 }
 
@@ -823,16 +952,18 @@ export function register(on: On, options: PluginOptions) {
       // Title row: selection marker and icon, PR number as a link (Cmd+click opens GitHub), title
       const prefix = `${isSelected ? '▶' : ' '} ${icon(p)} `
       const label = `${repo}#${p.number}`
+      const prLink = safeHref(p.url)
       const title = ` ${p.isDraft ? '[draft] ' : ''}${p.title}`
       const children: El[] = [
         Box({
           flexDirection: 'row',
           children: [
             Text({ inverse: isSelected, bold: isSelected, children: [prefix] }),
-            link(p.url, label, isSelected),
+            prLink ? link(prLink, label, isSelected) : Text({ inverse: isSelected, bold: isSelected, children: [label] }),
             Text({
               inverse: isSelected,
               bold: isSelected,
+              wrap: 'truncate-end',
               children: [fit(title, Math.max(10, columns - textWidth(prefix) - textWidth(label)))],
             }),
           ],
