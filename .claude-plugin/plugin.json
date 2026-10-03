@@ -1,0 +1,39 @@
+{
+  "name": "pr-inbox",
+  "version": "0.1.0",
+  "description": "レビュー依頼 (依頼からの経過順・要約と危険性つき) と自分の PR を「次にやること」順に並べ、解説依頼や approve まで行う受信箱",
+  "author": {
+    "name": "2bo"
+  },
+  "userConfig": {
+    "org_filter": {
+      "type": "string",
+      "title": "対象 org",
+      "description": "空なら全部。my-org のように指定するとその org の PR だけを対象にする",
+      "default": ""
+    },
+    "stale_days": {
+      "type": "number",
+      "title": "放置とみなす日数",
+      "description": "この日数以上更新のない自分の PR は「放置」に折りたたむ",
+      "default": 30,
+      "min": 1,
+      "max": 365
+    },
+    "refresh_minutes": {
+      "type": "number",
+      "title": "自動更新の間隔 (分)",
+      "description": "GitHub に問い合わせる間隔",
+      "default": 5,
+      "min": 1,
+      "max": 60
+    },
+    "summary_model": {
+      "type": "string",
+      "title": "要約・危険性判定のモデル",
+      "description": "レビュー依頼の PR を要約し危険性を判定するモデル。PR が新しく来たときと更新されたときに呼ぶ",
+      "default": "sonnet",
+      "options": ["sonnet", "opus", "haiku"]
+    }
+  }
+}

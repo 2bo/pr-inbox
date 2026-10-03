@@ -1,0 +1,18 @@
+{
+  "name": "pr-inbox-dev",
+  "private": true,
+  "type": "module",
+  "description": "pr-inbox mod の開発用ツール。mod 自体は Claude Code が .ts を直接読むので、実行に Node もビルドも要らない",
+  "scripts": {
+    "validate": "claude plugin validate --strict .",
+    "typecheck": "tsc -p . --noEmit",
+    "lint": "biome check",
+    "lint:fix": "biome check --write",
+    "test": "claude plugin test",
+    "check": "pnpm run validate && pnpm run typecheck && pnpm run lint && pnpm run test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14",
+    "typescript": "^5.9.0"
+  }
+}

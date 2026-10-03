@@ -1,0 +1,3 @@
+node_modules/
+# Claude Code が版ごとに書き出す型定義 (claude --plugin-dir で読み込むと生成される)
+.claude-plugin/types/
