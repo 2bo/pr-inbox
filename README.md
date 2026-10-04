@@ -8,7 +8,7 @@ A Claude Code mod that turns your review requests and your own pull requests int
   - **My PRs**: needs action (changes requested, CI failed, conflict) → ready to merge → waiting for review → stale. Failed CI checks are listed with links to their runs
 - A toast tells you about new review requests, and when your PRs are approved, get changes requested or fail CI. New review requests also raise an OS notification (macOS and Linux), so you see them outside Claude Code too
 
-![The To review tab: each review request with an AI summary, risk level and release impact](docs/screenshot.png)
+![The To review tab: one line per review request with its risk, wait and CI, and the selected PR's summary and release impact below](docs/screenshot.png)
 
 Tested with Claude Code v2.1.288. Mods need v2.1.287 or later.
 
