@@ -285,6 +285,11 @@ let tab: 'review' | 'mine' = 'review'
 let showBots = false
 // The PR whose details (the AI review's findings) are open, the key help, and snoozed PRs shown
 let expanded = ''
+// The filter typed after f (matched against repository, number, title and author), and whether its field is open
+let filterText = ''
+let filtering = false
+// Reviewing every bot PR in turn (w): progress, and a stop request
+let botBatch: { total: number; done: number; current: string; stop: boolean } | undefined
 let showHelp = false
 let showSnoozed = false
 // Snoozed PRs, hidden until they are updated, and the update each PR was last seen at (url → updatedAt), kept in $.store
@@ -441,9 +446,14 @@ function isHighRisk(pr: PR): boolean {
 
 function summary(g: Record<Group, PR[]>): string {
   const high = review.filter(isHighRisk).length
+  // The AI review: running now, and passed at the current commit but not approved yet
+  const reviewing = [...reviews.values()].filter((r) => r.state === 'running').length
+  const passed = review.filter((p) => reviewOfHead(p)?.state === 'passed').length
   return (
     `👀 To review ${g.humans.length} (+${g.bots.length} bot)` +
     (high > 0 ? ` · ⚠ High risk ${high}` : '') +
+    (reviewing > 0 ? ` · 🤖 AI reviewing ${reviewing}${botBatch ? ` (bots ${botBatch.done}/${botBatch.total})` : ''}` : '') +
+    (passed > 0 ? ` · ☑ AI passed, not approved ${passed}` : '') +
     ` · 🔴 Needs action ${g.action.length} · ✅ Ready ${g.ready.length} · ⏳ Waiting ${g.waiting.length}`
   )
 }
@@ -553,8 +563,19 @@ function findPr(url: string): PR | undefined {
 
 // PRs visible on the current tab, in screen order (what j/k move through)
 function visibleRows(g: Record<Group, PR[]>): PR[] {
-  if (tab === 'review') return [...g.humans, ...(showBots ? g.bots : []), ...(showSnoozed ? g.snoozedReview : [])]
-  return [...g.action, ...g.ready, ...g.waiting, ...(showStale ? g.stale : []), ...(showSnoozed ? g.snoozedMine : [])]
+  const rows =
+    tab === 'review'
+      ? [...g.humans, ...(showBots ? g.bots : []), ...(showSnoozed ? g.snoozedReview : [])]
+      : [...g.action, ...g.ready, ...g.waiting, ...(showStale ? g.stale : []), ...(showSnoozed ? g.snoozedMine : [])]
+  return rows.filter(matchesFilter)
+}
+
+// Every word of the filter must appear in the PR's repository, number, title or author
+function matchesFilter(pr: PR): boolean {
+  const words = filterText.toLowerCase().split(/\s+/).filter(Boolean)
+  if (words.length === 0) return true
+  const hay = `${pr.repository.nameWithOwner}#${pr.number} ${pr.title} @${pr.author?.login ?? ''}`.toLowerCase()
+  return words.every((w) => hay.includes(w))
 }
 
 // If the selection is not visible, select the first PR
@@ -1776,7 +1797,10 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
   const run = newRun(pr)
   run.strict = approvesWithoutAsking(pr)
   reviews.set(pr.url, run)
-  const redraw = () => $.ui.invalidate('ui.render')
+  const redraw = () => {
+    showStatus($)
+    $.ui.invalidate('ui.render')
+  }
   const cancelled = () => run.stop.signal.aborted
   const finish = async () => {
     if (cancelled()) {
@@ -1971,6 +1995,109 @@ function logReview($: EngineInterface, run: ReviewRun): void {
   for (const line of lines) $.ui.log(line)
 }
 
+// ---- Bulk review of bot PRs (w) ----
+
+// Reviews each bot PR on To review in turn, one at a time to keep the cost down. PRs already reviewed at their current
+// commit are skipped. Pressing w again stops after cancelling the running review
+async function reviewAllBots($: EngineInterface): Promise<void> {
+  if (botBatch) {
+    botBatch.stop = true
+    reviews.get(botBatch.current)?.stop.abort()
+    return
+  }
+  const targets = groups(fetchedAt || Date.now()).bots.filter((p) => !reviewOfHead(p) && reviews.get(p.url)?.state !== 'running')
+  if (targets.length === 0) {
+    $.ui.toast('Every bot PR already has an AI review of its current commit')
+    return
+  }
+  showBots = true
+  botBatch = { total: targets.length, done: 0, current: '', stop: false }
+  for (const pr of targets) {
+    if (botBatch.stop) break
+    botBatch.current = pr.url
+    selected = pr.url
+    await aiReview($, pr)
+    botBatch.done += 1
+  }
+  const outcome = (state: ReviewRun['state']) => targets.filter((p) => reviews.get(p.url)?.state === state).length
+  const stopped = botBatch.stop
+  botBatch = undefined
+  $.ui.toast(
+    `${stopped ? 'Stopped. ' : ''}Bot PRs: ${outcome('approved')} approved, ${outcome('passed')} passed but not approved, ${outcome('blocked')} blocked`,
+    { timeoutMs: 10_000 },
+  )
+  showStatus($)
+  $.ui.invalidate('ui.render')
+}
+
+// ---- My PRs: merge (m) and re-run failed CI (c) ----
+
+const MERGE_METHODS: Record<string, string> = {
+  'Squash and merge': '--squash',
+  'Create a merge commit': '--merge',
+  'Rebase and merge': '--rebase',
+}
+
+// Merges a ready PR after the person picks a method in a dialog (Cancel selected first). The merge is pinned to the
+// commit on screen: if the head moved, GitHub refuses it
+async function mergePr($: EngineInterface, pr: PR): Promise<void> {
+  const sha = pr.headRefOid.slice(0, 7)
+  if (!REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) {
+    $.ui.toast('Merge failed: unexpected repository name or commit id', { timeoutMs: 8000 })
+    return
+  }
+  const title = fit(pr.title.replace(/["“”]/g, "'"), 80)
+  let answer = ''
+  try {
+    answer = await $.ui.ask(`Merge ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (“${title}”)?`, {
+      options: ['Cancel', ...Object.keys(MERGE_METHODS)],
+      header: 'Merge',
+    })
+  } catch {
+    // The dialog was dismissed
+  }
+  await focusPane($)
+  const flag = MERGE_METHODS[answer]
+  if (!flag) return
+  const r = await $.process.run(['gh', 'pr', 'merge', pr.url, flag, '--match-head-commit', pr.headRefOid])
+  if (r.exitCode !== 0) {
+    $.ui.toast(`Merge failed: ${fit(clean(r.stderr), 80)}`, { timeoutMs: 8000 })
+    return
+  }
+  $.ui.toast(`🔀 Merged #${pr.number} (${answer.toLowerCase()})`)
+  $.ui.log(
+    `pr-inbox merged ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${answer.toLowerCase()}): you chose it in the dialog of m`,
+  )
+  await refresh($)
+}
+
+// The GitHub Actions runs behind a PR's failed checks, from their links
+function failedRuns(pr: PR): string[] {
+  const ids = failedChecks(pr).map((c) => c.url?.match(/^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/(\d+)(?:\/|$)/)?.[1])
+  return [...new Set(ids.filter((id): id is string => id !== undefined))]
+}
+
+// Re-runs only the failed jobs of those runs. Checks from other CI systems are left to their own pages
+async function rerunFailed($: EngineInterface, pr: PR): Promise<void> {
+  const runs = failedRuns(pr)
+  if (runs.length === 0) {
+    $.ui.toast(`No failed GitHub Actions run to re-run on #${pr.number}; open the check for other CI`, { timeoutMs: 8000 })
+    return
+  }
+  const failed: string[] = []
+  for (const id of runs) {
+    const r = await $.process.run(['gh', 'run', 'rerun', id, '--failed', '-R', pr.repository.nameWithOwner])
+    if (r.exitCode !== 0) failed.push(fit(clean(r.stderr), 60))
+  }
+  $.ui.toast(
+    failed.length
+      ? `Re-run failed for ${failed.length} of ${runs.length} runs: ${failed[0]}`
+      : `🔁 Re-running the failed jobs of ${plural(runs.length, 'run')} on #${pr.number}`,
+    { timeoutMs: 8000 },
+  )
+  await refresh($)
+}
+
 // ---- Language ----
 
 // Language of the AI output: the mod setting unless it is auto; otherwise Claude Code's language, then the terminal locale, then English
@@ -2047,7 +2174,10 @@ export function register(on: On, options: PluginOptions) {
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
-    const { Box, Text, Button, Link } = $.ui.resolve(e)
+    const kit = $.ui.resolve(e)
+    const { Box, Text, Button, Link } = kit
+    // A text field, where the surface has one (not on mobile)
+    const Input = 'Input' in kit ? kit.Input : undefined
     type El = ReturnType<typeof Box>
     const redraw = () => $.ui.invalidate('ui.render')
     const columns = Math.max(40, e.props.bodyColumns ?? 80)
@@ -2094,6 +2224,7 @@ export function register(on: On, options: PluginOptions) {
       `1: To review (${g.humans.length}+${g.bots.length})`,
       `2: My PRs (${mine.length})`,
       'r: Refresh',
+      `f: ${filterText ? `Filter: ${filterText}` : 'Filter'}`,
       'h: Close help',
       updated,
     ]
@@ -2108,6 +2239,10 @@ export function register(on: On, options: PluginOptions) {
           tabButton('review', `To review (${g.humans.length}+${g.bots.length})`, '1'),
           tabButton('mine', `My PRs (${mine.length})`, '2'),
           small('refresh', 'Refresh', 'r', () => refresh($)),
+          small('filter', filterText ? `Filter: ${filterText}` : 'Filter', 'f', () => {
+            filtering = !filtering
+            redraw()
+          }),
           small('help', showHelp ? 'Close help' : 'Help', 'h', () => {
             showHelp = !showHelp
             redraw()
@@ -2118,6 +2253,30 @@ export function register(on: On, options: PluginOptions) {
     ]
     if (error) {
       top.push(Text({ color: 'red', children: [fit(`Could not fetch PRs: ${error}`, columns)] }))
+      topLines += 1
+    }
+    // The filter field: narrows the list as you type; Enter keeps it and gives the keys back, an empty one clears it
+    if (filtering && Input) {
+      top.push(
+        Input({
+          key: 'filter-input',
+          label: 'Filter',
+          placeholder: 'repository, number, title or @author',
+          value: filterText,
+          submitLabel: 'done',
+          autoFocus: true,
+          onInput: (value: string) => {
+            filterText = value
+            selected = ''
+            redraw()
+          },
+          onSubmit: (value: string) => {
+            filterText = value.trim()
+            filtering = false
+            redraw()
+          },
+        }),
+      )
       topLines += 1
     }
 
@@ -2164,6 +2323,13 @@ export function register(on: On, options: PluginOptions) {
             },
           }),
         )
+      }
+      if (!isReview) {
+        const group = classify(pr, now).group
+        if (group === 'ready')
+          actions.push(Button({ key: 'act-merge', label: 'Merge…', hotkey: 'm', plain: true, onPress: () => mergePr($, pr) }))
+        if (ciState(pr) === 'FAILURE' || ciState(pr) === 'ERROR')
+          actions.push(Button({ key: 'act-rerun', label: 'Re-run failed CI', hotkey: 'c', plain: true, onPress: () => rerunFailed($, pr) }))
       }
       actions.push(
         Button({
@@ -2456,6 +2622,23 @@ export function register(on: On, options: PluginOptions) {
         }),
       )
     }
+    // AI review every bot PR in turn: those with no review of their current commit yet
+    const unreviewedBots = g.bots.filter((p) => !reviewOfHead(p) && reviews.get(p.url)?.state !== 'running').length
+    if (tab === 'review' && (unreviewedBots > 0 || botBatch)) {
+      folds.push(
+        small(
+          'review-bots',
+          botBatch
+            ? `Stop reviewing bot PRs (${botBatch.done}/${botBatch.total} done)`
+            : `AI review all ${plural(g.bots.length, 'bot PR')}`,
+          'w',
+          () => {
+            void reviewAllBots($)
+            redraw()
+          },
+        ),
+      )
+    }
     const snoozedHere = tab === 'review' ? g.snoozedReview : g.snoozedMine
     if (snoozedHere.length > 0) {
       folds.push(
@@ -2533,6 +2716,10 @@ export function register(on: On, options: PluginOptions) {
         ['v', 'AI review, then approve if it passes (v again cancels a running review)'],
         ['d', 'details: every finding of the AI review, with links to the lines'],
         ['x', 'snooze the PR until it is updated (z shows snoozed PRs)'],
+        ['w', 'AI review every bot PR in turn (w again stops)'],
+        ['m', 'merge one of your PRs that is ready, after picking a method'],
+        ['c', 're-run the failed GitHub Actions jobs of one of your PRs'],
+        ['f', 'filter by repository, number, title or @author (Enter keeps it; empty clears)'],
         ['o', 'open in the browser'],
         ['b / s', 'show or hide bot PRs / stale PRs'],
         ['r', 'fetch again'],
@@ -2549,7 +2736,14 @@ export function register(on: On, options: PluginOptions) {
 
     const list: El[] = shown.map(line)
     if (rows.length === 0) {
-      list.push(Text({ dimColor: true, children: [tab === 'review' ? '  No review requests from people' : '  No open PRs'] }))
+      list.push(
+        Text({
+          dimColor: true,
+          children: [
+            filterText ? `  No PRs match "${filterText}"` : tab === 'review' ? '  No review requests from people' : '  No open PRs',
+          ],
+        }),
+      )
     }
 
     // Approved from here in the last day: they left the list, so say where they went

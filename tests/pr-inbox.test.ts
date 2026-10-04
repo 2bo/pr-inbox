@@ -1672,3 +1672,127 @@ test('the help says how to move the focus to the pane', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /Ctrl\+X Tab {2}move between the prompt and this pane/ })).toBeDefined()
   await ui.unmount()
 })
+
+// ---- Bulk bot review, merge, re-run, filter, status line ----
+
+test('f filters the list as you type; Enter keeps it, an empty one clears it', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'filter' })
+  await ui.input({ key: 'filter-input', text: 'ログイン', kind: 'change' })
+  expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
+  expect(await ui.find({ key: `line-${HUMAN2.url}` })).toBeUndefined()
+  await ui.input({ key: 'filter-input', text: 'ログイン' })
+  expect(await ui.find({ key: 'filter-input' })).toBeUndefined()
+  expect((await ui.find({ key: 'filter' }))?.props.label).toBe('Filter: ログイン')
+  // By author and number too
+  await ui.press({ key: 'filter' })
+  await ui.input({ key: 'filter-input', text: 'app#13', kind: 'change' })
+  expect(await ui.find({ key: `line-${HUMAN2.url}` })).toBeDefined()
+  await ui.input({ key: 'filter-input', text: 'nothing-like-this', kind: 'change' })
+  expect(await ui.find({ type: 'Text', text: /No PRs match "nothing-like-this"/ })).toBeDefined()
+  await ui.input({ key: 'filter-input', text: '' })
+  expect(await ui.find({ key: `line-${HUMAN2.url}` })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the status line shows a running AI review, then one that passed and waits for approval', async ($, on) => {
+  const s = stubs(on, { answer: 'Cancel', slow: true })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-ai-review' })
+  await settleReview(s)
+  expect(s.statuses.at(-1)).toContain('🤖 AI reviewing 1')
+  for (let i = 0; i < 4; i++) {
+    await s.clock.advance(60_000)
+    await settleReview(s)
+  }
+  expect(s.statuses.at(-1)).toContain('☑ AI passed, not approved 1')
+  expect(s.statuses.at(-1)).not.toContain('AI reviewing')
+  await ui.unmount()
+})
+
+const dependabot = pr({
+  number: 14,
+  url: 'https://github.com/acme/app/pull/14',
+  title: 'Bump bar from 1.0.0 to 1.0.1',
+  author: { login: 'dependabot[bot]', __typename: 'Bot' },
+  authorAssociation: 'NONE',
+  isCrossRepository: false,
+})
+const twoBots = JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [renovate(), dependabot] }, mine: { nodes: [] } } })
+
+test('w reviews every bot PR in turn and sums up', { options: { ai_approve: 'auto' } }, async ($, on) => {
+  const s = stubs(on, { graphql: twoBots })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect((await ui.find({ key: 'review-bots' }))?.props.label).toBe('AI review all 2 bot PRs')
+  await ui.press({ key: 'review-bots' })
+  await settleReview(s)
+  await settleReview(s)
+  expect(approvedAt(s).map((c) => c[4])).toEqual(['repos/acme/app/pulls/12/reviews', 'repos/acme/app/pulls/14/reviews'])
+  expect(s.toasts.some((t) => t.includes('Bot PRs: 2 approved, 0 passed but not approved, 0 blocked'))).toBe(true)
+  // Nothing left to review: the button goes
+  expect(await ui.find({ key: 'review-bots' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('w again stops the bulk review', { options: { ai_approve: 'auto' } }, async ($, on) => {
+  const s = stubs(on, { graphql: twoBots, slow: true })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'review-bots' })
+  await settleReview(s)
+  expect((await ui.find({ key: 'review-bots' }))?.props.label).toBe('Stop reviewing bot PRs (0/2 done)')
+  await ui.press({ key: 'review-bots' })
+  for (let i = 0; i < 6; i++) {
+    await s.clock.advance(60_000)
+    await settleReview(s)
+  }
+  expect(approvedAt(s)).toEqual([])
+  expect(s.toasts.some((t) => t.startsWith('Stopped. Bot PRs:'))).toBe(true)
+  await ui.unmount()
+})
+
+test('m merges a ready PR with the chosen method, pinned to the commit on screen', async ($, on) => {
+  const s = stubs(on, { answer: 'Squash and merge' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  // #21 needs action: no merge
+  expect(await ui.find({ key: 'act-merge' })).toBeUndefined()
+  await ui.press({ key: 'nav-down' })
+  expect(await isSelected(ui, 22)).toBe(true)
+  await ui.press({ key: 'act-merge' })
+  expect(s.choices.at(-1)).toEqual(['Cancel', 'Squash and merge', 'Create a merge commit', 'Rebase and merge'])
+  expect(s.calls).toContainEqual(['gh', 'pr', 'merge', READY.url, '--squash', '--match-head-commit', HEAD])
+  expect(s.logs.some((l) => l.includes('pr-inbox merged acme/app#22'))).toBe(true)
+  await ui.unmount()
+})
+
+test('m does nothing when the dialog is cancelled', async ($, on) => {
+  const s = stubs(on, { answer: 'Cancel' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'nav-down' })
+  await ui.press({ key: 'act-merge' })
+  expect(s.calls.some((c) => c[2] === 'merge')).toBe(false)
+  await ui.unmount()
+})
+
+test('c re-runs only the failed GitHub Actions runs', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await isSelected(ui, 21)).toBe(true)
+  await ui.press({ key: 'act-rerun' })
+  const reruns = s.calls.filter((c) => c[1] === 'run')
+  expect(reruns).toEqual([['gh', 'run', 'rerun', '1', '--failed', '-R', 'acme/app']])
+  // A ready PR has no failed CI: no re-run
+  await ui.press({ key: 'nav-down' })
+  expect(await ui.find({ key: 'act-rerun' })).toBeUndefined()
+  await ui.unmount()
+})

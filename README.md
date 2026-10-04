@@ -34,6 +34,10 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 | `v` | AI review, then approve if it passes (see below). `v` again cancels a running review |
 | `d` | Details: every finding of the AI review, with links to the lines |
 | `x` | Snooze the PR until it is updated (`z` shows snoozed PRs) |
+| `w` | AI review every bot PR not reviewed yet, one at a time (`w` again stops) |
+| `m` | Merge one of your PRs that is ready, after picking a method (pinned to the commit on screen) |
+| `c` | Re-run the failed GitHub Actions jobs of one of your PRs |
+| `f` | Filter by repository, number, title or @author (Enter keeps it; an empty one clears it) |
 | `h` | Show the keys |
 | `Ctrl+X` `Tab` | Move between the prompt and the pane. Keys reach the pane only while it has the focus |
 | `o` | Open in the browser |
