@@ -308,7 +308,7 @@ const linksIn = (json: string) => {
   walk(JSON.parse(json))
   return out
 }
-const blueLink = (href: string, text: string) => expect.objectContaining({ href, text, color: 'blue', underline: true })
+const blueLink = (href: string, text: string) => expect.objectContaining({ href, text, color: '#00e5ff', underline: true })
 
 // The selected row starts with "▸"
 const isSelected = async (ui: Finder, number: number) =>
@@ -473,15 +473,15 @@ test('shows the summary, risk, reason and release impact in the list', async ($,
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   // The rows carry the risk as a badge; the selected PR's details carry the rest
-  expect((await ui.find({ type: 'Text', text: /^▲ HIGH$/ }))?.props.color).toBe('red')
+  expect((await ui.find({ type: 'Text', text: /^▲ HIGH$/ }))?.props.color).toBe('#ff3860')
   expect(await ui.find({ type: 'Text', text: /^· LOW $/ })).toBeDefined()
-  const high = await ui.find({ type: 'Text', text: /^【高】ログイン画面のバリデーションを修正$/ })
-  expect(high?.props.color).toBe('red')
+  // Only the label is colored; the sentence stays plain
+  expect(await ui.find({ type: 'Text', text: /^【高】ログイン画面のバリデーションを修正$/ })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^【高】$/ }))?.props.color).toBe('#ff3860')
   expect(await ui.find({ type: 'Text', text: /根拠: 認証まわりの変更/ })).toBeDefined()
   // Release impact: yes / no (behind a flag) / unknown when the model returns no impact
-  expect(
-    (await ui.find({ type: 'Text', text: /^リリース時: 影響あり — エンドユーザー: ログイン失敗時の文言が変わる$/ }))?.props.color,
-  ).toBe('magenta')
+  expect(await ui.find({ type: 'Text', text: /^リリース時: 影響あり — エンドユーザー: ログイン失敗時の文言が変わる$/ })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^リリース時: 影響あり$/ }))?.props.color).toBe('#ff2bd6')
   await ui.press({ key: 'nav-down' })
   expect(await ui.find({ type: 'Text', text: /^【低】一覧の並び順を変更$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^リリース時: 影響なし — フラグ new_list_order が無効のまま入る$/ })).toBeDefined()

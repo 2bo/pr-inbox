@@ -1107,8 +1107,8 @@ function allowedWhileGuarded(tool: string, command: unknown): boolean {
   return tool === 'Bash' && typeof command === 'string' && READ_GH.test(command.trim())
 }
 
-const RISK_COLOR: Record<Risk, string> = { low: 'green', medium: 'yellow', high: 'red' }
-const IMPACT_COLOR: Record<Impact, string> = { yes: 'magenta', no: 'green', unknown: 'yellow' }
+const RISK_COLOR: Record<Risk, string> = { low: '#39ff14', medium: '#ffe600', high: '#ff3860' }
+const IMPACT_COLOR: Record<Impact, string> = { yes: '#ff2bd6', no: '#39ff14', unknown: '#ffe600' }
 
 // ---- AI review and approve (v) ----
 //
@@ -1998,9 +1998,20 @@ function logReview($: EngineInterface, run: ReviewRun): void {
 
 // ---- The list's cells ----
 
-const LOGO = '◆ pr-inbox'
+const LOGO = '▍pr/inbox'
+// Neon on dark, each color with one meaning: pink accent, cyan links and AI, green fine, yellow caution, red danger
+const NEON = {
+  pink: '#ff2bd6',
+  cyan: '#00e5ff',
+  green: '#39ff14',
+  yellow: '#ffe600',
+  red: '#ff3860',
+  violet: '#9d4dff',
+  muted: '#7a7aa8',
+  rule: '#3d2f63',
+  selection: '#2d1b52',
+}
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-const HEAT = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
 
 type Cell = { text: string; color?: string; bold?: boolean }
 
@@ -2011,28 +2022,31 @@ function badgeOf(pr: PR): Cell {
     const a = analysisOf(pr)
     if (!a || 'failed' in a) return { text: pending.has(pr.url) ? '  …   ' : '  ·   ' }
     return a.risk === 'high'
-      ? { text: '▲ HIGH', color: 'red', bold: true }
+      ? { text: '▲ HIGH', color: NEON.red, bold: true }
       : a.risk === 'medium'
-        ? { text: '■ MED ', color: 'yellow' }
-        : { text: '· LOW ', color: 'green' }
+        ? { text: '◆ MED ', color: NEON.yellow }
+        : { text: '· LOW ', color: NEON.green }
   }
   if (isSnoozed(pr)) return { text: '⏸ SNZ ' }
   const group = classify(pr, fetchedAt || Date.now()).group
   return group === 'action'
-    ? { text: '✗ FIX ', color: 'red', bold: true }
+    ? { text: '✗ FIX ', color: NEON.red, bold: true }
     : group === 'ready'
-      ? { text: '✓ SHIP', color: 'green', bold: true }
+      ? { text: '✓ SHIP', color: NEON.green, bold: true }
       : group === 'waiting'
-        ? { text: '… WAIT', color: 'yellow' }
+        ? { text: '… WAIT', color: NEON.yellow }
         : { text: 'z OLD ' }
 }
 
-// How long it has waited, as a bar that grows and heats up
-function heat(since: string, now: number): { bar: string; color: string } {
+// How long it has waited, as a three-cell gauge that fills and heats up: green, then yellow, then red
+function heat(since: string, now: number): { filled: string; empty: string; color: string } {
   const hours = Math.max(0, (now - Date.parse(since)) / HOUR)
-  const steps = [1, 4, 12, 24, 48, 96, 168]
-  const level = steps.filter((h) => hours >= h).length
-  return { bar: HEAT[level] ?? '█', color: level >= 6 ? 'red' : level >= 4 ? 'yellow' : 'green' }
+  const filled = [4, 24, 72].filter((h) => hours >= h).length
+  return {
+    filled: '▰'.repeat(filled),
+    empty: '▱'.repeat(3 - filled),
+    color: filled >= 3 ? NEON.red : filled === 2 ? NEON.yellow : NEON.green,
+  }
 }
 
 // 3m, 5h, 2d, 3w, 4mo
@@ -2047,19 +2061,19 @@ function short(since: string, now: number): string {
 
 function ciGlyph(pr: PR): Cell {
   const ci = ciState(pr)
-  if (ci === 'SUCCESS') return { text: '✓', color: 'green' }
-  if (ci === 'FAILURE' || ci === 'ERROR') return { text: '✗', color: 'red' }
-  if (ci === 'PENDING' || ci === 'EXPECTED') return { text: '◌', color: 'yellow' }
+  if (ci === 'SUCCESS') return { text: '✓', color: NEON.green }
+  if (ci === 'FAILURE' || ci === 'ERROR') return { text: '✗', color: NEON.red }
+  if (ci === 'PENDING' || ci === 'EXPECTED') return { text: '◌', color: NEON.yellow }
   return { text: '·' }
 }
 
 // The AI review at a glance: a spinner while it runs
 function aiGlyph(pr: PR): Cell {
   const r = reviews.get(pr.url)
-  if (r?.state === 'running') return { text: SPINNER[Math.floor(Date.now() / 100) % SPINNER.length] ?? '…', color: 'cyan' }
+  if (r?.state === 'running') return { text: SPINNER[Math.floor(Date.now() / 100) % SPINNER.length] ?? '…', color: NEON.cyan }
   const done = reviewOfHead(pr)
   if (!done) return { text: '·' }
-  return done.state === 'blocked' ? { text: '✗', color: 'red' } : { text: '✓', color: 'green' }
+  return done.state === 'blocked' ? { text: '✗', color: NEON.red } : { text: '✓', color: NEON.green }
 }
 
 // Redraws a few times a second while an AI review runs, so its spinner turns
@@ -2287,13 +2301,13 @@ export function register(on: On, options: PluginOptions) {
 
     // Draw links blue and underlined. In the terminal they become hyperlinks (OSC 8) that open with Cmd+click
     const link = (href: string, text: string, bold = false) =>
-      Link({ href, children: [Text({ color: 'blue', underline: true, bold, children: [text] })] })
+      Link({ href, children: [Text({ color: NEON.cyan, underline: true, bold, children: [text] })] })
 
     const small = (key: string, label: string, hotkey: string, onPress: () => void) =>
       Button({ key, label, hotkey, plain: true, dimColor: true, onPress })
 
     // A thin full-width rule between the parts
-    const rule = () => Text({ dimColor: true, children: ['─'.repeat(columns)] })
+    const rule = () => Text({ color: NEON.rule, children: ['─'.repeat(columns)] })
 
     // Row 1: tabs and refresh
     const updated = loading ? 'updating…' : fetchedAt ? new Date(fetchedAt).toTimeString().slice(0, 5) : '--:--'
@@ -2328,7 +2342,16 @@ export function register(on: On, options: PluginOptions) {
         flexWrap: 'wrap',
         columnGap: 3,
         children: [
-          Text({ bold: true, color: 'magenta', children: [LOGO] }),
+          // The logo, in a pink to cyan sweep
+          Box({
+            flexDirection: 'row',
+            children: [
+              Text({ color: NEON.violet, children: ['▍'] }),
+              Text({ color: NEON.pink, bold: true, children: ['pr'] }),
+              Text({ color: NEON.muted, children: ['/'] }),
+              Text({ color: NEON.cyan, bold: true, children: ['inbox'] }),
+            ],
+          }),
           tabButton('review', `review ${g.humans.length}+${g.bots.length}`, '1'),
           tabButton('mine', `mine ${mine.length}`, '2'),
           small('refresh', '⟳', 'r', () => refresh($)),
@@ -2433,7 +2456,7 @@ export function register(on: On, options: PluginOptions) {
         }),
         Button({
           key: 'act-details',
-          label: expanded === pr.url ? 'less' : 'details',
+          label: expanded === pr.url ? 'less' : 'info',
           dimColor: true,
           hotkey: 'd',
           plain: true,
@@ -2638,16 +2661,40 @@ export function register(on: On, options: PluginOptions) {
         }),
       ]
       if (tab === 'review' && cfg.analysis !== 'off') {
+        // Only the label carries the color; the sentence stays plain, so it reads calmly
         const a = analysisLine(p)
+        const an = analysisOf(p)
+        const riskLabel = an && 'risk' in an ? L.risk[an.risk] : ''
         children.push(
           Box({
             paddingLeft: INDENT,
-            children: [Text({ wrap: 'wrap', dimColor: a.dim, ...(a.color ? { color: a.color } : {}), children: [a.text] })],
+            children: [
+              Text({
+                wrap: 'wrap',
+                dimColor: a.dim,
+                children:
+                  riskLabel && a.text.startsWith(riskLabel)
+                    ? [Text({ color: a.color, bold: true, children: [riskLabel] }), a.text.slice(riskLabel.length)]
+                    : [a.text],
+              }),
+            ],
           }),
         )
         const impact = impactLine(p)
         if (impact) {
-          children.push(Box({ paddingLeft: INDENT, children: [Text({ wrap: 'wrap', color: impact.color, children: [impact.text] })] }))
+          const cut = impact.text.indexOf(' — ')
+          const head = cut >= 0 ? impact.text.slice(0, cut) : impact.text
+          children.push(
+            Box({
+              paddingLeft: INDENT,
+              children: [
+                Text({
+                  wrap: 'wrap',
+                  children: [Text({ color: impact.color, bold: true, children: [head] }), cut >= 0 ? impact.text.slice(cut) : ''],
+                }),
+              ],
+            }),
+          )
         }
       }
       children.push(Box({ paddingLeft: INDENT, children: [Text({ wrap: 'wrap', dimColor: true, children: [metaLine(p)] })] }))
@@ -2716,7 +2763,7 @@ export function register(on: On, options: PluginOptions) {
       const h = heat(since, now)
       const ci = ciGlyph(p)
       const ai = tab === 'review' ? aiGlyph(p) : { text: ' ', color: undefined }
-      const right = ` ${h.bar}${short(since, now).padStart(4)}  ${ci.text}  ${ai.text}`
+      const right = ` ${h.filled}${h.empty}${short(since, now).padStart(4)}  ${ci.text}  ${ai.text}`
       const lead = `${isSelected ? '▸' : ' '}${isUnread(p) ? '●' : ' '}${isBot(p) ? '⚙' : ' '}`
       const titleWidth = Math.max(8, columns - textWidth(lead) - 1 - textWidth(b.text) - 1 - prWidth - 1 - textWidth(right))
       const title = `${p.isDraft ? '[draft] ' : ''}${p.title}`
@@ -2725,7 +2772,7 @@ export function register(on: On, options: PluginOptions) {
         key: `line-${p.url}`,
         flexDirection: 'row',
         children: [
-          Text({ color: 'magenta', bold: true, children: [lead] }),
+          Text({ color: NEON.pink, bold: true, children: [lead] }),
           Text({ children: [' '] }),
           Text({ ...(b.color ? { color: b.color } : { dimColor: true }), bold: b.bold === true, children: [b.text] }),
           Text({ children: [' '] }),
@@ -2733,12 +2780,13 @@ export function register(on: On, options: PluginOptions) {
           Text({ children: [' '.repeat(Math.max(0, prWidth - textWidth(fit(label, prWidth + 1))) + 1)] }),
           Text({
             bold: isSelected,
-            inverse: isSelected,
+            ...(isSelected ? { backgroundColor: NEON.selection, color: '#ffffff' } : {}),
             dimColor: !isSelected && !isUnread(p),
             wrap: 'truncate-end',
             children: [padTo(fit(title, titleWidth), titleWidth)],
           }),
-          Text({ color: h.color, children: [` ${h.bar}`] }),
+          Text({ color: h.color, children: [` ${h.filled}`] }),
+          Text({ color: NEON.rule, children: [h.empty] }),
           Text({ dimColor: true, children: [short(since, now).padStart(4)] }),
           Text({ ...(ci.color ? { color: ci.color } : { dimColor: true }), children: [`  ${ci.text}`] }),
           Text({ ...(ai.color ? { color: ai.color } : { dimColor: true }), children: [`  ${ai.text}`] }),
@@ -2856,7 +2904,13 @@ export function register(on: On, options: PluginOptions) {
       if (tab === 'review' && !filterText && g.humans.length === 0) {
         // Inbox zero deserves a moment
         list.push(
-          Text({ color: 'green', children: ['  ✦ inbox zero ✦'] }),
+          Box({
+            flexDirection: 'row',
+            children: [
+              Text({ color: NEON.pink, bold: true, children: ['  ✦ inbox'] }),
+              Text({ color: NEON.cyan, bold: true, children: [' zero ✦'] }),
+            ],
+          }),
           Text({
             dimColor: true,
             children: [
@@ -2904,10 +2958,10 @@ export function register(on: On, options: PluginOptions) {
     }
 
     const columnsHead = Text({
-      dimColor: true,
+      color: NEON.muted,
       children: [
         `    ${(tab === 'review' ? 'RISK' : 'STATE').padEnd(6)} ${'PR'.padEnd(prWidth)} ${'TITLE'}`.padEnd(Math.max(0, columns - 14)) +
-          (tab === 'review' ? '  WAIT CI AI' : '   AGE CI   '),
+          (tab === 'review' ? '    WAIT CI AI' : '     AGE CI   '),
       ],
     })
     const foldRow = folds.length > 0 ? [Box({ key: 'folds', flexDirection: 'row', flexWrap: 'wrap', columnGap: 3, children: folds })] : []
