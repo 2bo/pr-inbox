@@ -31,11 +31,16 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 | `j` / `k` | Select the next / previous PR |
 | `e` | Ask Claude to explain the PR (for your own PR, to diagnose what blocks it). Claude reads the description, comments, reviews and linked issues and PRs, not only the diff |
 | `a` | Approve (runs only after you choose **Approve** in the confirmation dialog) |
-| `v` | AI review, then approve if it passes (see below) |
+| `v` | AI review, then approve if it passes (see below). `v` again cancels a running review |
+| `d` | Details: every finding of the AI review, with links to the lines |
+| `x` | Snooze the PR until it is updated (`z` shows snoozed PRs) |
+| `h` | Show the keys |
 | `o` | Open in the browser |
 | `b` / `s` | Show or hide bot PRs / stale PRs |
 | `r` | Fetch again |
 | `Esc` | Close the pane |
+
+● marks PRs updated since you last selected them.
 
 PR numbers and failed checks are hyperlinks: Cmd+click them in a terminal that supports hyperlinks.
 
@@ -56,6 +61,8 @@ PR numbers and failed checks are hyperlinks: Cmd+click them in a terminal that s
    - For **Dependabot and Renovate** PRs, instead: **Upgrade impact** (every package that changes, directly or in the lockfile; upstream release notes and changelogs; whether this repository uses what changed) and **Supply chain**
 4. **Verification**: important findings (confidence 80+) go to a verifier that tries to refute them against the code
 5. **Decision, in code**: it passes only when every gate holds, nothing looked like an injection, every reviewer answered, no important finding survived and the PR got no new commits. Nits do not block
+
+Only problems within each reviewer's perspective count, and the same problem found from two perspectives is shown once. The result is kept for the reviewed commit, so it is still there after a restart; when new commits arrive, the row says the review is of an older commit.
 
 When it passes, `ai_approve` decides: `confirm` (default) asks you first; `auto` approves at once for PRs from members and collaborators of the repository and from Dependabot or Renovate, and still asks for anyone else and for forks. The approval is pinned to the reviewed commit. The outcome shows under the PR and in the transcript.
 
@@ -110,7 +117,7 @@ When a PR is too large to read whole (more than 30,000 characters of diff, 4,000
 - **The analysis is a hint.** Do not approve on the strength of the risk or impact judgment. Approve runs only after you choose **Approve** in the confirmation dialog, which names the commit on screen. The approval is pinned to that commit, and it is refused if the PR got new commits in the meantime. Turning on "Dismiss stale pull request approvals" in your repositories' branch rules adds a second line of defense
 - **Displayed text is sanitized.** Terminal escape sequences, control characters, bidirectional override characters and invisible characters are stripped from PR titles, author names, check names and model output before they are drawn. Links open only canonical `https://` URLs. Failed-check links point wherever the CI system says, which may be a third-party site
 - **What is sent, and when.** With `analysis` on `auto`, as soon as Claude Code starts (including `claude -p` runs and sessions in other projects) and on every refresh, each review request that has not been analyzed yet is sent to the model Claude Code is configured with (Anthropic, or your Bedrock, Vertex or gateway setup), under your account: its repository and number, author, title, list of changed files, description (first 4,000 characters) and diff (first 30,000 characters). You do not have to open the pane. Follow your organization's rules for work code: narrow it with `org_filter`, or set `analysis` to `when opened` or `off`
-- **What is stored locally.** In Claude Code's plugin store (`~/.claude/plugins/store/`): the URLs of your review requests and the state of your own PRs (to notice changes), and each analysis (summary, risk, release impact). Analyses of PRs that are no longer open are deleted on the next refresh
+- **What is stored locally.** In Claude Code's plugin store (`~/.claude/plugins/store/`): the URLs of your review requests and the state of your own PRs (to notice changes), each analysis (summary, risk, release impact), each AI review's findings, snoozed PRs and which updates you have seen. Analyses of PRs that are no longer open are deleted on the next refresh
 - **Access.** All GitHub access goes through `gh`; the mod holds no token. OS notifications go through `osascript` or `notify-send`, with the text passed as arguments, never as script. Commands run as argument lists, without a shell
 
 ## Development

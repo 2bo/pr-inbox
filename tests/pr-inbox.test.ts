@@ -128,12 +128,16 @@ type StubOptions = {
   diff?: string
   // Commands (argv[0]) that exit with an error
   fail?: string[]
+  // stderr of a failing command
+  stderr?: string
   // Whether the injection screen flags this content
   suspicious?: (prompt: string) => boolean
   // The AI review's answers: what to read next, a review, a verification
   gather?: (prompt: string) => string
   review?: (prompt: string) => string
   verify?: (prompt: string) => string
+  // Review calls answer only after the clock moves a minute
+  slow?: boolean
 }
 
 function stubs(on: TestOn, opts: StubOptions = {}) {
@@ -166,9 +170,9 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
       stdout = JSON.stringify(opts.view ?? { title: 't', body: 'b', files: [] })
     if (e.argv[2] === 'diff') stdout = opts.diff ?? 'diff --git a/x b/x'
     const exitCode = opts.fail?.includes(e.argv[0] ?? '') ? 1 : 0
-    return { value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return { value: { exitCode, stdout, stderr: exitCode ? (opts.stderr ?? '') : '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('model.complete', (_, e) => {
+  on('model.complete', async (_, e) => {
     const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
     if ((e.system ?? '').startsWith('You screen content')) {
       screened.push(e.prompt)
@@ -184,6 +188,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
           : undefined
     if (kind) {
       reviewCalls.push({ kind, prompt: e.prompt, model: e.model ?? '' })
+      if (opts.slow) await clock.sleep(60_000)
       const text =
         kind === 'gather'
           ? (opts.gather?.(e.prompt) ?? '{"files": [], "searches": [], "release_notes": [], "upstream_files": []}')
@@ -979,7 +984,7 @@ test('v reviews from each perspective on the review model, then approves after c
   ])
   expect(s.reviewCalls.every((c) => c.model === 'sonnet')).toBe(true)
   expect(reviewsOf(s)[0]?.prompt).toContain(`acme/app#11 at commit ${HEAD}`)
-  expect(s.questions.at(-1)).toContain('AI review passed (5 perspectives)')
+  expect(s.questions.at(-1)).toContain('AI review passed 5 perspectives with no important findings.')
   expect(approvedAt(s)).toEqual([APPROVE_11])
   expect(await ui.find({ type: 'Text', text: /^AI review ✓ approved at aaaaaaa$/ })).toBeDefined()
   await ui.unmount()
@@ -1258,5 +1263,125 @@ test('a user account named like a bot is not trusted as one', { options: { ai_ap
   const ui = await pressReview($, s)
   expect(reviewsOf(s).length).toBe(5)
   expect(approvedAt(s)).toEqual([])
+  await ui.unmount()
+})
+
+// ---- Inbox UX: details, stored reviews, cancel, snooze, unread, help ----
+
+test('d shows every finding of the AI review, with links to the reviewed lines', async ($, on) => {
+  const nitty = JSON.stringify({
+    verdict: 'pass',
+    injection: false,
+    findings: [{ severity: 'nit', confidence: 70, location: 'app/login.rb:30', summary: 'name could be clearer', evidence: 'x is vague' }],
+  })
+  const s = stubs(on, { answer: 'Cancel', review: (p) => (perspectiveOf(p) === 'Tests' ? nitty : PASS) })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  // The dialog names the nits
+  expect(s.questions.at(-1)).toContain('Nits: app/login.rb:30 name could be clearer.')
+  await ui.press({ key: 'act-details' })
+  const line = await lineOf(ui, 11)
+  expect(linksIn(line)).toContainEqual(blueLink(`https://github.com/acme/app/blob/${HEAD}/app/login.rb#L30`, 'app/login.rb:30'))
+  expect(line).toContain('x is vague')
+  await ui.unmount()
+})
+
+test('the same problem found from two perspectives is reported once', async ($, on) => {
+  const s = stubs(on, {
+    review: (p) => (['Correctness & compatibility', 'Security & secrets'].includes(perspectiveOf(p) ?? '') ? BUG : PASS),
+    verify: () => JSON.stringify({ results: [], injection: false }),
+  })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  expect(await ui.find({ type: 'Text', text: /^AI review ✗ blocked \(1\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /\[Correctness & compatibility, Security & secrets\] app\/login\.rb:12/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a stored review of the current commit comes back after a restart; one of an older commit is dropped', async ($, on) => {
+  const saved = { head: HEAD, state: 'blocked', problems: ['[Tests] app/a.rb:1 no test'], findings: [] }
+  const s = stubs(on, { store: { [`review:${HUMAN.url}`]: saved, [`review:${HUMAN2.url}`]: { ...saved, head: 'c'.repeat(40) } } })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: /^AI review ✗ blocked \(1\)/ })).toBeDefined()
+  expect(s.store.has(`review:${HUMAN2.url}`)).toBe(false)
+  await ui.unmount()
+})
+
+test('v again while the review runs cancels it', { options: { ai_approve: 'auto' } }, async ($, on) => {
+  const s = stubs(on, { graphql: only(member()), slow: true })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-ai-review' })
+  await settleReview(s)
+  expect((await ui.find({ key: 'act-ai-review' }))?.props.label).toBe('Cancel AI review')
+  await ui.press({ key: 'act-ai-review' })
+  await s.clock.advance(60_000)
+  await settleReview(s)
+  expect(approvedAt(s)).toEqual([])
+  expect(await ui.find({ type: 'Text', text: /^AI review cancelled$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('x snoozes a PR until it is updated, and z shows snoozed PRs', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-snooze' })
+  expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeUndefined()
+  // The next PR is selected
+  expect(await isSelected(ui, 13)).toBe(true)
+  expect((await ui.find({ key: 'fold-snoozed' }))?.props.label).toBe('Show 1 snoozed PR ⏸')
+  expect(s.statuses.at(-1)).toContain('To review 1 (+1 bot)')
+  await ui.press({ key: 'fold-snoozed' })
+  expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
+  expect(s.store.get('snoozed')).toEqual({ [HUMAN.url]: HUMAN.updatedAt })
+  await ui.unmount()
+})
+
+test('a snooze ends when the PR is updated', async ($, on) => {
+  const s = stubs(on, { store: { snoozed: { [HUMAN.url]: '2026-09-01T00:00:00Z' } } })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
+  expect(s.store.get('snoozed')).toEqual({})
+  await ui.unmount()
+})
+
+test('● marks PRs updated since they were last selected, and selecting one clears it', async ($, on) => {
+  const s = stubs(on, { store: { seen: { [HUMAN.url]: HUMAN.updatedAt, [HUMAN2.url]: '2026-09-01T00:00:00Z' } } })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect(await lineOf(ui, 13)).toContain('●')
+  expect(await lineOf(ui, 11)).not.toContain('●')
+  await ui.press({ key: 'nav-down' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect((s.store.get('seen') as Record<string, string>)[HUMAN2.url]).toBe(HUMAN2.updatedAt)
+  await ui.unmount()
+})
+
+test('the first run marks nothing as unread', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect(await lineOf(ui, 13)).not.toContain('●')
+  await ui.unmount()
+})
+
+test('a signed-out gh gets a plain instruction', async ($, on) => {
+  const s = stubs(on, { fail: ['gh'], stderr: 'To get started with GitHub CLI, please run:  gh auth login' })
+  await start($, s.clock)
+  expect(s.statuses.at(-1)).toBe('Could not fetch PRs: GitHub CLI is not signed in. Run: gh auth login')
+})
+
+test('h shows the keys', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'help' })
+  expect(await ui.find({ type: 'Text', text: /snooze the PR until it is updated/ })).toBeDefined()
+  expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeUndefined()
+  await ui.press({ key: 'help' })
+  expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
   await ui.unmount()
 })

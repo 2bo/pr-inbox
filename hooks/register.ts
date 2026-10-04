@@ -37,7 +37,7 @@ type CheckContext =
   | { __typename: 'StatusContext'; context: string; state: string; targetUrl: string | null }
   | { __typename: string }
 
-type Group = 'humans' | 'bots' | 'action' | 'ready' | 'waiting' | 'stale'
+type Group = 'humans' | 'bots' | 'action' | 'ready' | 'waiting' | 'stale' | 'snoozedReview' | 'snoozedMine'
 
 // When review requests are analyzed: from startup (auto), once the pane has been opened in this session, or never
 type AnalysisMode = 'auto' | 'when opened' | 'off'
@@ -283,6 +283,13 @@ function labels(): Labels {
 // Pane state
 let tab: 'review' | 'mine' = 'review'
 let showBots = false
+// The PR whose details (the AI review's findings) are open, the key help, and snoozed PRs shown
+let expanded = ''
+let showHelp = false
+let showSnoozed = false
+// Snoozed PRs, hidden until they are updated, and the update each PR was last seen at (url → updatedAt), kept in $.store
+let snoozed: Record<string, string> = {}
+let seen: Record<string, string> | undefined
 let showStale = false
 let selected = ''
 
@@ -383,7 +390,7 @@ function byRequestedAt(a: PR, b: PR): number {
 }
 
 // Sort my PRs into action / ready / waiting / stale
-function classify(pr: PR, now: number): { group: Exclude<Group, 'humans' | 'bots'>; reasons: string[] } {
+function classify(pr: PR, now: number): { group: 'action' | 'ready' | 'waiting' | 'stale'; reasons: string[] } {
   const ci = ciState(pr)
   const reasons: string[] = []
   if (pr.reviewDecision === 'CHANGES_REQUESTED') reasons.push('changes requested')
@@ -397,11 +404,25 @@ function classify(pr: PR, now: number): { group: Exclude<Group, 'humans' | 'bots
   return { group: 'waiting', reasons }
 }
 
+function isSnoozed(pr: PR): boolean {
+  return snoozed[pr.url] === pr.updatedAt
+}
+
+function isUnread(pr: PR): boolean {
+  return seen !== undefined && seen[pr.url] !== pr.updatedAt
+}
+
 function groups(now: number): Record<Group, PR[]> {
-  const g: Record<Group, PR[]> = { humans: [], bots: [], action: [], ready: [], waiting: [], stale: [] }
+  const g: Record<Group, PR[]> = { humans: [], bots: [], action: [], ready: [], waiting: [], stale: [], snoozedReview: [], snoozedMine: [] }
   // Longest-waiting first
-  for (const pr of [...review].sort(byRequestedAt)) (isBot(pr) ? g.bots : g.humans).push(pr)
-  for (const pr of mine) g[classify(pr, now).group].push(pr)
+  for (const pr of [...review].sort(byRequestedAt)) {
+    if (isSnoozed(pr)) g.snoozedReview.push(pr)
+    else (isBot(pr) ? g.bots : g.humans).push(pr)
+  }
+  for (const pr of mine) {
+    if (isSnoozed(pr)) g.snoozedMine.push(pr)
+    else g[classify(pr, now).group].push(pr)
+  }
   return g
 }
 
@@ -498,6 +519,20 @@ function fit(text: string, columns: number): string {
   return out
 }
 
+// Lines a row of items takes when it wraps whole items at columns, gap apart
+function wrappedRowLines(widths: readonly number[], gap: number, columns: number): number {
+  let lines = 1
+  let used = 0
+  for (const w of widths) {
+    if (used > 0 && used + gap + w > columns) {
+      lines += 1
+      used = 0
+    }
+    used += (used > 0 ? gap : 0) + w
+  }
+  return lines
+}
+
 // Estimated line count once wrapped
 function wrappedLines(text: string, columns: number): number {
   return Math.max(1, Math.ceil(textWidth(text) / Math.max(10, columns)))
@@ -509,8 +544,8 @@ function findPr(url: string): PR | undefined {
 
 // PRs visible on the current tab, in screen order (what j/k move through)
 function visibleRows(g: Record<Group, PR[]>): PR[] {
-  if (tab === 'review') return [...g.humans, ...(showBots ? g.bots : [])]
-  return [...g.action, ...g.ready, ...g.waiting, ...(showStale ? g.stale : [])]
+  if (tab === 'review') return [...g.humans, ...(showBots ? g.bots : []), ...(showSnoozed ? g.snoozedReview : [])]
+  return [...g.action, ...g.ready, ...g.waiting, ...(showStale ? g.stale : []), ...(showSnoozed ? g.snoozedMine : [])]
 }
 
 // If the selection is not visible, select the first PR
@@ -572,15 +607,69 @@ async function fetchAll($: EngineInterface): Promise<void> {
     mine = data.mine.nodes.filter((n): n is PR => Boolean(n?.url)).map(cleanPr)
     fetchedAt = await $.clock.now()
     error = ''
+    await loadInboxState($)
     await notifyChanges($)
   } catch (err) {
-    error = messageOf(err)
+    error = friendlyError(messageOf(err))
   } finally {
     loading = false
   }
   showStatus($)
   $.ui.invalidate('ui.render')
   if (!error) await scheduleAnalyses($)
+}
+
+// What to do when gh is missing or signed out, instead of its raw message
+function friendlyError(message: string): string {
+  if (/auth login|not logged in|authentication required|HTTP 401|Bad credentials/i.test(message))
+    return 'GitHub CLI is not signed in. Run: gh auth login'
+  if (/ENOENT|command not found|no such file|executable file not found/i.test(message))
+    return 'GitHub CLI (gh) is not installed: https://cli.github.com'
+  return message
+}
+
+// Snoozes, what was seen, and the stored AI reviews of the current commits. Entries of closed PRs are dropped
+async function loadInboxState($: EngineInterface): Promise<void> {
+  const open = new Map([...review, ...mine].map((p) => [p.url, p]))
+  const asMap = (x: unknown): Record<string, string> =>
+    x && typeof x === 'object' ? Object.fromEntries(Object.entries(x).filter(([, v]) => typeof v === 'string')) : {}
+  // A snooze ends when the PR is updated
+  snoozed = Object.fromEntries(Object.entries(asMap(await $.store.get('snoozed'))).filter(([url, at]) => open.get(url)?.updatedAt === at))
+  await $.store.set('snoozed', snoozed)
+  const stored = await $.store.get('seen')
+  // The first time, everything already open counts as seen
+  seen = stored === undefined ? Object.fromEntries([...open.values()].map((p) => [p.url, p.updatedAt])) : asMap(stored)
+  seen = Object.fromEntries(Object.entries(seen).filter(([url]) => open.has(url)))
+  await $.store.set('seen', seen)
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith('review:')) continue
+    const url = key.slice('review:'.length)
+    const pr = review.find((p) => p.url === url)
+    const saved = asStoredReview(await $.store.get(key))
+    if (!pr || !saved || saved.head !== pr.headRefOid) {
+      await $.store.delete(key)
+      continue
+    }
+    if (!reviews.has(url)) reviews.set(url, { ...newRun(pr), ...saved.run })
+  }
+}
+
+async function markSeen($: EngineInterface, pr: PR): Promise<void> {
+  if (!seen || seen[pr.url] === pr.updatedAt) return
+  seen = { ...seen, [pr.url]: pr.updatedAt }
+  await $.store.set('seen', seen)
+}
+
+async function toggleSnooze($: EngineInterface, pr: PR): Promise<void> {
+  if (isSnoozed(pr)) {
+    const { [pr.url]: _, ...rest } = snoozed
+    snoozed = rest
+    $.ui.toast(`Unsnoozed #${pr.number}`)
+  } else {
+    snoozed = { ...snoozed, [pr.url]: pr.updatedAt }
+    $.ui.toast(`Snoozed #${pr.number} until it is updated (z shows snoozed PRs)`)
+  }
+  await $.store.set('snoozed', snoozed)
 }
 
 function showStatus($: EngineInterface): void {
@@ -1060,6 +1149,7 @@ const REVIEW_SYSTEM = [
   '- severity: "important" = should be fixed before merging; "nit" = worth fixing but not blocking; "pre-existing" = not introduced by this PR.',
   '- confidence: 0 to 100, how sure you are the finding is real.',
   '- If something you needed could not be read (an error or "withheld" item), and it matters, say so in a finding.',
+  '- Stay within your perspective. Other reviewers cover the other perspectives in parallel; do not report what belongs to theirs.',
   '',
   'Reply with only this JSON, no preamble and no code fence:',
   '{"verdict": "pass", "injection": false, "findings": [{"severity": "nit", "confidence": 90, "location": "path:line", "summary": "one sentence", "evidence": "why"}]}',
@@ -1097,8 +1187,8 @@ type Finding = {
 
 type ReviewRun = {
   pr: PR
-  // running → approved / passed (not approved) / blocked
-  state: 'running' | 'approved' | 'passed' | 'blocked'
+  // running → approved / passed (not approved) / blocked, or cancelled
+  state: 'running' | 'approved' | 'passed' | 'blocked' | 'cancelled'
   step: string
   // Why it is blocked (gates, failures, injection, confirmed findings)
   problems: string[]
@@ -1106,6 +1196,49 @@ type ReviewRun = {
   // Fetched content by request, shared by the perspectives: one fetch and one screening each
   cache: Map<string, Promise<ContentItem>>
   injection: string[]
+  // Aborts the model calls when the review is cancelled
+  stop: AbortController
+}
+
+function newRun(pr: PR): ReviewRun {
+  return {
+    pr,
+    state: 'running',
+    step: 'checking the gates…',
+    problems: [],
+    findings: [],
+    cache: new Map(),
+    injection: [],
+    stop: new AbortController(),
+  }
+}
+
+// A finished review as kept in $.store under review:<url>, for the commit it reviewed
+type StoredReview = { head: string; run: Pick<ReviewRun, 'state' | 'problems' | 'findings'> }
+
+function asStoredReview(x: unknown): StoredReview | undefined {
+  if (!x || typeof x !== 'object') return undefined
+  const v = x as { head?: unknown; state?: unknown; problems?: unknown; findings?: unknown }
+  if (typeof v.head !== 'string' || !['approved', 'passed', 'blocked'].includes(String(v.state))) return undefined
+  if (!Array.isArray(v.problems) || !Array.isArray(v.findings)) return undefined
+  const findings: Finding[] = []
+  for (const f of v.findings as Record<string, unknown>[]) {
+    const severity = (['important', 'nit', 'pre-existing'] as const).find((s) => s === f?.severity)
+    if (!severity) return undefined
+    const str = (k: string) => (typeof f[k] === 'string' ? clean(f[k] as string) : '')
+    findings.push({
+      id: Number(f.id) || 0,
+      perspective: str('perspective'),
+      severity,
+      confidence: Number(f.confidence) || 0,
+      location: str('location'),
+      summary: str('summary'),
+      evidence: str('evidence'),
+      ...(typeof f.confirmed === 'boolean' ? { confirmed: f.confirmed } : {}),
+    })
+  }
+  const problems = (v.problems as unknown[]).filter((x): x is string => typeof x === 'string').map(clean)
+  return { head: v.head, run: { state: v.state as StoredReview['run']['state'], problems, findings } }
 }
 
 // One piece of untrusted content as the models see it
@@ -1334,9 +1467,18 @@ async function baseContext($: EngineInterface, run: ReviewRun): Promise<ContentI
 const asPrContent = (items: readonly ContentItem[]) => `<pr_content>\n${JSON.stringify(items)}\n</pr_content>`
 
 // One model call with no tools, cut off after MODEL_TIMEOUT. Undefined when it gives no answer
-async function askModel($: EngineInterface, system: string, prompt: string, maxTokens: number): Promise<string | undefined> {
+async function askModel(
+  $: EngineInterface,
+  run: ReviewRun,
+  system: string,
+  prompt: string,
+  maxTokens: number,
+): Promise<string | undefined> {
+  if (run.stop.signal.aborted) return undefined
   const stop = new AbortController()
   const timer = $.clock.after(MODEL_TIMEOUT, () => stop.abort())
+  const cancel = () => stop.abort()
+  run.stop.signal.addEventListener('abort', cancel)
   try {
     const r = await $.model.complete({ model: cfg.review_model, system, prompt, maxTokens }, { signal: stop.signal })
     return r.isAnswered ? r.text : undefined
@@ -1344,6 +1486,7 @@ async function askModel($: EngineInterface, system: string, prompt: string, maxT
     return undefined
   } finally {
     timer.cancel()
+    run.stop.signal.removeEventListener('abort', cancel)
   }
 }
 
@@ -1376,6 +1519,7 @@ async function reviewPerspective(
   const plan = lastJson(
     await askModel(
       $,
+      run,
       GATHER_SYSTEM,
       `${header}\n\n${asPrContent(base)}\n\nWhat else do you need to read for this perspective? Reply with only the JSON.`,
       800,
@@ -1384,6 +1528,7 @@ async function reviewPerspective(
   const extra = await Promise.all(extraRequests(plan).map((req) => readForReview($, run, req)))
   const answer = await askModel(
     $,
+    run,
     REVIEW_SYSTEM,
     `${header}\n\n${asPrContent([...base, ...extra])}\n\nReview the pull request from the perspective above. Write summary and evidence in ${language}. Reply with only the JSON.`,
     4000,
@@ -1447,13 +1592,31 @@ function enabledPerspectives(pr: PR): { p: Perspective; text: string }[] {
 // The whole review: gates, reading and screening, one model call per perspective, the verifier, then approve or
 // report why not
 async function aiReview($: EngineInterface, pr: PR): Promise<void> {
-  if (reviews.get(pr.url)?.state === 'running') return
-  const run: ReviewRun = { pr, state: 'running', step: 'checking the gates…', problems: [], findings: [], cache: new Map(), injection: [] }
+  const current = reviews.get(pr.url)
+  // v again while it runs cancels it
+  if (current?.state === 'running') {
+    current.stop.abort()
+    return
+  }
+  const run = newRun(pr)
   reviews.set(pr.url, run)
   const redraw = () => $.ui.invalidate('ui.render')
+  const cancelled = () => run.stop.signal.aborted
   const finish = async () => {
+    if (cancelled()) {
+      run.state = 'cancelled'
+      $.ui.toast(`AI review of #${pr.number} cancelled`)
+      redraw()
+      return
+    }
+    // One problem per location, naming every perspective that found it
     const confirmed = run.findings.filter((f) => isCandidate(f) && f.confirmed !== false)
-    for (const f of confirmed) run.problems.push(`[${f.perspective}] ${f.location} ${f.summary}`)
+    const byPlace = new Map<string, Finding[]>()
+    for (const f of confirmed) byPlace.set(f.location || `#${f.id}`, [...(byPlace.get(f.location || `#${f.id}`) ?? []), f])
+    for (const fs of byPlace.values()) {
+      const first = fs[0] as Finding
+      run.problems.push(`[${[...new Set(fs.map((f) => f.perspective))].join(', ')}] ${first.location} ${first.summary}`)
+    }
     for (const where of run.injection) run.problems.push(`possible prompt injection in ${where}`)
     if (run.problems.length > 0) {
       run.state = 'blocked'
@@ -1463,11 +1626,10 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
       const auto = cfg.ai_approve === 'auto' && (TRUSTED_AUTHORS.has(pr.authorAssociation) || isDependencyBot(pr)) && !pr.isCrossRepository
       run.step = 'approving…'
       redraw()
-      const ok =
-        auto ||
-        (await confirmApproval($, pr, ` AI review passed (${enabledPerspectives(pr).length} perspectives${nits ? `, ${nits} nits` : ''}).`))
+      const ok = auto || (await confirmApproval($, pr, passedNote(run, enabledPerspectives(pr).length, nits)))
       run.state = ok && (await postApproval($, pr)) ? 'approved' : 'passed'
     }
+    await $.store.set(`review:${pr.url}`, { head: pr.headRefOid, state: run.state, problems: run.problems, findings: run.findings })
     logReview($, run)
     redraw()
   }
@@ -1478,7 +1640,7 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
   run.step = 'reading and screening the PR…'
   redraw()
   const base = await baseContext($, run)
-  if (run.injection.length > 0 || run.problems.length > 0) return finish()
+  if (cancelled() || run.injection.length > 0 || run.problems.length > 0) return finish()
 
   const perspectives = enabledPerspectives(pr)
   let lastId = 0
@@ -1501,6 +1663,7 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
     }),
   )
 
+  if (cancelled()) return finish()
   const candidates = run.findings.filter(isCandidate)
   if (run.problems.length === 0 && run.injection.length === 0 && candidates.length > 0) {
     run.step = `verifying ${candidates.length} finding${candidates.length > 1 ? 's' : ''}…`
@@ -1518,6 +1681,7 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
     const v = lastJson(
       await askModel(
         $,
+        run,
         VERIFY_SYSTEM,
         `Pull request ${pr.repository.nameWithOwner}#${pr.number} at commit ${pr.headRefOid}.\n\n${asPrContent([...base, ...around, claims])}\n\nVerify each candidate finding. Reply with only the JSON.`,
         2000,
@@ -1529,10 +1693,21 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
     for (const f of candidates) f.confirmed = !results.some((r) => r?.id === f.id && r.confirmed === false)
   }
 
+  if (cancelled()) return finish()
   // New commits during the review: what was reviewed is not what would be approved
   const { head } = await currentHead($, pr)
   if (head !== pr.headRefOid) run.problems.push('the PR got new commits during the review')
   return finish()
+}
+
+// The confirmation dialog's note when the review passed: how many perspectives, and the first nits
+function passedNote(run: ReviewRun, perspectives: number, nits: number): string {
+  const sample = run.findings
+    .filter((f) => f.severity === 'nit')
+    .slice(0, 2)
+    .map((f) => `${f.location} ${fit(f.summary, 60)}`)
+  const more = nits > sample.length ? `, +${nits - sample.length} more` : ''
+  return ` AI review passed ${perspectives} perspectives with no important findings.${nits ? ` Nits: ${sample.join('; ')}${more}.` : ''}`
 }
 
 // Writes the outcome to the transcript, so it stays after the pane closes
@@ -1668,19 +1843,37 @@ export function register(on: On, options: PluginOptions) {
           redraw()
         },
       })
+    // Widths of the top rows' items, to know how many lines they take once wrapped
+    const row1 = [
+      `1: To review (${g.humans.length}+${g.bots.length})`,
+      `2: My PRs (${mine.length})`,
+      'r: Refresh',
+      'h: Close help',
+      updated,
+    ]
+    let topLines = wrappedRowLines(row1.map(textWidth), 3, columns)
     const top: El[] = [
+      // Rows wrap as whole buttons on a narrow pane instead of breaking words
       Box({
         flexDirection: 'row',
+        flexWrap: 'wrap',
         columnGap: 3,
         children: [
           tabButton('review', `To review (${g.humans.length}+${g.bots.length})`, '1'),
           tabButton('mine', `My PRs (${mine.length})`, '2'),
           small('refresh', 'Refresh', 'r', () => refresh($)),
-          Text({ dimColor: true, children: [updated] }),
+          small('help', showHelp ? 'Close help' : 'Help', 'h', () => {
+            showHelp = !showHelp
+            redraw()
+          }),
+          Text({ dimColor: true, wrap: 'truncate-end', children: [updated] }),
         ],
       }),
     ]
-    if (error) top.push(Text({ color: 'red', children: [fit(`Could not fetch PRs: ${error}`, columns)] }))
+    if (error) {
+      top.push(Text({ color: 'red', children: [fit(`Could not fetch PRs: ${error}`, columns)] }))
+      topLines += 1
+    }
 
     // Row 2: action bar, kept at the top so it stays visible when the list overflows
     const pr = selected ? findPr(selected) : undefined
@@ -1689,6 +1882,7 @@ export function register(on: On, options: PluginOptions) {
         moveSelection(rows, delta)
         redraw()
       })
+    if (pr) void markSeen($, pr)
     if (pr) {
       const isReview = review.some((p) => p.url === pr.url)
       const actions: El[] = [
@@ -1709,7 +1903,12 @@ export function register(on: On, options: PluginOptions) {
         actions.push(
           Button({
             key: 'act-ai-review',
-            label: cfg.ai_approve === 'auto' ? 'AI review & approve' : 'AI review…',
+            label:
+              reviews.get(pr.url)?.state === 'running'
+                ? 'Cancel AI review'
+                : cfg.ai_approve === 'auto'
+                  ? 'AI review & approve'
+                  : 'AI review…',
             hotkey: 'v',
             plain: true,
             onPress: () => {
@@ -1728,10 +1927,45 @@ export function register(on: On, options: PluginOptions) {
             await $.process.run(['gh', 'pr', 'view', pr.url, '--web'])
           },
         }),
+        Button({
+          key: 'act-details',
+          label: expanded === pr.url ? 'Less' : 'Details',
+          hotkey: 'd',
+          plain: true,
+          onPress: () => {
+            expanded = expanded === pr.url ? '' : pr.url
+            redraw()
+          },
+        }),
+        Button({
+          key: 'act-snooze',
+          label: isSnoozed(pr) ? 'Unsnooze' : 'Snooze',
+          hotkey: 'x',
+          plain: true,
+          onPress: async () => {
+            // Snoozing hides the PR: select the next one (or the previous at the end) rather than the first
+            if (!isSnoozed(pr) && !showSnoozed) {
+              const i = rows.findIndex((p) => p.url === pr.url)
+              selected = rows[i + 1]?.url ?? rows[i - 1]?.url ?? ''
+            }
+            await toggleSnooze($, pr)
+            showStatus($)
+            redraw()
+          },
+        }),
         nav('nav-down', 'Next', 'j', 1),
         nav('nav-up', 'Prev', 'k', -1),
       )
-      top.push(Box({ flexDirection: 'row', columnGap: 2, children: actions }))
+      top.push(Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: actions }))
+      const labelOf = (b: El) => {
+        const props = (b as { props?: { label?: unknown; hotkey?: unknown } }).props
+        return `${String(props?.hotkey ?? '')}: ${String(props?.label ?? '')}`
+      }
+      topLines += wrappedRowLines(
+        actions.map((b) => textWidth(labelOf(b))),
+        2,
+        columns,
+      )
     }
 
     // List: title row, summary row (review requests only), status row
@@ -1775,12 +2009,56 @@ export function register(on: On, options: PluginOptions) {
     const reviewRows = (p: PR): { text: string; color?: string; dim?: boolean }[] => {
       const r = reviews.get(p.url)
       if (!r) return []
-      if (r.state === 'running') return [{ text: `AI review: ${r.step}`, dim: true }]
+      if (r.state === 'running') return [{ text: `AI review: ${r.step}  (v to cancel)`, dim: true }]
+      if (r.state === 'cancelled') return [{ text: 'AI review cancelled', dim: true }]
+      if (r.pr.headRefOid !== p.headRefOid)
+        return [{ text: `AI review of an older commit (${r.pr.headRefOid.slice(0, 7)}): v to review the new one`, dim: true }]
       if (r.state === 'approved') return [{ text: `AI review ✓ approved at ${r.pr.headRefOid.slice(0, 7)}`, color: 'green' }]
       if (r.state === 'passed') return [{ text: 'AI review ✓ passed (not approved)', color: 'green' }]
-      const rows = [{ text: `AI review ✗ blocked (${r.problems.length})`, color: 'red' }]
+      const rows = [{ text: `AI review ✗ blocked (${r.problems.length})${expanded === p.url ? '' : '  d for details'}`, color: 'red' }]
+      if (expanded === p.url) return rows
       for (const x of r.problems.slice(0, 3)) rows.push({ text: `  ${x}`, color: 'red' })
-      if (r.problems.length > 3) rows.push({ text: `  … ${r.problems.length - 3} more in the transcript`, color: 'red' })
+      if (r.problems.length > 3) rows.push({ text: `  … ${r.problems.length - 3} more (d for details)`, color: 'red' })
+      return rows
+    }
+
+    // The details of the open PR: every problem and finding of its AI review, locations linked to the reviewed lines
+    // indent: extra columns, so wrapped lines line up under the first
+    type DetailRow = { text: string; color?: string; dim?: boolean; href?: string; at?: string; indent?: number }
+    const detailRows = (p: PR): DetailRow[] => {
+      if (expanded !== p.url) return []
+      const r = reviews.get(p.url)
+      if (!r || r.state === 'running' || r.state === 'cancelled') return [{ text: 'No AI review yet: v to run one', dim: true }]
+      const repo = p.repository.nameWithOwner
+      const lineHref = (location: string) => {
+        const m = location.match(/^([\w@+./-]+?)(?::(\d+))?(?:[-:,].*)?$/)
+        return m?.[1] ? safeHref(`https://github.com/${repo}/blob/${r.pr.headRefOid}/${m[1]}${m[2] ? `#L${m[2]}` : ''}`) : undefined
+      }
+      const rows: DetailRow[] = []
+      const fromFindings = new Set(r.findings.filter((f) => isCandidate(f) && f.confirmed !== false).map((f) => f.summary))
+      for (const x of r.problems) if (![...fromFindings].some((s) => x.endsWith(s))) rows.push({ text: `✗ ${x}`, color: 'red' })
+      const order = (f: Finding) =>
+        isCandidate(f) && f.confirmed !== false ? 0 : f.severity === 'important' ? 1 : f.severity === 'nit' ? 2 : 3
+      for (const f of [...r.findings].sort((a, b) => order(a) - order(b))) {
+        const blocking = isCandidate(f) && f.confirmed !== false
+        const mark = blocking
+          ? '✗'
+          : f.confirmed === false
+            ? '↺ refuted'
+            : f.severity === 'important'
+              ? '△ low confidence'
+              : f.severity === 'nit'
+                ? '· nit'
+                : '· pre-existing'
+        const color = blocking ? 'red' : f.severity === 'nit' ? 'yellow' : undefined
+        const href = lineHref(f.location)
+        const style = color ? { color } : { dim: true }
+        // Mark, perspective and location on one line (the location links to the line), the summary and evidence below
+        rows.push({ text: `${mark} [${f.perspective}] ${f.location}`, ...style, ...(href ? { href, at: f.location } : {}) })
+        rows.push({ text: f.summary, ...style, indent: 2 })
+        if (f.evidence) rows.push({ text: f.evidence, dim: true, indent: 4 })
+      }
+      if (rows.length === 0) rows.push({ text: 'No findings', dim: true })
       return rows
     }
 
@@ -1789,7 +2067,8 @@ export function register(on: On, options: PluginOptions) {
         const failed = failedChecks(p).length
         return 1 + wrappedLines(metaLine(p), bodyColumns) + Math.min(failed, MAX_FAILED_CHECKS) + (failed > MAX_FAILED_CHECKS ? 1 : 0)
       }
-      const extra = reviewRows(p).reduce((n, r) => n + wrappedLines(r.text, bodyColumns), 0)
+      const indentOf = (r: object) => ('indent' in r && typeof r.indent === 'number' ? r.indent : 0)
+      const extra = [...reviewRows(p), ...detailRows(p)].reduce((n, r) => n + wrappedLines(r.text, bodyColumns - indentOf(r)), 0)
       if (cfg.analysis === 'off') return 1 + wrappedLines(metaLine(p), bodyColumns) + extra
       const impact = impactLine(p)
       return (
@@ -1805,7 +2084,7 @@ export function register(on: On, options: PluginOptions) {
       const isSelected = selected === p.url
       const repo = p.repository.nameWithOwner.split('/')[1] ?? p.repository.nameWithOwner
       // Title row: selection marker and icon, PR number as a link (Cmd+click opens GitHub), title
-      const prefix = `${isSelected ? '▶' : ' '} ${icon(p)} `
+      const prefix = `${isSelected ? '▶' : ' '}${isUnread(p) ? '●' : ' '}${icon(p)} `
       const label = `${repo}#${p.number}`
       const prLink = safeHref(p.url)
       const title = ` ${p.isDraft ? '[draft] ' : ''}${p.title}`
@@ -1846,6 +2125,20 @@ export function register(on: On, options: PluginOptions) {
           }),
         )
       }
+      for (const r of tab === 'review' ? detailRows(p) : []) {
+        const style = { dimColor: r.dim === true, ...(r.color ? { color: r.color } : {}) }
+        children.push(
+          Box({
+            key: `detail-${p.url}-${children.length}`,
+            paddingLeft: INDENT + (r.indent ?? 0),
+            flexDirection: 'row',
+            children:
+              r.href && r.at
+                ? [Text({ ...style, children: [r.text.slice(0, r.text.lastIndexOf(r.at))] }), link(r.href, r.at)]
+                : [Text({ ...style, wrap: 'wrap', children: [r.text] })],
+          }),
+        )
+      }
       // My PRs: failed checks by name, with links
       if (tab === 'mine') {
         const failed = failedChecks(p)
@@ -1883,6 +2176,20 @@ export function register(on: On, options: PluginOptions) {
         }),
       )
     }
+    const snoozedHere = tab === 'review' ? g.snoozedReview : g.snoozedMine
+    if (snoozedHere.length > 0) {
+      folds.push(
+        small(
+          'fold-snoozed',
+          `${showSnoozed ? 'Hide' : 'Show'} ${snoozedHere.length} snoozed ${snoozedHere.length === 1 ? 'PR' : 'PRs'} ⏸`,
+          'z',
+          () => {
+            showSnoozed = !showSnoozed
+            redraw()
+          },
+        ),
+      )
+    }
     if (tab === 'mine' && g.stale.length > 0) {
       folds.push(
         small('fold-stale', `${showStale ? 'Hide' : 'Show'} ${g.stale.length} stale PRs (${cfg.stale_days}+ days) 💤`, 's', () => {
@@ -1895,7 +2202,7 @@ export function register(on: On, options: PluginOptions) {
     // When the list does not fit, grow a window around the selected PR as far as it fits
     const heights = rows.map(linesOf)
     const total = heights.reduce((sum, h) => sum + h, 0)
-    const room = Math.max(3, paneLimit - top.length - folds.length - 1)
+    const room = Math.max(3, paneLimit - topLines - folds.length - 1)
     let shown = rows
     let shownHeight = total
     const more: El[] = []
@@ -1931,6 +2238,28 @@ export function register(on: On, options: PluginOptions) {
       more.push(Text({ dimColor: true, children: [`  ${parts.join('  ')}  (j/k to move)`] }))
     }
 
+    if (showHelp) {
+      const help = [
+        ['1 / 2', 'To review / My PRs'],
+        ['j / k', 'next / previous PR'],
+        ['e', 'ask Claude to explain the PR (read-only), or diagnose your own'],
+        ['a', 'approve, after a confirmation'],
+        ['v', 'AI review, then approve if it passes (v again cancels a running review)'],
+        ['d', 'details: every finding of the AI review, with links to the lines'],
+        ['x', 'snooze the PR until it is updated (z shows snoozed PRs)'],
+        ['o', 'open in the browser'],
+        ['b / s', 'show or hide bot PRs / stale PRs'],
+        ['r', 'fetch again'],
+        ['h', 'close this help'],
+      ]
+      const helpRows = [
+        ...help.map(([k, what]) => Text({ children: [`  ${(k ?? '').padEnd(7)}${what}`] })),
+        Text({ dimColor: true, children: ['  ● marks PRs updated since you last selected them'] }),
+      ]
+      lastHeight = topLines + 1 + helpRows.length
+      return Box({ flexDirection: 'column', children: [...top, Text({ children: [' '] }), ...helpRows] })
+    }
+
     const list: El[] = shown.map(line)
     if (rows.length === 0) {
       list.push(Text({ dimColor: true, children: [tab === 'review' ? '  No review requests from people' : '  No open PRs'] }))
@@ -1938,7 +2267,7 @@ export function register(on: On, options: PluginOptions) {
 
     const tree = [...top, Text({ children: [' '] }), ...list, ...more, ...folds]
     // Rows drawn (a PR counts as several)
-    lastHeight = top.length + 1 + (rows.length === 0 ? 1 : shownHeight) + more.length + folds.length
+    lastHeight = topLines + 1 + (rows.length === 0 ? 1 : shownHeight) + more.length + folds.length
     return Box({ flexDirection: 'column', children: tree })
   })
 }
