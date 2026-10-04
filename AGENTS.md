@@ -12,6 +12,8 @@ pnpm run lint:fix                # apply Biome fixes
 claude -p "/pr-inbox refresh" --plugin-dir .   # smoke test against real GitHub data
 ```
 
+`pnpm run demo` runs the mod in Claude Code against made-up PRs (fake `gh` in `scripts/demo/`); use it to see UI changes for real, and keep its data made up (no real organizations, people or repositories). Exit it with `/exit` so the real plugin store is put back.
+
 Run `pnpm run check` before every commit; all of it must pass. `claude plugin validate` does not catch everything the loader refuses (for example a function given `$` that shares a name with another binding): also load the mod for real, `claude -p "/pr-inbox refresh" --plugin-dir .` must print the counts.
 
 ## Layout

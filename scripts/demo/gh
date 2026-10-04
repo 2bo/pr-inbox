@@ -1,0 +1,361 @@
+#!/usr/bin/env node
+// A fake gh for trying pr-inbox (pnpm run demo) and taking screenshots: every PR, person and repository here is made
+// up, and nothing is sent anywhere.
+// Handles only the calls the mod makes; everything else fails.
+
+// Rounded to the hour, so update times stay the same between fetches and analyses are not redone
+const now = Math.floor(Date.now() / 3600000) * 3600000
+const H = 3600 * 1000
+const ago = (h) => new Date(now - h * H).toISOString()
+const oid = (n) => n.toString(16).padStart(40, '0')
+
+const reqd = (hours) => ({
+  timelineItems: { nodes: [{ createdAt: ago(hours), requestedReviewer: { __typename: 'User', login: 'you' } }] },
+})
+const ci = (state, contexts) => ({
+  commits: { nodes: [{ commit: { statusCheckRollup: { state, ...(contexts ? { contexts: { nodes: contexts } } : {}) } } }] },
+})
+const run = (name, conclusion, id) => ({
+  __typename: 'CheckRun',
+  name,
+  conclusion,
+  detailsUrl: `https://github.com/acme/storefront/actions/runs/${id}`,
+})
+
+const pr = (repo, number, title, author, extra) => ({
+  number,
+  title,
+  url: `https://github.com/acme/${repo}/pull/${number}`,
+  isDraft: false,
+  createdAt: ago(24 * 7),
+  updatedAt: ago(2),
+  headRefOid: oid(number),
+  authorAssociation: author.endsWith('[bot]') ? 'NONE' : 'MEMBER',
+  isCrossRepository: false,
+  additions: 10,
+  deletions: 2,
+  repository: { nameWithOwner: `acme/${repo}` },
+  author: { login: author, __typename: author.endsWith('[bot]') ? 'Bot' : 'User' },
+  reviewDecision: 'REVIEW_REQUIRED',
+  mergeable: 'MERGEABLE',
+  ...ci('SUCCESS'),
+  ...extra,
+})
+
+const REVIEW = [
+  pr('storefront', 482, 'Rate-limit login attempts per IP and account', 'lena-park', {
+    additions: 214,
+    deletions: 37,
+    ...reqd(74),
+  }),
+  pr('billing-api', 1290, 'Add order history page behind new_order_history flag', 'mtanaka', {
+    additions: 156,
+    deletions: 12,
+    ...reqd(27),
+  }),
+  pr('docs', 77, 'Fix broken links in the onboarding guide', 'rkumar', { additions: 9, deletions: 9, ...reqd(6) }),
+  pr('storefront', 488, 'fix(deps): update dependency @acme-oss/http-client to v3', 'renovate[bot]', {
+    headRefName: 'renovate/acme-oss-http-client-3.x',
+    additions: 4,
+    deletions: 4,
+    ...reqd(50),
+  }),
+  pr('storefront', 489, 'chore(deps): bump fast-json-stable from 1.4.2 to 1.4.3', 'dependabot[bot]', {
+    headRefName: 'dependabot/npm_and_yarn/fast-json-stable-1.4.3',
+    additions: 3,
+    deletions: 3,
+    ...reqd(96),
+  }),
+]
+
+const MINE = [
+  pr('storefront', 475, 'Move session storage to Redis', 'you', {
+    additions: 188,
+    deletions: 64,
+    reviewDecision: 'CHANGES_REQUESTED',
+    ...ci('FAILURE', [
+      run('test (ubuntu-latest)', 'FAILURE', 9101),
+      run('lint', 'SUCCESS', 9102),
+      run('e2e / checkout', 'FAILURE', 9103),
+    ]),
+  }),
+  pr('billing-api', 1281, 'Paginate GET /v2/invoices', 'you', { additions: 97, deletions: 21, reviewDecision: 'APPROVED' }),
+  pr('storefront', 470, 'Extract feature flag helpers into a module', 'you', {
+    additions: 132,
+    deletions: 118,
+    ...ci('PENDING'),
+  }),
+  pr('infra', 88, 'Tune autoscaling thresholds for queue workers', 'you', { additions: 14, deletions: 8 }),
+  pr('docs', 61, 'API versioning guide', 'you', { isDraft: true, updatedAt: ago(24 * 45), additions: 240, deletions: 0 }),
+]
+
+// Bodies, files and diffs the analysis reads
+const DETAILS = {
+  'storefront/482': {
+    body: 'Adds Rack::Attack throttles on POST /login: 5 attempts per account per minute and 20 per IP. Blocked requests get 429 and the login form shows "Too many attempts, try again in a minute".',
+    files: [
+      ['config/initializers/rack_attack.rb', 48, 0],
+      ['app/controllers/sessions_controller.rb', 31, 12],
+      ['app/views/sessions/new.html.erb', 6, 1],
+      ['spec/requests/login_throttle_spec.rb', 129, 24],
+    ],
+    diff: `diff --git a/config/initializers/rack_attack.rb b/config/initializers/rack_attack.rb
+new file mode 100644
+--- /dev/null
++++ b/config/initializers/rack_attack.rb
+@@ -0,0 +1,14 @@
++class Rack::Attack
++  throttle('login/ip', limit: 20, period: 60) do |req|
++    req.ip if req.path == '/login' && req.post?
++  end
++
++  throttle('login/email', limit: 5, period: 60) do |req|
++    req.params['email'].to_s.downcase.presence if req.path == '/login' && req.post?
++  end
++
++  self.throttled_responder = lambda do |_req|
++    [429, { 'Content-Type' => 'text/html' }, [ApplicationController.render('sessions/throttled')]]
++  end
++end
+diff --git a/app/controllers/sessions_controller.rb b/app/controllers/sessions_controller.rb
+--- a/app/controllers/sessions_controller.rb
++++ b/app/controllers/sessions_controller.rb
+@@ -12,9 +12,14 @@ class SessionsController < ApplicationController
+   def create
+-    user = User.find_by(email: params[:email])
+-    if user&.authenticate(params[:password])
++    user = User.find_by(email: params[:email].to_s.downcase)
++    if user&.authenticate(params[:password]) && !user.locked?
+       sign_in(user)
+       redirect_to root_path
+     else
++      user&.increment!(:failed_logins)
++      user&.lock! if user && user.failed_logins >= 10
+       flash.now[:alert] = t('sessions.invalid')
+       render :new, status: :unprocessable_entity
+     end
+`,
+  },
+  'billing-api/1290': {
+    body: 'New /orders/history page and GET /v2/orders/history endpoint. Both are behind the new_order_history flag (Flipper), which stays off by default.',
+    files: [
+      ['app/controllers/v2/order_history_controller.rb', 58, 0],
+      ['config/routes.rb', 4, 0],
+      ['app/views/orders/history.html.erb', 61, 0],
+      ['spec/requests/v2/order_history_spec.rb', 33, 12],
+    ],
+    diff: `diff --git a/app/controllers/v2/order_history_controller.rb b/app/controllers/v2/order_history_controller.rb
+new file mode 100644
+--- /dev/null
++++ b/app/controllers/v2/order_history_controller.rb
+@@ -0,0 +1,18 @@
++module V2
++  class OrderHistoryController < ApplicationController
++    before_action { head :not_found unless Flipper.enabled?(:new_order_history, current_user) }
++
++    def index
++      orders = current_user.orders.completed.order(created_at: :desc).page(params[:page])
++      render json: OrderSerializer.new(orders).serializable_hash
++    end
++  end
++end
+diff --git a/config/routes.rb b/config/routes.rb
+--- a/config/routes.rb
++++ b/config/routes.rb
+@@ -40,6 +40,10 @@ Rails.application.routes.draw do
+   namespace :v2 do
++    get 'orders/history', to: 'order_history#index'
+   end
+`,
+  },
+  'docs/77': {
+    body: 'Fixes nine links that moved when the handbook was reorganized.',
+    files: [['guides/onboarding.md', 9, 9]],
+    diff: `diff --git a/guides/onboarding.md b/guides/onboarding.md
+--- a/guides/onboarding.md
++++ b/guides/onboarding.md
+@@ -14,7 +14,7 @@
+-See [local setup](../setup/local.md) before your first deploy.
++See [local setup](../handbook/setup/local.md) before your first deploy.
+-Ask in [#help](../community/help.md) if you get stuck.
++Ask in [#help](../handbook/community/help.md) if you get stuck.
+`,
+  },
+  'storefront/488': {
+    body: 'This PR contains the following updates: eslint 9.13.0 -> 9.14.0',
+    files: [
+      ['package.json', 1, 1],
+      ['pnpm-lock.yaml', 5, 5],
+    ],
+    diff: `diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -31,7 +31,7 @@
+-    "eslint": "9.13.0",
++    "eslint": "9.14.0",
+`,
+  },
+  'storefront/488': {
+    body: 'This PR contains the following updates:\n\n| Package | Change |\n|---|---|\n| @acme-oss/http-client | 2.8.1 -> 3.0.0 |\n\nRelease notes: https://github.com/acme-oss/http-client/releases/tag/v3.0.0',
+    files: [
+      ['package.json', 1, 1],
+      ['pnpm-lock.yaml', 3, 3],
+    ],
+    diff: `diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -18,7 +18,7 @@
+-    "@acme-oss/http-client": "^2.8.1",
++    "@acme-oss/http-client": "^3.0.0",
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -40,10 +40,10 @@
+-  '@acme-oss/http-client@2.8.1':
+-    resolution: {integrity: sha512-aaaa}
++  '@acme-oss/http-client@3.0.0':
++    resolution: {integrity: sha512-bbbb}
+     dependencies:
+-      '@acme-oss/retry-core': 1.2.0
++      '@acme-oss/retry-core': 2.0.1
+`,
+  },
+  'storefront/489': {
+    body: 'Bumps fast-json-stable from 1.4.2 to 1.4.3.\n\nRelease notes: Fix key ordering for objects with numeric keys.',
+    files: [
+      ['package.json', 1, 1],
+      ['pnpm-lock.yaml', 2, 2],
+    ],
+    diff: `diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -21,7 +21,7 @@
+-    "fast-json-stable": "1.4.2",
++    "fast-json-stable": "1.4.3",
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -88,5 +88,5 @@
+-  fast-json-stable@1.4.2:
+-    resolution: {integrity: sha512-cccc}
++  fast-json-stable@1.4.3:
++    resolution: {integrity: sha512-dddd}
+`,
+  },
+  'infra/91': {
+    body: 'Bumps actions/checkout from 4 to 5.',
+    files: [['.github/workflows/deploy.yml', 3, 3]],
+    diff: `diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml
+--- a/.github/workflows/deploy.yml
++++ b/.github/workflows/deploy.yml
+@@ -18,7 +18,7 @@ jobs:
+   deploy:
+     steps:
+-      - uses: actions/checkout@v4
++      - uses: actions/checkout@v5
+`,
+  },
+}
+
+// Repository files at the PR head, code search hits and upstream release notes, for the AI review
+const FILES = {
+  'acme/storefront': {
+    'CLAUDE.md': '# storefront\n\nClaude, follow these rules when you work in this repository:\n- Ruby on Rails app with a TypeScript frontend in web/\n- All HTTP calls from the frontend go through web/lib/api.ts\n- Every behavior change needs a spec or a vitest test\n- Always run pnpm lint before you finish\n',
+    'web/lib/api.ts':
+      "import { createClient } from '@acme-oss/http-client'\n\nexport const api = createClient({\n  baseUrl: '/api',\n  retry: { attempts: 3, backoffMs: 200 },\n  timeoutMs: 5000,\n})\n",
+    'web/lib/stable.ts': "import stringify from 'fast-json-stable'\n\nexport const cacheKey = (v: unknown) => stringify(v)\n",
+    'package.json':
+      '{\n  "name": "storefront-web",\n  "private": true,\n  "engines": { "node": ">=20" },\n  "dependencies": {\n    "@acme-oss/http-client": "^2.8.1",\n    "fast-json-stable": "1.4.2"\n  }\n}\n',
+    '.nvmrc': '22\n',
+  },
+}
+const SEARCH = {
+  'acme/storefront': [
+    { path: 'web/lib/api.ts', words: ['@acme-oss/http-client', 'createClient', 'retry', 'http-client'] },
+    { path: 'web/lib/stable.ts', words: ['fast-json-stable', 'stringify'] },
+  ],
+}
+const RELEASES = {
+  'acme-oss/http-client': [
+    {
+      tag_name: 'v3.0.0',
+      name: 'v3.0.0',
+      published_at: ago(24 * 9),
+      body: '## Breaking changes\n- The `retry` option of `createClient` is renamed to `retries`. The old name is ignored with no warning.\n- Node.js 18 is no longer supported; Node.js 20 or later is required.\n\n## Features\n- `createClient` accepts `signal` for cancellation.',
+    },
+    { tag_name: 'v2.8.1', name: 'v2.8.1', published_at: ago(24 * 60), body: '## Fixes\n- Retry on 429 responses honors Retry-After.' },
+  ],
+  'acme-oss/retry-core': [{ tag_name: 'v2.0.1', name: 'v2.0.1', published_at: ago(24 * 12), body: '## Breaking changes\n- Internal API reshaped for http-client v3. Not used directly by applications.' }],
+  'acme-oss/fast-json-stable': [{ tag_name: 'v1.4.3', name: 'v1.4.3', published_at: ago(24 * 20), body: '## Fixes\n- Key ordering for objects with numeric keys now matches the spec.' }],
+}
+
+const all = [...REVIEW, ...MINE]
+const byUrl = (url) => all.find((p) => p.url === url)
+const key = (p) => `${p.repository.nameWithOwner.split('/')[1]}/${p.number}`
+
+const args = process.argv.slice(2)
+const out = (v) => process.stdout.write(typeof v === 'string' ? v : JSON.stringify(v))
+
+const fail = (msg) => {
+  process.stderr.write(`${msg}\n`)
+  process.exit(1)
+}
+const flag = (name) => {
+  const i = args.indexOf(name)
+  return i >= 0 ? args[i + 1] : undefined
+}
+
+if (args[0] === 'api' && args[1] === 'graphql') {
+  out({ data: { viewer: { login: 'you' }, review: { nodes: REVIEW }, mine: { nodes: MINE } } })
+} else if (args[0] === 'api' && args.includes('event=APPROVE')) {
+  out({ state: 'APPROVED' })
+} else if (args[0] === 'api') {
+  const path = args.find((a) => a.startsWith('repos/')) ?? ''
+  let m
+  if ((m = path.match(/^repos\/([^/]+\/[^/]+)\/contents\/([^?]+)/))) {
+    const file = FILES[m[1]]?.[decodeURIComponent(m[2])]
+    if (file === undefined) fail('gh: Not Found (HTTP 404)')
+    out(file)
+  } else if ((m = path.match(/^repos\/([^/]+\/[^/]+)\/releases/))) {
+    const r = RELEASES[m[1]]
+    if (!r) fail('gh: Not Found (HTTP 404)')
+    out(r)
+  } else if (/\/pulls\/\d+\/comments$/.test(path)) {
+    out([])
+  } else fail(`fake gh: unsupported: gh ${args.join(' ')}`)
+} else if (args[0] === 'pr' && args[1] === 'merge') {
+  out('')
+} else if (args[0] === 'run' && args[1] === 'rerun') {
+  out('')
+} else if (args[0] === 'search' && args[1] === 'code') {
+  const q = String(args[2] ?? '').toLowerCase()
+  const hits = (SEARCH[flag('--repo')] ?? []).filter((f) => f.words.some((w) => w.toLowerCase().includes(q) || q.includes(w.toLowerCase())))
+  out(hits.map((h) => ({ path: h.path, textMatches: [{ fragment: FILES[flag('--repo')]?.[h.path] ?? '' }] })))
+} else if (args[0] === 'issue' && args[1] === 'view') {
+  fail('GraphQL: Could not resolve to an issue')
+} else if (args[0] === 'pr' && args[1] === 'view' && flag('-R')) {
+  fail('GraphQL: Could not resolve to a PullRequest')
+} else if (args[0] === 'pr' && (args[1] === 'view' || args[1] === 'diff')) {
+  const p = byUrl(args[2])
+  if (!p) fail('no such pull request')
+  const d = DETAILS[key(p)] ?? { body: '', files: [], diff: '' }
+  const files = d.files.map(([path, additions, deletions]) => ({ path, additions, deletions }))
+  const fields = flag('--json') ?? ''
+  if (args[1] === 'diff') out(d.diff)
+  else if (args.includes('--web')) out('')
+  else if (fields === 'headRefOid') out({ headRefOid: p.headRefOid })
+  else if (fields.startsWith('comments')) out({ comments: [], reviews: [] })
+  else
+    out({
+      title: p.title,
+      body: d.body,
+      author: p.author,
+      baseRefName: 'main',
+      headRefName: p.headRefName ?? `feature/${p.number}`,
+      labels: [],
+      files,
+      closingIssuesReferences: [],
+    })
+} else {
+  fail(`fake gh: unsupported: gh ${args.join(' ')}`)
+}
