@@ -920,7 +920,7 @@ const REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 async function approve($: EngineInterface, pr: PR): Promise<void> {
   const a = analysisOf(pr)
   const outdated = !a || 'failed' in a || a.updatedAt !== pr.updatedAt ? ' The analysis does not cover the latest update.' : ''
-  if (await confirmApproval($, pr, outdated)) await postApproval($, pr)
+  if (await confirmApproval($, pr, outdated)) await postApproval($, pr, 'you chose Approve in the dialog of a')
 }
 
 // The confirmation dialog: repository, number, commit and a defused title, then a note
@@ -929,7 +929,8 @@ async function confirmApproval($: EngineInterface, pr: PR, note: string): Promis
   const title = fit(pr.title.replace(/["“”]/g, "'"), 80)
   try {
     const answer = await $.ui.ask(`Approve ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (“${title}”)?${note}`, {
-      options: ['Approve', 'Cancel'],
+      // Cancel comes first, so it is the one selected: approving takes a deliberate ↓ then Enter
+      options: ['Cancel', 'Approve'],
       header: 'Approve',
     })
     return answer === 'Approve'
@@ -953,7 +954,7 @@ async function currentHead($: EngineInterface, pr: PR): Promise<{ head: string; 
 
 // Post the approval. The head is read again right before, the approval is refused if new commits arrived,
 // and the review is pinned to the commit that was shown. Returns whether it was approved
-async function postApproval($: EngineInterface, pr: PR): Promise<boolean> {
+async function postApproval($: EngineInterface, pr: PR, how: string): Promise<boolean> {
   const sha = pr.headRefOid.slice(0, 7)
   const fail = (why: string) => $.ui.toast(`Approve failed: ${fit(clean(why), 80)}`, { timeoutMs: 8000 })
   if (!REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) {
@@ -986,6 +987,8 @@ async function postApproval($: EngineInterface, pr: PR): Promise<boolean> {
     return false
   }
   $.ui.toast(`✅ Approved #${pr.number} at ${sha}`)
+  // Who decided, and how, stays in the transcript
+  $.ui.log(`pr-inbox approved ${pr.repository.nameWithOwner}#${pr.number} at ${sha}: ${how}`)
   await refresh($)
   return true
 }
@@ -1770,7 +1773,8 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
       const ok = auto || (await confirmReviewed($, run, enabledPerspectives(pr), nits))
       // The dialog took the keys: give them back to the pane, so j/k work again
       if (!auto) await focusPane($)
-      run.state = ok && (await postApproval($, pr)) ? 'approved' : 'passed'
+      const how = auto ? 'automatically (ai_approve auto, the AI review passed)' : 'you chose Approve in the AI review dialog'
+      run.state = ok && (await postApproval($, pr, how)) ? 'approved' : 'passed'
     }
     await $.store.set(`review:${pr.url}`, {
       head: pr.headRefOid,

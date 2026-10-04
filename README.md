@@ -30,7 +30,7 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 | `1` / `2` | To review / My PRs |
 | `j` / `k` | Select the next / previous PR |
 | `e` | Ask Claude to explain the PR (for your own PR, to diagnose what blocks it). Claude reads the description, comments, reviews and linked issues and PRs, not only the diff |
-| `a` | Approve (runs only after you choose **Approve** in the confirmation dialog) |
+| `a` | Approve (runs only after you choose **Approve** in the confirmation dialog, where **Cancel** is selected first) |
 | `v` | AI review, then approve if it passes (see below). `v` again cancels a running review |
 | `d` | Details: every finding of the AI review, with links to the lines |
 | `x` | Snooze the PR until it is updated (`z` shows snoozed PRs) |

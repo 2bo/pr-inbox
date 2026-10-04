@@ -153,6 +153,8 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
   const toasts: string[] = []
   const questions: string[] = []
   const logs: string[] = []
+  // The option labels of each dialog, in order
+  const choices: string[][] = []
   const screened: string[] = []
   // The AI review's model calls: plans, reviews and verifications, with their model
   const reviewCalls: { kind: 'gather' | 'review' | 'verify'; prompt: string; model: string }[] = []
@@ -252,10 +254,11 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
     if (e.tool !== 'AskUserQuestion') return { result: 'ok' }
     const question = e.questions[0]?.question ?? ''
     questions.push(question)
+    choices.push((e.questions[0]?.options ?? []).map((o) => (typeof o === 'string' ? o : o.label)))
     if (opts.dismiss) return { deny: 'dismissed' }
     return { result: { answers: { [question]: opts.answer ?? 'Cancel' } } }
   })
-  return { calls, prompts, systems, submitted, statuses, toasts, questions, logs, screened, reviewCalls, store, clock }
+  return { calls, prompts, systems, submitted, statuses, toasts, questions, choices, logs, screened, reviewCalls, store, clock }
 }
 
 // Start the session and run until the fetch and background analyses finish
@@ -1598,5 +1601,15 @@ test('ai_approve auto treats a PR it would still ask about like confirm', { opti
   expect(reviewsOf(s).length).toBe(5)
   expect(s.questions.at(-1)).toContain('⚠ Check before approving')
   expect(approvedAt(s)).toEqual([])
+  await ui.unmount()
+})
+
+test('the approve dialog selects Cancel first, and an approval says in the transcript who decided', async ($, on) => {
+  const s = stubs(on, { answer: 'Approve' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-approve' })
+  expect(s.choices.at(-1)).toEqual(['Cancel', 'Approve'])
+  expect(s.logs).toContain('pr-inbox approved acme/app#11 at aaaaaaa: you chose Approve in the dialog of a')
   await ui.unmount()
 })
