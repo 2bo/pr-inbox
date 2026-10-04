@@ -270,7 +270,7 @@ async function start($: TestEngine, clock: ReturnType<typeof mock.clock>) {
 test('fetches on start and shows the counts under the prompt', async ($, on) => {
   const s = stubs(on)
   await start($, s.clock)
-  expect(s.statuses.at(-1)).toBe('👀 To review 2 (+1 bot) · ⚠ High risk 1 · 🔴 Needs action 1 · ✅ Ready 1 · ⏳ Waiting 1')
+  expect(s.statuses.at(-1)).toBe('review 2 ⚙1 · ▲1 high │ mine ✗1 fix · ✓1 ship · …1 wait')
 })
 
 // Get a whole PR row (title, summary, status, failed checks)
@@ -308,7 +308,7 @@ const linksIn = (json: string) => {
   walk(JSON.parse(json))
   return out
 }
-const blueLink = (href: string, text: string) => expect.objectContaining({ href, text, color: '#00e5ff', underline: true })
+const blueLink = (href: string, text: string) => expect.objectContaining({ href, text, color: '#00d7ff', underline: true })
 
 // The selected row starts with "▸"
 const isSelected = async (ui: Finder, number: number) =>
@@ -318,7 +318,7 @@ test('folds bot and stale PRs and expands them', async ($, on) => {
   const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
-  expect((await ui.find({ key: 'tab-review' }))?.props.label).toBe('review 2+1')
+  expect((await ui.find({ key: 'tab-review' }))?.props.label).toBe('◆ review 2 ⚙1')
   expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
   expect(await ui.find({ key: `line-${BOT.url}` })).toBeUndefined()
   await ui.press({ key: 'fold-bots' })
@@ -473,15 +473,15 @@ test('shows the summary, risk, reason and release impact in the list', async ($,
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   // The rows carry the risk as a badge; the selected PR's details carry the rest
-  expect((await ui.find({ type: 'Text', text: /^▲ HIGH$/ }))?.props.color).toBe('#ff3860')
-  expect(await ui.find({ type: 'Text', text: /^· LOW $/ })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^▲ HIGH$/ }))?.props.color).toBe('#ff5f5f')
+  expect(await ui.find({ type: 'Text', text: /^○ LOW $/ })).toBeDefined()
   // Only the label is colored; the sentence stays plain
   expect(await ui.find({ type: 'Text', text: /^【高】ログイン画面のバリデーションを修正$/ })).toBeDefined()
-  expect((await ui.find({ type: 'Text', text: /^【高】$/ }))?.props.color).toBe('#ff3860')
+  expect((await ui.find({ type: 'Text', text: /^【高】$/ }))?.props.color).toBe('#ff5f5f')
   expect(await ui.find({ type: 'Text', text: /根拠: 認証まわりの変更/ })).toBeDefined()
   // Release impact: yes / no (behind a flag) / unknown when the model returns no impact
   expect(await ui.find({ type: 'Text', text: /^リリース時: 影響あり — エンドユーザー: ログイン失敗時の文言が変わる$/ })).toBeDefined()
-  expect((await ui.find({ type: 'Text', text: /^リリース時: 影響あり$/ }))?.props.color).toBe('#ff2bd6')
+  expect((await ui.find({ type: 'Text', text: /^リリース時: 影響あり$/ }))?.props.color).toBe('#00d7ff')
   await ui.press({ key: 'nav-down' })
   expect(await ui.find({ type: 'Text', text: /^【低】一覧の並び順を変更$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^リリース時: 影響なし — フラグ new_list_order が無効のまま入る$/ })).toBeDefined()
@@ -584,13 +584,30 @@ test('beyond three failed checks, shows only the count of the rest', async ($, o
   await ui.unmount()
 })
 
-test('PR numbers are blue, underlined links to GitHub', async ($, on) => {
+test('PR numbers link to GitHub: blue and underlined on the selected row, quiet on the others', async ($, on) => {
   const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
+  expect(await isSelected(ui, 11)).toBe(true)
   expect(linksIn(await lineOf(ui, 11))).toContainEqual(blueLink(HUMAN.url, 'app#11'))
   await ui.press({ key: 'tab-mine' })
-  expect(linksIn(await lineOf(ui, 22))).toContainEqual(blueLink(READY.url, 'app#22'))
+  expect(await isSelected(ui, 22)).toBe(false)
+  const quiet = linksIn(JSON.stringify(await ui.find({ key: `line-${READY.url}` })))
+  expect(quiet).toContainEqual(expect.objectContaining({ href: READY.url, text: 'app#22', color: '#8787af' }))
+  expect(quiet.find((l) => l.href === READY.url)?.underline).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a long repository name is cut from the front so the PR number stays', async ($, on) => {
+  const long = { ...HUMAN, repository: { nameWithOwner: 'acme/a-very-long-repository-name-for-the-api' } }
+  const s = stubs(on, {
+    graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [long] }, mine: { nodes: [] } } }),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  const row = JSON.stringify(await ui.find({ key: `line-${HUMAN.url}` }))
+  expect(row).toContain('#11')
+  expect(row).toMatch(/…[\w-]+#11/)
   await ui.unmount()
 })
 
@@ -1119,6 +1136,35 @@ test('an important finding the verifier confirms blocks the approval', { options
   await ui.unmount()
 })
 
+test('in a short pane, long details are paged with n and the keys stay on screen', async ($, on) => {
+  const s = stubs(on, {
+    graphql: only(member()),
+    review: bugIn('Correctness & compatibility'),
+    verify: () => JSON.stringify({ results: [{ id: 1, confirmed: true, reason: 'yes' }], injection: false }),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, scroll: { offset: 0, bodyRows: 12 } } })
+  await ui.press({ key: 'act-ai-review' })
+  await settleReview(s)
+  await ui.press({ key: 'act-details' })
+  expect(await ui.find({ key: 'act-open' })).toBeDefined()
+  const more = await ui.find({ key: 'panel-more' })
+  expect(String(more?.props.label)).toMatch(/^↓ \d+ more lines$/)
+  // Page down to the end: the finding shows up, then n goes back to the top
+  let seen = false
+  for (let i = 0; i < 20 && String((await ui.find({ key: 'panel-more' }))?.props.label).startsWith('↓'); i++) {
+    await ui.press({ key: 'panel-more' })
+    if ((await lineOf(ui, 11)).includes('nil check missing')) seen = true
+    expect(await ui.find({ key: 'act-open' })).toBeDefined()
+  }
+  expect(seen).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /↑ \d+ lines above/ })).toBeDefined()
+  expect((await ui.find({ key: 'panel-more' }))?.props.label).toBe('↑ back to the top')
+  await ui.press({ key: 'panel-more' })
+  expect(await ui.find({ type: 'Text', text: /↑ \d+ lines above/ })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('an important finding the verifier refutes does not block', { options: { ai_approve: 'auto' } }, async ($, on) => {
   const s = stubs(on, {
     graphql: only(member()),
@@ -1390,7 +1436,7 @@ test('x snoozes a PR until it is updated, and z shows snoozed PRs', async ($, on
   // The next PR is selected
   expect(await isSelected(ui, 13)).toBe(true)
   expect((await ui.find({ key: 'fold-snoozed' }))?.props.label).toBe('Show 1 snoozed PR ⏸')
-  expect(s.statuses.at(-1)).toContain('To review 1 (+1 bot)')
+  expect(s.statuses.at(-1)).toContain('review 1 ⚙1')
   await ui.press({ key: 'fold-snoozed' })
   expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
   expect(s.store.get('snoozed')).toEqual({ [HUMAN.url]: HUMAN.updatedAt })
@@ -1637,7 +1683,7 @@ test('fold labels count in the singular for one', async ($, on) => {
   const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
-  expect((await ui.find({ key: 'fold-bots' }))?.props.label).toBe('Show 1 bot PR 🤖')
+  expect((await ui.find({ key: 'fold-bots' }))?.props.label).toBe('Show 1 bot PR ⚙')
   await ui.unmount()
 })
 
@@ -1645,7 +1691,7 @@ test('after a passed AI review, a says so in its label and its dialog', async ($
   const s = stubs(on, { answer: 'Cancel' })
   await start($, s.clock)
   const ui = await pressReview($, s)
-  expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('approve ✓')
+  expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('approve')
   await ui.press({ key: 'act-approve' })
   expect(s.questions.at(-1)).toContain('The AI review passed at this commit.')
   await ui.unmount()
@@ -1659,7 +1705,7 @@ test('after a blocked AI review, a warns with the reason', async ($, on) => {
   })
   await start($, s.clock)
   const ui = await pressReview($, s)
-  expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('approve ✗')
+  expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('approve')
   await ui.press({ key: 'act-approve' })
   expect(s.questions.at(-1)).toContain('⚠ The AI review blocked it: [Correctness & compatibility] app/login.rb:12 nil check missing.')
   await ui.unmount()
@@ -1676,7 +1722,7 @@ test('an approval says the PR leaves To review, and it is listed as approved rec
   expect(JSON.stringify(await ui.find({ key: `approved-${gone.url}` }))).toContain('app#99')
   expect(await ui.find({ key: `approved-${stale.url}` })).toBeUndefined()
   await ui.press({ key: 'act-approve' })
-  expect(s.toasts.some((t) => t.includes('It leaves To review'))).toBe(true)
+  expect(s.toasts.some((t) => t.includes('moved to Approved recently'))).toBe(true)
   expect((s.store.get('approved') as { url: string }[])[0]?.url).toBe(HUMAN.url)
   await ui.unmount()
 })
@@ -1686,7 +1732,10 @@ test('the help says how to move the focus to the pane', async ($, on) => {
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'help' })
-  expect(await ui.find({ type: 'Text', text: /Ctrl\+X Tab {2}move between the prompt and this pane/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Ctrl\+X Tab/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^move between the prompt and this pane/ })).toBeDefined()
+  // The symbols are explained too
+  expect(await ui.find({ type: 'Text', text: /risk from the analysis/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -1720,13 +1769,13 @@ test('the status line shows a running AI review, then one that passed and waits 
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-ai-review' })
   await settleReview(s)
-  expect(s.statuses.at(-1)).toContain('🤖 AI reviewing 1')
+  expect(s.statuses.at(-1)).toContain('⠿ AI 1')
   for (let i = 0; i < 4; i++) {
     await s.clock.advance(60_000)
     await settleReview(s)
   }
-  expect(s.statuses.at(-1)).toContain('☑ AI passed, not approved 1')
-  expect(s.statuses.at(-1)).not.toContain('AI reviewing')
+  expect(s.statuses.at(-1)).toContain('☑1 to approve')
+  expect(s.statuses.at(-1)).not.toContain('⠿ AI')
   await ui.unmount()
 })
 
@@ -1889,15 +1938,54 @@ test('the pane shows plainly whether it holds the keyboard', async ($, on) => {
   await start($, s.clock)
   const lit = await $.ui.mount(PANE)
   // A heavy neon rule, starting pink, and the logo's lamp lit
-  expect((await lit.find({ type: 'Text', text: /^━+$/ }))?.props.color).toBe('#ff2bd6')
-  expect((await lit.find({ type: 'Text', text: /^▍$/ }))?.props.color).toBe('#ff2bd6')
+  expect((await lit.find({ type: 'Text', text: /^━+$/ }))?.props.color).toBe('#ff00d7')
+  expect((await lit.find({ type: 'Text', text: /^▍$/ }))?.props.color).toBe('#ff00d7')
   expect(await lit.find({ key: 'act-approve' })).toBeDefined()
   await lit.unmount()
   const dark = await $.ui.mount({ ...PANE, props: { ...PANE.props, isFocused: false } })
   expect(await dark.find({ type: 'Text', text: /^━+$/ })).toBeUndefined()
-  expect((await dark.find({ type: 'Text', text: /^▍$/ }))?.props.color).not.toBe('#ff2bd6')
+  expect((await dark.find({ type: 'Text', text: /^▍$/ }))?.props.color).not.toBe('#ff00d7')
   // No keys work without the focus, so none are offered; the line says how to get it
   expect(await dark.find({ key: 'act-approve' })).toBeUndefined()
   expect(await dark.find({ type: 'Text', text: /to use the keys/ })).toBeDefined()
   await dark.unmount()
+})
+
+// ---- From the UI/UX review ----
+
+test('no inbox zero when the fetch failed: the error says how to retry', async ($, on) => {
+  const s = stubs(on, { fail: ['gh'], stderr: 'please run: gh auth login' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: /zero ✦/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^✗ GitHub CLI is not signed in/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /r: ⟳ retry/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('inbox zero only once there really is nothing to review', async ($, on) => {
+  const s = stubs(on, { graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [] } } }) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: /zero ✦/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a blocked review says why in its headline, worst perspective first', async ($, on) => {
+  const s = stubs(on, { answer: 'Cancel', review: (p) => (perspectiveOf(p) === 'Tests' ? 'not json' : PASS) })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  expect(await ui.find({ type: 'Text', text: /^AI review ✗ blocked · Tests reviewer could not answer · v to retry/ })).toBeDefined()
+  const line = await lineOf(ui, 11)
+  expect(line.indexOf('? Tests')).toBeLessThan(line.indexOf('✓ Purpose & scope'))
+  await ui.unmount()
+})
+
+test('the a dialog states the risk, the release impact and that there was no AI review', async ($, on) => {
+  const s = stubs(on, { answer: 'Cancel' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-approve' })
+  expect(s.questions.at(-1)).toContain('Risk: HIGH · release: user-visible change · AI review: none.')
+  await ui.unmount()
 })

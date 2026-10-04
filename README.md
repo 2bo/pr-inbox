@@ -2,7 +2,7 @@
 
 A Claude Code mod that turns your review requests and your own pull requests into an inbox, ordered by what needs you next.
 
-- A status line under the prompt keeps the counts in view (`👀 To review 3 (+2 bot) · ⚠ High risk 1 · 🔴 Needs action 1 · ✅ Ready 1 · ⏳ Waiting 2`)
+- A status line under the prompt keeps the counts in view (`review 3 ⚙2 · ▲1 high │ mine ✗1 fix · ✓1 ship · …2 wait`)
 - `/pr-inbox` opens a pane in the spirit of lazygit and gh-dash: one line per PR (risk or state, how long it has waited as a heat bar, CI, AI review), the selected PR's details under the list, and the keys on the bottom line. Two tabs
   - **To review**: review requests, the longest-waiting first. Each PR gets an AI summary, a risk level (low / medium / high) and its impact on release (visible to users / not visible / cannot tell), taking feature flags into account
   - **My PRs**: needs action (changes requested, CI failed, conflict) → ready to merge → waiting for review → stale. Failed CI checks are listed with links to their runs
@@ -33,6 +33,7 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 | `a` | Approve (runs only after you choose **Approve** in the confirmation dialog, where **Cancel** is selected first) |
 | `v` | AI review, then approve if it passes (see below). `v` again cancels a running review |
 | `d` | Details: every finding of the AI review, with links to the lines |
+| `n` | Next page of the details when they do not fit the pane (at the end, back to the top) |
 | `x` | Snooze the PR until it is updated (`z` shows snoozed PRs) |
 | `w` | AI review every bot PR not reviewed yet, one at a time (`w` again stops) |
 | `m` | Merge one of your PRs that is ready, after picking a method (pinned to the commit on screen) |
@@ -41,7 +42,7 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 | `h` | Show the keys |
 | `Ctrl+X` `Tab` | From the prompt back to the pane (or click it). Keys reach the pane only while it has the focus. The hint line under the prompt says which way to go |
 | `o` | Open in the browser |
-| `b` / `s` | Show or hide bot PRs / stale PRs |
+| `b` / `s` / `z` | Show or hide bot PRs / stale PRs / snoozed PRs |
 | `r` | Fetch again |
 | `Esc` | Back to the prompt; the pane stays open |
 | `q` | Close the pane (`/pr-inbox` opens it again) |
