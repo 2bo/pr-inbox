@@ -2901,12 +2901,15 @@ export function register(on: On, options: PluginOptions) {
 
     // One line per PR: selection and unread marks, kind, a badge (risk, or state for my PRs), the PR, its title, then how
     // long it has waited, CI and the AI review
-    const prWidth = Math.min(
+    const fullWidth = Math.min(
       24,
       Math.max(5, ...rows.map((p) => textWidth(`${p.repository.nameWithOwner.split('/')[1] ?? ''}#${p.number}`))),
-      // Narrow panes give the title the room: the label shrinks toward just "#123"
-      Math.max(5, Math.floor(columns / 5)),
     )
+    // Labels shrink (toward just "#123") only when the title would get too little room: the marks, badge, wait, CI and
+    // AI take about ROW_CELLS columns, and the title wants at least MIN_TITLE
+    const ROW_CELLS = 26
+    const MIN_TITLE = 28
+    const prWidth = Math.max(5, Math.min(fullWidth, columns - ROW_CELLS - MIN_TITLE))
     const rowOf = (p: PR) => {
       const isSelected = selected === p.url
       const repo = p.repository.nameWithOwner.split('/')[1] ?? p.repository.nameWithOwner

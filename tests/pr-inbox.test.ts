@@ -600,11 +600,17 @@ test('PR numbers link to GitHub: blue and underlined on the selected row, quiet 
 
 test('a long repository name is cut from the front so the PR number stays', async ($, on) => {
   const long = { ...HUMAN, repository: { nameWithOwner: 'acme/a-very-long-repository-name-for-the-api' } }
+  // One that fits is left whole, even next to a long one
+  const fits = {
+    ...pr({ number: 1281, url: 'https://github.com/acme/billing-api/pull/1281' }),
+    repository: { nameWithOwner: 'acme/billing-api' },
+  }
   const s = stubs(on, {
-    graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [long] }, mine: { nodes: [] } } }),
+    graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [long, fits] }, mine: { nodes: [] } } }),
   })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
+  expect(JSON.stringify(await ui.find({ key: `line-${fits.url}` }))).toContain('"billing-api#1281"')
   const row = JSON.stringify(await ui.find({ key: `line-${HUMAN.url}` }))
   expect(row).toContain('#11')
   expect(row).toMatch(/…[\w-]+#11/)
