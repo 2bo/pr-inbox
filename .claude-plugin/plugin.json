@@ -1,6 +1,6 @@
 {
   "name": "pr-inbox",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "An inbox for review requests (oldest first, with AI summary, risk and release impact) and your own PRs (what needs action first), with explain and approve from the pane",
   "author": {
     "name": "2bo"
@@ -96,7 +96,7 @@
     "review_model": {
       "type": "string",
       "title": "AI review: model",
-      "description": "The model of the reviewer and verifier subagents",
+      "description": "The model of the AI review: the reviewer and verifier calls",
       "default": "sonnet",
       "options": ["sonnet", "opus", "haiku"]
     },

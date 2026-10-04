@@ -12,7 +12,7 @@ pnpm run lint:fix                # apply Biome fixes
 claude -p "/pr-inbox refresh" --plugin-dir .   # smoke test against real GitHub data
 ```
 
-Run `pnpm run check` before every commit; all of it must pass.
+Run `pnpm run check` before every commit; all of it must pass. `claude plugin validate` does not catch everything the loader refuses (for example a function given `$` that shares a name with another binding): also load the mod for real, `claude -p "/pr-inbox refresh" --plugin-dir .` must print the counts.
 
 ## Layout
 
@@ -42,7 +42,7 @@ PR titles, bodies, diffs, comments and CI output are untrusted input written by 
 - **`e`**: the request keeps `UNTRUSTED_NOTE`, and the turn it starts runs under the `tool.call` guard (`READ_TOOLS`, `READ_GH`). Never widen the allowlist to a tool that writes, runs arbitrary commands, reaches the network or spawns agents
 - **Approve**: only after a person picks Approve in the `$.ui.ask` dialog, which names the commit. Re-read the head right before, refuse if it moved, and send the review pinned to that `commit_id`. No other path may approve, comment or push
 - **Prompt settings** (`explain_prompt`, `risk_*`, `release_impact`) replace only the criteria and the request. The JSON format, the untrusted fence and its rule, `contextNote` and `UNTRUSTED_NOTE` are always added and must stay out of reach of settings. `criteriaKey()` must cover every setting that changes the analysis
-- **AI review (`v`)**: the approve decision stays in code (`aiReview`/`finish`): every gate, no injection, every reviewer parsed, no confirmed important finding, head unchanged. Reviewers and the verifier get `pr_read` only; it reads the PR under review (repository and number fixed by the mod), upstream GitHub repositories for dependency updates, and nothing that writes. Every fetched text goes through `scrub()` and `screen()` and returns as labeled JSON. Failures and timeouts block. `auto` applies only to `TRUSTED_AUTHORS` and `DEPENDENCY_BOTS` on non-fork PRs
+- **AI review (`v`)**: the approve decision stays in code (`aiReview`/`finish`): every gate, no injection, every reviewer parsed, no confirmed important finding, head unchanged. The review's models are tool-free `$.model.complete` calls; what they ask to read goes through `readRequest` (validation) and `readForReview` (`scrub`, `screen`, labeled JSON) before they see it. Never hand them tools or a way to write. Failures and timeouts block. `auto` applies only to `TRUSTED_AUTHORS` and `DEPENDENCY_BOTS` on non-fork PRs. (Subagents cannot use a tool their own mod serves: a mod's hooks skip tool calls from its own spawns)
 - **Processes**: run external commands as argument lists through `$.process.run`, never through a shell. PR text given to `osascript` goes in `argv`, never into the `-e` script. Validate anything from settings that ends up in a query (`ORG_NAME`)
 - When what is sent, stored or allowed changes, update the Security section of README.md to match
 
