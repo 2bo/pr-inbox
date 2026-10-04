@@ -57,7 +57,7 @@ PR numbers and failed checks are hyperlinks: Cmd+click them in a terminal that s
    - Correctness & compatibility: bugs, breaking changes, migrations, rollback, performance
    - Tests: is the changed behavior tested
    - Security & secrets
-   - Conventions: the repository's CLAUDE.md, AGENTS.md, REVIEW.md, CONTRIBUTING.md and patterns
+   - Conventions: the repository's CLAUDE.md, AGENTS.md, REVIEW.md, CONTRIBUTING.md and patterns. These guides are read from the base branch, so a PR cannot rewrite the rules it is reviewed by. They talk to AI by design, so they are given apart from the PR content and not screened for injection
    - For **Dependabot and Renovate** PRs, instead: **Upgrade impact** (every package that changes, directly or in the lockfile; upstream release notes and changelogs; whether this repository uses what changed) and **Supply chain**
 4. **Verification**: important findings (confidence 80+) go to a verifier that tries to refute them against the code
 5. **Decision, in code**: it passes only when every gate holds, nothing looked like an injection, every reviewer answered, no important finding survived and the PR got no new commits. Nits do not block

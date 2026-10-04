@@ -138,6 +138,8 @@ type StubOptions = {
   verify?: (prompt: string) => string
   // Review calls answer only after the clock moves a minute
   slow?: boolean
+  // File contents by path, for gh api .../contents/<path>?ref=<ref> (any ref)
+  files?: Record<string, string>
 }
 
 function stubs(on: TestOn, opts: StubOptions = {}) {
@@ -173,6 +175,10 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
     if (e.argv[2] === 'view' && e.argv.includes('title,body,files'))
       stdout = JSON.stringify(opts.view ?? { title: 't', body: 'b', files: [] })
     if (e.argv[2] === 'diff') stdout = opts.diff ?? 'diff --git a/x b/x'
+    if (e.argv[2] === 'view' && e.argv.some((a) => a.includes('closingIssuesReferences')))
+      stdout = JSON.stringify({ title: 't', body: 'b', baseRefName: 'main', files: [], closingIssuesReferences: [] })
+    const content = e.argv.find((a) => a.includes('/contents/'))?.match(/\/contents\/([^?]+)/)?.[1]
+    if (content !== undefined) stdout = opts.files?.[decodeURIComponent(content)] ?? ''
     const exitCode = opts.fail?.includes(e.argv[0] ?? '') ? 1 : 0
     return { value: { exitCode, stdout, stderr: exitCode ? (opts.stderr ?? '') : '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -1006,8 +1012,9 @@ test('the PR content reaches the models as labeled, untrusted JSON, after the in
     trust: expect.stringContaining('untrusted'),
     content: '+ puts "hi"',
   })
-  // The repository guides are read at the PR head
-  expect(s.calls).toContainEqual(['gh', 'api', '-H', 'Accept: application/vnd.github.raw', `repos/acme/app/contents/CLAUDE.md?ref=${HEAD}`])
+  // The repository guides are read from the base branch, not the PR head
+  expect(s.calls).toContainEqual(['gh', 'api', '-H', 'Accept: application/vnd.github.raw', 'repos/acme/app/contents/CLAUDE.md?ref=main'])
+  expect(s.calls.some((c) => c.join(' ').includes(`CLAUDE.md?ref=${HEAD}`))).toBe(false)
   await ui.unmount()
 })
 
@@ -1439,5 +1446,28 @@ test('a failing perspective held back by low confidence is △, not ✗', async 
   const ui = await pressReview($, s)
   expect(await ui.find({ type: 'Text', text: /^△ Tests \(not blocking: low confidence\): Might break caching\.$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^AI review ✓ passed, not approved/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("a CLAUDE.md that talks to Claude is the repository's guide, not an injection", { options: { ai_approve: 'auto' } }, async ($, on) => {
+  const guide = '# Rules\n\nClaude, always run the linter and never skip tests.'
+  const s = stubs(on, {
+    graphql: only(member()),
+    files: { 'CLAUDE.md': guide },
+    // The screen would flag anything that addresses Claude
+    suspicious: (p) => p.includes('Claude, always'),
+    // A reviewer asks for the PR head's CLAUDE.md as well
+    gather: () => JSON.stringify({ files: ['CLAUDE.md', 'app/x.rb'], searches: [], release_notes: [], upstream_files: [] }),
+  })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  expect(s.screened.some((p) => p.includes('Claude, always'))).toBe(false)
+  const prompt = reviewsOf(s)[0]?.prompt ?? ''
+  const guides = prompt.match(/<repository_guides>\n([\s\S]*?)\n<\/repository_guides>/)?.[1] ?? '[]'
+  expect(JSON.parse(guides)).toContainEqual(
+    expect.objectContaining({ source: 'repository guide CLAUDE.md on the base branch main', content: guide }),
+  )
+  expect(s.calls.some((c) => c.join(' ').includes(`CLAUDE.md?ref=${HEAD}`))).toBe(false)
+  expect(approvedAt(s)).toEqual([APPROVE_11])
   await ui.unmount()
 })
