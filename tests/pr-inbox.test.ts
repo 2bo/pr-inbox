@@ -1883,3 +1883,18 @@ test('the hint under the prompt says how to move between the prompt and the open
   await unfocused.unmount()
   await away.unmount()
 })
+
+test('the pane shows plainly whether it holds the keyboard', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const lit = await $.ui.mount(PANE)
+  expect((await lit.find({ type: 'Text', text: /^ ● FOCUS $/ }))?.props.backgroundColor).toBe('#ff2bd6')
+  expect(await lit.find({ key: 'act-approve' })).toBeDefined()
+  await lit.unmount()
+  const dark = await $.ui.mount({ ...PANE, props: { ...PANE.props, isFocused: false } })
+  expect(await dark.find({ type: 'Text', text: /^── ○ ctrl\+x tab to focus ─+$/ })).toBeDefined()
+  // No keys work without the focus, so none are offered; the line says how to get it
+  expect(await dark.find({ key: 'act-approve' })).toBeUndefined()
+  expect(await dark.find({ type: 'Text', text: /ctrl\+x tab or click here to use the pane/ })).toBeDefined()
+  await dark.unmount()
+})

@@ -2337,7 +2337,20 @@ export function register(on: On, options: PluginOptions) {
       Button({ key, label, hotkey, plain: true, dimColor: true, onPress })
 
     // A thin full-width rule between the parts
-    const rule = () => Text({ color: NEON.rule, children: ['─'.repeat(columns)] })
+    // Lit while the pane holds the keyboard, dark while the keys go to the prompt
+    const rule = () => Text({ color: focused ? NEON.violet : NEON.rule, children: ['─'.repeat(columns)] })
+    // The rule under the header says where the keys go: a lit, heavy line while the pane holds them
+    const focusRule = () =>
+      focused
+        ? Box({
+            flexDirection: 'row',
+            children: [
+              Text({ color: NEON.pink, children: ['━━'] }),
+              Text({ backgroundColor: NEON.pink, color: '#000000', bold: true, children: [' ● FOCUS '] }),
+              Text({ color: NEON.pink, children: ['━'.repeat(Math.max(0, columns - 11))] }),
+            ],
+          })
+        : Text({ color: NEON.muted, children: [`── ○ ctrl+x tab to focus ${'─'.repeat(Math.max(0, columns - 25))}`] })
 
     // Row 1: tabs and refresh
     const updated = loading ? 'updating…' : fetchedAt ? new Date(fetchedAt).toTimeString().slice(0, 5) : '--:--'
@@ -2518,17 +2531,21 @@ export function register(on: On, options: PluginOptions) {
           void $.ui.close({ id: PANE })
         }),
       )
-      // The keys for the selected PR go to the bottom line, under the list and its details
-      footer.push(Box({ key: 'footer', flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: actions }))
+      // The keys for the selected PR go to the bottom line, under the list and its details; while the pane does not
+      // hold the keyboard none of them works, so the line says how to get there instead
+      if (focused) footer.push(Box({ key: 'footer', flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: actions }))
+      else footer.push(Text({ color: NEON.muted, children: ['○ keys go to the prompt now · ctrl+x tab or click here to use the pane'] }))
       const labelOf = (b: El) => {
         const props = (b as { props?: { label?: unknown; hotkey?: unknown } }).props
         return `${String(props?.hotkey ?? '')}: ${String(props?.label ?? '')}`
       }
-      footerLines += wrappedRowLines(
-        actions.map((b) => textWidth(labelOf(b))),
-        2,
-        columns,
-      )
+      footerLines += focused
+        ? wrappedRowLines(
+            actions.map((b) => textWidth(labelOf(b))),
+            2,
+            columns,
+          )
+        : 1
     }
 
     // List: title row, summary row (review requests only), status row
@@ -2805,7 +2822,7 @@ export function register(on: On, options: PluginOptions) {
         key: `line-${p.url}`,
         flexDirection: 'row',
         children: [
-          Text({ color: NEON.pink, bold: true, children: [lead] }),
+          Text({ color: focused ? NEON.pink : NEON.muted, bold: true, children: [lead] }),
           Text({ children: [' '] }),
           Text({ ...(b.color ? { color: b.color } : { dimColor: true }), bold: b.bold === true, children: [b.text] }),
           Text({ children: [' '] }),
@@ -2813,7 +2830,8 @@ export function register(on: On, options: PluginOptions) {
           Text({ children: [' '.repeat(Math.max(0, prWidth - textWidth(fit(label, prWidth + 1))) + 1)] }),
           Text({
             bold: isSelected,
-            ...(isSelected ? { backgroundColor: NEON.selection, color: '#ffffff' } : {}),
+            ...(isSelected && focused ? { backgroundColor: NEON.selection, color: '#ffffff' } : {}),
+            ...(isSelected && !focused ? { underline: true } : {}),
             dimColor: !isSelected && !isUnread(p),
             wrap: 'truncate-end',
             children: [padTo(fit(title, titleWidth), titleWidth)],
@@ -3002,7 +3020,7 @@ export function register(on: On, options: PluginOptions) {
     const foldRow = folds.length > 0 ? [Box({ key: 'folds', flexDirection: 'row', flexWrap: 'wrap', columnGap: 3, children: folds })] : []
     const tree = [
       ...top,
-      rule(),
+      focusRule(),
       ...(rows.length > 0 ? [columnsHead] : []),
       ...list,
       ...more,
