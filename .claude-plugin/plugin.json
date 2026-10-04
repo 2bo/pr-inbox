@@ -1,6 +1,6 @@
 {
   "name": "pr-inbox",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "An inbox for review requests (oldest first, with AI summary, risk and release impact) and your own PRs (what needs action first), with explain and approve from the pane",
   "author": {
     "name": "2bo"
@@ -43,11 +43,48 @@
       "default": "auto",
       "options": ["auto", "when opened", "off"]
     },
+    "desktop_notify": {
+      "type": "string",
+      "title": "OS notifications",
+      "description": "Also raise an OS notification (macOS or Linux) for: review requests (new review requests), all (also approvals, changes requested and CI failures on your PRs) or off. Toasts inside Claude Code always show",
+      "default": "review requests",
+      "options": ["review requests", "all", "off"]
+    },
     "language": {
       "type": "string",
       "title": "Analysis language",
       "description": "Language for the AI summary, risk and release impact. auto follows Claude Code's language setting, then LANG. Or a language name such as English or Japanese",
       "default": "auto"
+    },
+    "explain_prompt": {
+      "type": "string",
+      "title": "Explain prompt",
+      "description": "What e asks Claude about a review request. {url} becomes the PR URL. Empty uses the default (purpose, main changes, risks, what to look at). Reading the comments and linked issues, and the read-only rules, are always added",
+      "default": ""
+    },
+    "risk_high": {
+      "type": "string",
+      "title": "High risk criteria",
+      "description": "What counts as high risk in the analysis. Empty uses the default (migrations, auth, billing, personal data, deletion, breaking API changes, production config, wide changes without tests)",
+      "default": ""
+    },
+    "risk_medium": {
+      "type": "string",
+      "title": "Medium risk criteria",
+      "description": "What counts as medium risk. Empty uses the default (behavior changes, minor or major dependency upgrades, thinly tested features)",
+      "default": ""
+    },
+    "risk_low": {
+      "type": "string",
+      "title": "Low risk criteria",
+      "description": "What counts as low risk. Empty uses the default (docs, tests only, patch upgrades, types, wording or renames)",
+      "default": ""
+    },
+    "release_impact": {
+      "type": "string",
+      "title": "Release impact criteria",
+      "description": "How to judge the impact on release (yes, no or unknown). Empty uses the default (visible to end or internal users, feature flags taken into account)",
+      "default": ""
     }
   }
 }
