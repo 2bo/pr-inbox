@@ -1813,3 +1813,73 @@ test('c re-runs only the failed GitHub Actions runs', async ($, on) => {
   expect(await ui.find({ key: 'act-rerun' })).toBeUndefined()
   await ui.unmount()
 })
+
+// ---- Moving between the prompt and the pane ----
+
+test('the pane opens without closeOnEscape, so Esc only returns to the prompt; q closes it', async ($, on) => {
+  const opened: Record<string, unknown>[] = []
+  const closed: unknown[] = []
+  on('ui.open', (_, e) => {
+    opened.push(e as unknown as Record<string, unknown>)
+    return { value: { isPlaced: true as const } }
+  })
+  on('ui.close', (_, e) => {
+    closed.push(e)
+    return { value: undefined }
+  })
+  on('command.run', () => ({ text: '' }))
+  const s = stubs(on)
+  await start($, s.clock)
+  await $.command.run({ command: 'pr-inbox', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+  expect(opened.at(-1)).toMatchObject({ id: 'pr-inbox', focus: true })
+  expect(opened.at(-1)).not.toHaveProperty('closeOnEscape')
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'close' })
+  expect(closed).toContainEqual(expect.objectContaining({ id: 'pr-inbox' }))
+  await ui.unmount()
+})
+
+test('the approve dialog gives the keys back to the pane', async ($, on) => {
+  const opened: Record<string, unknown>[] = []
+  on('ui.open', (_, e) => {
+    opened.push(e as unknown as Record<string, unknown>)
+    return { value: { isPlaced: true as const } }
+  })
+  const s = stubs(on, { answer: 'Cancel' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-approve' })
+  expect(opened.some((e) => e.focus === true)).toBe(true)
+  await ui.unmount()
+})
+
+test('the hint under the prompt says how to move between the prompt and the open pane', async ($, on) => {
+  const tails: unknown[] = []
+  on('ui.render', { component: 'PromptHint' }, (_, e) => {
+    tails.push((e.props as { tail?: unknown }).tail)
+    return { type: 'engine', ref: 0 } as never
+  })
+  const s = stubs(on)
+  await start($, s.clock)
+  const hint = {
+    plugin: 'pr-inbox',
+    component: 'PromptHint',
+    surface: 'terminal',
+    viewport: { columns: 160, rows: 40 },
+    props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
+  } as const
+  // No pane open: no tail
+  const before = await $.ui.mount(hint as never)
+  await before.unmount()
+  // The pane open and focused: Esc goes back to the prompt
+  const pane = await $.ui.mount(PANE)
+  const focused = await $.ui.mount(hint as never)
+  await focused.unmount()
+  await pane.unmount()
+  // The pane open, the focus on the prompt: ctrl+x tab comes back
+  const away = await $.ui.mount({ ...PANE, props: { ...PANE.props, isFocused: false } })
+  const unfocused = await $.ui.mount(hint as never)
+  expect(tails).toEqual([undefined, ' esc → prompt · q close pr-inbox', ' ctrl+x tab → pr-inbox'])
+  await unfocused.unmount()
+  await away.unmount()
+})

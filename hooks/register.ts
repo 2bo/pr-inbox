@@ -248,6 +248,9 @@ let cfg: Config = {
 
 // Whether the pane has been opened in this session (for analysis: when opened)
 let paneOpened = false
+// Whether the pane is open now, and whether it holds the keyboard (for the hint under the prompt)
+let paneOpen = false
+let paneFocused = false
 
 function analysisEnabled(): boolean {
   if (cfg.analysis === 'off') return false
@@ -967,7 +970,10 @@ async function approve($: EngineInterface, pr: PR): Promise<void> {
       : r && (r.state === 'passed' || r.state === 'approved')
         ? ' The AI review passed at this commit.'
         : ''
-  if (await confirmApproval($, pr, `${ai}${outdated}`)) await postApproval($, pr, 'you chose Approve in the dialog of a')
+  const ok = await confirmApproval($, pr, `${ai}${outdated}`)
+  // The dialog took the keys: give them back to the pane either way
+  await focusPane($)
+  if (ok) await postApproval($, pr, 'you chose Approve in the dialog of a')
 }
 
 // The finished AI review of the PR's current commit, if there is one
@@ -1924,7 +1930,7 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
 
 async function focusPane($: EngineInterface): Promise<void> {
   try {
-    await $.ui.open({ id: PANE, title: 'PR Inbox', focus: true, closeOnEscape: true, rows: 40, columns: 110 })
+    await $.ui.open({ id: PANE, title: 'PR Inbox', focus: true, rows: 40, columns: 110 })
   } catch {
     // The pane was closed meanwhile
   }
@@ -2248,7 +2254,8 @@ export function register(on: On, options: PluginOptions) {
     // Measure the height again on every open
     paneLimit = Number.POSITIVE_INFINITY
     // The size is a preference; a size the user set with Ctrl+X and the arrow keys wins
-    await $.ui.open({ id: PANE, title: 'PR Inbox', focus: true, closeOnEscape: true, rows: 40, columns: 110 })
+    await $.ui.open({ id: PANE, title: 'PR Inbox', focus: true, rows: 40, columns: 110 })
+    paneOpen = true
     if (!paneOpened) {
       paneOpened = true
       if (cfg.analysis === 'when opened' && fetchedAt && !error) void scheduleAnalyses($)
@@ -2274,8 +2281,31 @@ export function register(on: On, options: PluginOptions) {
     return { deny: GUARD_DENY }
   })
 
+  // The pane closed (q, ctrl+x x, or the engine): the hint under the prompt goes back to normal
+  on('ui.close', async ($, e, next) => {
+    if (e.id === PANE) {
+      paneOpen = false
+      paneFocused = false
+      $.ui.invalidate('ui.render')
+    }
+    return next(e)
+  })
+
+  // The hint line under the prompt says how to move between the prompt and the open pane
+  on('ui.render', { component: 'PromptHint' }, async (_, e, next) => {
+    if (!paneOpen) return next(e)
+    return next({ ...e, props: { ...e.props, tail: paneFocused ? ' esc → prompt · q close pr-inbox' : ' ctrl+x tab → pr-inbox' } })
+  })
+
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
+    // Follow the focus, so the hint under the prompt can say where Esc and ctrl+x tab go
+    const focused = e.props.isFocused === true
+    if (!paneOpen || focused !== paneFocused) {
+      paneOpen = true
+      paneFocused = focused
+      $.ui.invalidate('ui.render')
+    }
     const kit = $.ui.resolve(e)
     const { Box, Text, Button, Link } = kit
     // A text field, where the surface has one (not on mobile)
@@ -2484,6 +2514,9 @@ export function register(on: On, options: PluginOptions) {
         }),
         nav('nav-down', '↓', 'j', 1),
         nav('nav-up', '↑', 'k', -1),
+        small('close', 'close', 'q', () => {
+          void $.ui.close({ id: PANE })
+        }),
       )
       // The keys for the selected PR go to the bottom line, under the list and its details
       footer.push(Box({ key: 'footer', flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: actions }))
@@ -2888,7 +2921,9 @@ export function register(on: On, options: PluginOptions) {
         ['o', 'open in the browser'],
         ['b / s', 'show or hide bot PRs / stale PRs'],
         ['r', 'fetch again'],
+        ['Esc', 'back to the prompt; the pane stays open (ctrl+x tab comes back)'],
         ['Ctrl+X Tab', 'move between the prompt and this pane (keys reach the pane only while it has the focus)'],
+        ['q', 'close the pane (/pr-inbox opens it again)'],
         ['h', 'close this help'],
       ]
       const helpRows = [

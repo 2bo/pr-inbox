@@ -39,11 +39,12 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 | `c` | Re-run the failed GitHub Actions jobs of one of your PRs |
 | `f` | Filter by repository, number, title or @author (Enter keeps it; an empty one clears it) |
 | `h` | Show the keys |
-| `Ctrl+X` `Tab` | Move between the prompt and the pane. Keys reach the pane only while it has the focus |
+| `Ctrl+X` `Tab` | From the prompt back to the pane (or click it). Keys reach the pane only while it has the focus. The hint line under the prompt says which way to go |
 | `o` | Open in the browser |
 | `b` / `s` | Show or hide bot PRs / stale PRs |
 | `r` | Fetch again |
-| `Esc` | Close the pane |
+| `Esc` | Back to the prompt; the pane stays open |
+| `q` | Close the pane (`/pr-inbox` opens it again) |
 
 ● marks PRs updated since you last selected them. A PR you approve leaves To review, as GitHub drops the review request; PRs approved from here stay listed under it as "Approved recently" for a day.
 
