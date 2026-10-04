@@ -991,7 +991,7 @@ test('v reviews from each perspective on the review model, then approves after c
   expect(s.questions.at(-1)).toContain(`Approve acme/app#11 at ${HEAD.slice(0, 7)}`)
   expect(s.questions.at(-1)).toContain('The AI review passed 5 perspectives with no important findings.')
   expect(approvedAt(s)).toEqual([APPROVE_11])
-  expect(await ui.find({ type: 'Text', text: /^AI review ✓ approved at aaaaaaa$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^AI review ✓ approved at aaaaaaa: no blocking issues/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -1016,7 +1016,7 @@ test('confirm is the default: nothing is approved when the dialog is cancelled',
   await start($, s.clock)
   const ui = await pressReview($, s)
   expect(approvedAt(s)).toEqual([])
-  expect(await ui.find({ type: 'Text', text: /AI review ✓ passed \(not approved\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^AI review ✓ passed, not approved: no blocking issues/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -1076,7 +1076,11 @@ test('an important finding the verifier confirms blocks the approval', { options
     `repos/acme/app/contents/app/login.rb?ref=${HEAD}`,
   ])
   expect(approvedAt(s)).toEqual([])
-  expect(await ui.find({ type: 'Text', text: /\[Correctness & compatibility\] app\/login\.rb:12 nil check missing/ })).toBeDefined()
+  // The perspective that blocked it is marked; the finding itself is in the details
+  expect(await ui.find({ type: 'Text', text: /^✗ Correctness & compatibility: / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^✓ Tests: / })).toBeDefined()
+  await ui.press({ key: 'act-details' })
+  expect(await lineOf(ui, 11)).toContain('nil check missing')
   await ui.unmount()
 })
 
@@ -1309,8 +1313,10 @@ test('the same problem found from two perspectives is reported once', async ($, 
   })
   await start($, s.clock)
   const ui = await pressReview($, s)
-  expect(await ui.find({ type: 'Text', text: /^AI review ✗ blocked \(1\)/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /\[Correctness & compatibility, Security & secrets\] app\/login\.rb:12/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^AI review ✗ blocked/ })).toBeDefined()
+  expect((s.store.get(`review:${HUMAN.url}`) as { problems: string[] }).problems).toEqual([
+    '[Correctness & compatibility, Security & secrets] app/login.rb:12 nil check missing',
+  ])
   await ui.unmount()
 })
 
@@ -1319,7 +1325,8 @@ test('a stored review of the current commit comes back after a restart; one of a
   const s = stubs(on, { store: { [`review:${HUMAN.url}`]: saved, [`review:${HUMAN2.url}`]: { ...saved, head: 'c'.repeat(40) } } })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: /^AI review ✗ blocked \(1\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^AI review ✗ blocked/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^✗ \[Tests\] app\/a\.rb:1 no test$/ })).toBeDefined()
   expect(s.store.has(`review:${HUMAN2.url}`)).toBe(false)
   await ui.unmount()
 })
@@ -1399,5 +1406,38 @@ test('h shows the keys', async ($, on) => {
   expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeUndefined()
   await ui.press({ key: 'help' })
   expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
+  await ui.unmount()
+})
+
+test('each perspective shows its conclusion, and the pane takes the keys back after the dialog', async ($, on) => {
+  const opened: unknown[] = []
+  on('ui.open', (_, e) => {
+    opened.push(e)
+    return { value: { isPlaced: true as const } }
+  })
+  const s = stubs(on, {
+    answer: 'Cancel',
+    review: (p) => JSON.stringify({ verdict: 'pass', conclusion: `${perspectiveOf(p)} looks fine.`, injection: false, findings: [] }),
+  })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  expect(await ui.find({ type: 'Text', text: /^✓ Upgrade impact|^✓ Purpose & scope: Purpose & scope looks fine\.$/ })).toBeDefined()
+  expect(s.logs.some((x) => x.includes('✓ Tests: Tests looks fine.'))).toBe(true)
+  expect(opened.some((e) => (e as { focus?: boolean }).focus === true)).toBe(true)
+  await ui.unmount()
+})
+
+test('a failing perspective held back by low confidence is △, not ✗', async ($, on) => {
+  const unsure = JSON.stringify({
+    verdict: 'fail',
+    conclusion: 'Might break caching.',
+    injection: false,
+    findings: [{ severity: 'important', confidence: 50, location: 'a.ts:1', summary: 's', evidence: 'e' }],
+  })
+  const s = stubs(on, { answer: 'Cancel', review: (p) => (perspectiveOf(p) === 'Tests' ? unsure : PASS) })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  expect(await ui.find({ type: 'Text', text: /^△ Tests \(not blocking: low confidence\): Might break caching\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^AI review ✓ passed, not approved/ })).toBeDefined()
   await ui.unmount()
 })

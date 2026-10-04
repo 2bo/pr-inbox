@@ -62,6 +62,8 @@ PR numbers and failed checks are hyperlinks: Cmd+click them in a terminal that s
 4. **Verification**: important findings (confidence 80+) go to a verifier that tries to refute them against the code
 5. **Decision, in code**: it passes only when every gate holds, nothing looked like an injection, every reviewer answered, no important finding survived and the PR got no new commits. Nits do not block
 
+Under the PR, the outcome comes first, then each perspective's conclusion in a sentence or two: ✓ no problems, ✗ blocks the approval, △ found something that does not block (low confidence, or refuted by the verifier), ? could not tell. `d` shows every finding with its evidence and a link to the line. Before the approval dialog, the conclusions and findings are also written to the transcript.
+
 Only problems within each reviewer's perspective count, and the same problem found from two perspectives is shown once. The result is kept for the reviewed commit, so it is still there after a restart; when new commits arrive, the row says the review is of an older commit.
 
 When it passes, `ai_approve` decides: `confirm` (default) asks you first; `auto` approves at once for PRs from members and collaborators of the repository and from Dependabot or Renovate, and still asks for anyone else and for forks. The approval is pinned to the reviewed commit. The outcome shows under the PR and in the transcript.
