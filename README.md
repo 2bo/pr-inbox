@@ -50,14 +50,14 @@ PR numbers and failed checks are hyperlinks: Cmd+click them in a terminal that s
 
 `v` on a review request runs a review from several perspectives, each an independent model call, and approves the PR when it passes:
 
-1. **Gates, checked in code**: not a draft, CI passed (or there is none), no merge conflict, no reviewer requested changes
+1. **Gates, checked in code**: not a draft, CI passed (or there is none), no merge conflict, no reviewer requested changes, and the PR does not change AI instructions (CLAUDE.md, `.claude/` rules, skills, subagents and the like): those are for a person to review
 2. **Screening**: the description, diff and comments are checked for instructions aimed at an AI (prompt injection) by a small model. Anything suspicious stops the review
 3. **Reviewers**, in parallel on `review_model` (Sonnet by default). Each first says what else it needs to read (files at the PR head, code searches, upstream release notes); the mod checks the request, fetches and screens it, then the reviewer reviews:
    - Purpose & scope: does it do what the description and linked issues ask, without needless complexity or unrelated changes
    - Correctness & compatibility: bugs, breaking changes, migrations, rollback, performance
    - Tests: is the changed behavior tested
    - Security & secrets
-   - Conventions: the repository's CLAUDE.md, AGENTS.md, REVIEW.md, CONTRIBUTING.md and patterns. These guides are read from the base branch, so a PR cannot rewrite the rules it is reviewed by. They talk to AI by design, so they are given apart from the PR content and not screened for injection
+   - Conventions: the repository's CLAUDE.md, AGENTS.md, REVIEW.md, CONTRIBUTING.md and patterns. These guides, the rules in `.claude/rules/`, and any AI instruction a reviewer asks for (skills, subagent definitions, commands, nested CLAUDE.md, Cursor or Copilot instructions) are read from the base branch, so a PR cannot rewrite the rules it is reviewed by. They talk to AI by design, so they are given apart from the PR content and not screened for injection
    - For **Dependabot and Renovate** PRs, instead: **Upgrade impact** (every package that changes, directly or in the lockfile; upstream release notes and changelogs; whether this repository uses what changed) and **Supply chain**
 4. **Verification**: important findings (confidence 80+) go to a verifier that tries to refute them against the code
 5. **Decision, in code**: it passes only when every gate holds, nothing looked like an injection, every reviewer answered, no important finding survived and the PR got no new commits. Nits do not block

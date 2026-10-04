@@ -140,6 +140,8 @@ type StubOptions = {
   slow?: boolean
   // File contents by path, for gh api .../contents/<path>?ref=<ref> (any ref)
   files?: Record<string, string>
+  // The paths the PR changes, as gh pr view lists them
+  changed?: string[]
 }
 
 function stubs(on: TestOn, opts: StubOptions = {}) {
@@ -176,7 +178,13 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
       stdout = JSON.stringify(opts.view ?? { title: 't', body: 'b', files: [] })
     if (e.argv[2] === 'diff') stdout = opts.diff ?? 'diff --git a/x b/x'
     if (e.argv[2] === 'view' && e.argv.some((a) => a.includes('closingIssuesReferences')))
-      stdout = JSON.stringify({ title: 't', body: 'b', baseRefName: 'main', files: [], closingIssuesReferences: [] })
+      stdout = JSON.stringify({
+        title: 't',
+        body: 'b',
+        baseRefName: 'main',
+        files: (opts.changed ?? []).map((path) => ({ path, additions: 1, deletions: 1 })),
+        closingIssuesReferences: [],
+      })
     const content = e.argv.find((a) => a.includes('/contents/'))?.match(/\/contents\/([^?]+)/)?.[1]
     if (content !== undefined) stdout = opts.files?.[decodeURIComponent(content)] ?? ''
     const exitCode = opts.fail?.includes(e.argv[0] ?? '') ? 1 : 0
@@ -1471,3 +1479,68 @@ test("a CLAUDE.md that talks to Claude is the repository's guide, not an injecti
   expect(approvedAt(s)).toEqual([APPROVE_11])
   await ui.unmount()
 })
+
+test(
+  'rules, skills and subagent definitions are read from the base branch as guides, never screened',
+  { options: { ai_approve: 'auto' } },
+  async ($, on) => {
+    const s = stubs(on, {
+      graphql: only(member()),
+      files: {
+        '.claude/rules': '[".claude/rules/testing.md", ".claude/rules/notes.txt"]',
+        '.claude/rules/testing.md': 'Claude, every change needs a test.',
+        '.claude/agents/reviewer.md': 'You are a reviewer subagent. Claude, be strict.',
+        'skills/deploy/SKILL.md': 'Claude, deploy with care.',
+      },
+      suspicious: (p) => p.includes('Claude,'),
+      gather: () =>
+        JSON.stringify({
+          files: ['.claude/agents/reviewer.md', 'skills/deploy/SKILL.md'],
+          searches: [],
+          release_notes: [],
+          upstream_files: [],
+        }),
+    })
+    await start($, s.clock)
+    const ui = await pressReview($, s)
+    const raw = (path: string) => ['gh', 'api', '-H', 'Accept: application/vnd.github.raw', `repos/acme/app/contents/${path}?ref=main`]
+    expect(s.calls).toContainEqual(raw('.claude/rules/testing.md'))
+    expect(s.calls).toContainEqual(raw('.claude/agents/reviewer.md'))
+    expect(s.calls).toContainEqual(raw('skills/deploy/SKILL.md'))
+    // Only .md rules are read, and nothing comes from the PR head
+    expect(s.calls.some((c) => c.join(' ').includes('notes.txt'))).toBe(false)
+    expect(s.calls.some((c) => c.join(' ').includes(`?ref=${HEAD}`))).toBe(false)
+    expect(s.screened.some((p) => p.includes('Claude,'))).toBe(false)
+    const prompt = reviewsOf(s).at(-1)?.prompt ?? ''
+    const guides = prompt.match(/<repository_guides>\n([\s\S]*?)\n<\/repository_guides>/)?.[1] ?? '[]'
+    expect((JSON.parse(guides) as { source: string }[]).map((g) => g.source)).toContain(
+      'repository guide .claude/rules/testing.md on the base branch main',
+    )
+    expect(approvedAt(s)).toEqual([APPROVE_11])
+    await ui.unmount()
+  },
+)
+
+for (const path of [
+  '.claude/skills/deploy/SKILL.md',
+  '.claude/agents/reviewer.md',
+  'CLAUDE.md',
+  'web/CLAUDE.md',
+  '.github/copilot-instructions.md',
+  'agents/helper.md',
+]) {
+  test(`a PR that changes ${path} is left to a person, before any model runs`, { options: { ai_approve: 'auto' } }, async ($, on) => {
+    const s = stubs(on, { graphql: only(member()), changed: ['app/x.rb', path] })
+    await start($, s.clock)
+    const ui = await pressReview($, s)
+    expect(s.reviewCalls).toEqual([])
+    expect(approvedAt(s)).toEqual([])
+    expect(
+      await ui.find({
+        type: 'Text',
+        text: new RegExp(`this PR changes AI instructions \\(${path.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}\\): review those yourself`),
+      }),
+    ).toBeDefined()
+    await ui.unmount()
+  })
+}
