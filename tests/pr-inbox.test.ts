@@ -1996,7 +1996,7 @@ test('the a dialog states the risk, the release impact and that there was no AI 
   await ui.unmount()
 })
 
-// ---- The diff pane (p) ----
+// ---- The diff (d) ----
 
 const SAMPLE_DIFF = `diff --git a/app/login.rb b/app/login.rb
 index 1111111..2222222 100644
@@ -2021,7 +2021,7 @@ type CodeFinder = { findAll: (query: { type: string }) => Promise<{ props: unkno
 const codes = async (ui: CodeFinder) =>
   (await ui.findAll({ type: 'Code' })).map((c) => c.props as { source: string; path: string; format: string })
 
-test('p shows the diff in the pane, one file at a time, drawn as a diff by the highlighter', async ($, on) => {
+test('d shows the diff in the pane, one file at a time, drawn as a diff by the highlighter', async ($, on) => {
   const s = stubs(on, { diff: SAMPLE_DIFF })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
@@ -2116,5 +2116,23 @@ ${SAMPLE_DIFF}`
   expect((await codes(diff))[0]?.path).toBe('app/login.rb')
   expect(await diff.find({ type: 'Text', text: '✗1' })).toBeDefined()
   expect(await diff.find({ type: 'Text', text: /L12 \[Correctness & compatibility\] nil check missing/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('in a repository that requires no review, a clean PR with passing CI is ready to merge', async ($, on) => {
+  const free = pr({ number: 31, url: 'https://github.com/acme/app/pull/31', reviewDecision: null })
+  const unknown = pr({ number: 32, url: 'https://github.com/acme/app/pull/32', reviewDecision: null, mergeable: 'UNKNOWN' })
+  const s = stubs(on, {
+    graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [free, unknown] } } }),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await isSelected(ui, 31)).toBe(true)
+  expect(await ui.find({ key: 'act-merge' })).toBeDefined()
+  // Not until GitHub has checked that it merges
+  await ui.press({ key: 'nav-down' })
+  expect(await isSelected(ui, 32)).toBe(true)
+  expect(await ui.find({ key: 'act-merge' })).toBeUndefined()
   await ui.unmount()
 })

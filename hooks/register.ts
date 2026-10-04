@@ -412,7 +412,10 @@ function classify(pr: PR, now: number): { group: 'action' | 'ready' | 'waiting' 
   if (pr.mergeable === 'CONFLICTING') reasons.push('conflict')
   if (reasons.length > 0) return { group: 'action', reasons }
   if (now - Date.parse(pr.updatedAt) > cfg.stale_days * DAY) return { group: 'stale', reasons }
-  if (!pr.isDraft && pr.reviewDecision === 'APPROVED' && (ci === 'SUCCESS' || ci === 'NONE')) {
+  // Approved, or in a repository whose rules ask for no review (GitHub gives no decision then), once GitHub has
+  // checked that it merges cleanly
+  const reviewed = pr.reviewDecision === 'APPROVED' || (pr.reviewDecision === null && pr.mergeable === 'MERGEABLE')
+  if (!pr.isDraft && reviewed && (ci === 'SUCCESS' || ci === 'NONE')) {
     return { group: 'ready', reasons }
   }
   return { group: 'waiting', reasons }

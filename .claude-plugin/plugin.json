@@ -1,6 +1,6 @@
 {
   "name": "pr-inbox",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "An inbox for review requests (oldest first, with AI summary, risk and release impact) and your own PRs (what needs action first), with explain and approve from the pane",
   "author": {
     "name": "2bo"
