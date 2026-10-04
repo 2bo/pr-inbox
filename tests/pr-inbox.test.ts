@@ -275,14 +275,22 @@ test('fetches on start and shows the counts under the prompt', async ($, on) => 
 
 // Get a whole PR row (title, summary, status, failed checks)
 type Finder = { find: (query: { key: string }) => Promise<unknown> }
+// The PR's row in the list, and its details panel when it is the selected one
 const lineOf = async (ui: Finder, number: number) =>
-  JSON.stringify(await ui.find({ key: `line-https://github.com/acme/app/pull/${number}` }))
+  JSON.stringify([
+    await ui.find({ key: `line-https://github.com/acme/app/pull/${number}` }),
+    await ui.find({ key: `panel-https://github.com/acme/app/pull/${number}` }),
+  ])
 
 // Extract the links in a row as href, text and style
 type Node = { type?: string; props?: Record<string, unknown>; children?: unknown[] }
 const linksIn = (json: string) => {
   const out: { href: string; text: string; color?: unknown; underline?: unknown }[] = []
   const walk = (n: unknown): void => {
+    if (Array.isArray(n)) {
+      for (const x of n) walk(x)
+      return
+    }
     if (!n || typeof n !== 'object') return
     const el = n as Node
     if (el.type === 'Link') {
@@ -302,14 +310,15 @@ const linksIn = (json: string) => {
 }
 const blueLink = (href: string, text: string) => expect.objectContaining({ href, text, color: 'blue', underline: true })
 
-// The selected row's title starts with "▶ "
-const isSelected = async (ui: Finder, number: number) => (await lineOf(ui, number)).includes('"▶ ')
+// The selected row starts with "▸"
+const isSelected = async (ui: Finder, number: number) =>
+  JSON.stringify(await ui.find({ key: `line-https://github.com/acme/app/pull/${number}` })).includes('"▸')
 
 test('folds bot and stale PRs and expands them', async ($, on) => {
   const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
-  expect((await ui.find({ key: 'tab-review' }))?.props.label).toBe('To review (2+1)')
+  expect((await ui.find({ key: 'tab-review' }))?.props.label).toBe('review 2+1')
   expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
   expect(await ui.find({ key: `line-${BOT.url}` })).toBeUndefined()
   await ui.press({ key: 'fold-bots' })
@@ -397,7 +406,7 @@ test('shows no approve button on my own PRs', async ($, on) => {
   await ui.press({ key: 'tab-mine' })
   expect(await isSelected(ui, 21)).toBe(true)
   expect(await ui.find({ key: 'act-approve' })).toBeUndefined()
-  expect((await ui.find({ key: 'act-explain' }))?.props.label).toBe('Diagnose')
+  expect((await ui.find({ key: 'act-explain' }))?.props.label).toBe('diagnose')
   await ui.unmount()
 })
 
@@ -405,8 +414,8 @@ test('selects the first PR on open and moves with j/k', async ($, on) => {
   const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: /^▶ 👤 $/ })).toBeDefined()
   expect(await isSelected(ui, 11)).toBe(true)
+  expect(await isSelected(ui, 13)).toBe(false)
 
   // My PRs go needs action → ready → waiting
   await ui.press({ key: 'tab-mine' })
@@ -452,7 +461,9 @@ test('lists review requests longest-waiting first', async ($, on) => {
   expect(await isSelected(ui, 11)).toBe(true)
   await ui.press({ key: 'nav-down' })
   expect(await isSelected(ui, 13)).toBe(true)
-  expect(await ui.find({ type: 'Text', text: /requested 1d ago/ })).toBeDefined()
+  // The wait column, and the selected PR's details
+  expect(await ui.find({ type: 'Text', text: /^ {2}1d$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {2}4h$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /requested 4h ago/ })).toBeDefined()
   await ui.unmount()
 })
@@ -461,16 +472,21 @@ test('shows the summary, risk, reason and release impact in the list', async ($,
   const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
+  // The rows carry the risk as a badge; the selected PR's details carry the rest
+  expect((await ui.find({ type: 'Text', text: /^▲ HIGH$/ }))?.props.color).toBe('red')
+  expect(await ui.find({ type: 'Text', text: /^· LOW $/ })).toBeDefined()
   const high = await ui.find({ type: 'Text', text: /^【高】ログイン画面のバリデーションを修正$/ })
   expect(high?.props.color).toBe('red')
-  expect(await ui.find({ type: 'Text', text: /^【低】一覧の並び順を変更$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /根拠: 認証まわりの変更/ })).toBeDefined()
   // Release impact: yes / no (behind a flag) / unknown when the model returns no impact
   expect(
     (await ui.find({ type: 'Text', text: /^リリース時: 影響あり — エンドユーザー: ログイン失敗時の文言が変わる$/ }))?.props.color,
   ).toBe('magenta')
+  await ui.press({ key: 'nav-down' })
+  expect(await ui.find({ type: 'Text', text: /^【低】一覧の並び順を変更$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^リリース時: 影響なし — フラグ new_list_order が無効のまま入る$/ })).toBeDefined()
   await ui.press({ key: 'fold-bots' })
+  await ui.press({ key: 'nav-down' })
   expect(await ui.find({ type: 'Text', text: /^リリース時: 判定不能$/ })).toBeDefined()
   // The analysis fetches the diff
   expect(s.calls).toContainEqual(['gh', 'pr', 'diff', HUMAN.url])
@@ -736,6 +752,7 @@ test('a partly read PR is marked and never judged low risk', async ($, on) => {
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   // #13 answers low, but only the first 30,000 characters of the diff were shown
+  await ui.press({ key: 'nav-down' })
   expect(await ui.find({ type: 'Text', text: /^【中】一覧の並び順を変更 \(PR の一部だけで判定\)$/ })).toBeDefined()
   expect(s.prompts.at(-1)).toContain('Diff (first 30000 characters only')
   await ui.unmount()
@@ -1355,7 +1372,7 @@ test('v again while the review runs cancels it', { options: { ai_approve: 'auto'
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-ai-review' })
   await settleReview(s)
-  expect((await ui.find({ key: 'act-ai-review' }))?.props.label).toBe('Cancel AI review')
+  expect((await ui.find({ key: 'act-ai-review' }))?.props.label).toBe('cancel review')
   await ui.press({ key: 'act-ai-review' })
   await s.clock.advance(60_000)
   await settleReview(s)
@@ -1628,7 +1645,7 @@ test('after a passed AI review, a says so in its label and its dialog', async ($
   const s = stubs(on, { answer: 'Cancel' })
   await start($, s.clock)
   const ui = await pressReview($, s)
-  expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('Approve… (AI review ✓)')
+  expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('approve ✓')
   await ui.press({ key: 'act-approve' })
   expect(s.questions.at(-1)).toContain('The AI review passed at this commit.')
   await ui.unmount()
@@ -1642,7 +1659,7 @@ test('after a blocked AI review, a warns with the reason', async ($, on) => {
   })
   await start($, s.clock)
   const ui = await pressReview($, s)
-  expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('Approve… (AI review ✗)')
+  expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('approve ✗')
   await ui.press({ key: 'act-approve' })
   expect(s.questions.at(-1)).toContain('⚠ The AI review blocked it: [Correctness & compatibility] app/login.rb:12 nil check missing.')
   await ui.unmount()
@@ -1685,7 +1702,7 @@ test('f filters the list as you type; Enter keeps it, an empty one clears it', a
   expect(await ui.find({ key: `line-${HUMAN2.url}` })).toBeUndefined()
   await ui.input({ key: 'filter-input', text: 'ログイン' })
   expect(await ui.find({ key: 'filter-input' })).toBeUndefined()
-  expect((await ui.find({ key: 'filter' }))?.props.label).toBe('Filter: ログイン')
+  expect((await ui.find({ key: 'filter' }))?.props.label).toBe('/ログイン')
   // By author and number too
   await ui.press({ key: 'filter' })
   await ui.input({ key: 'filter-input', text: 'app#13', kind: 'change' })

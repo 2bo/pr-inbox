@@ -149,7 +149,7 @@ const MAX_ATTEMPTS = 4
 // At most this many analyses start in any hour, so a flood of PRs or pushes cannot drain the plan
 const MAX_ANALYSES_PER_HOUR = 30
 // Indent for the summary and detail lines
-const INDENT = 6
+const INDENT = 2
 
 const QUERY = `query($review: String!, $mine: String!) {
   viewer { login }
@@ -1796,6 +1796,7 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
   }
   const run = newRun(pr)
   run.strict = approvesWithoutAsking(pr)
+  spin($)
   reviews.set(pr.url, run)
   const redraw = () => {
     showStatus($)
@@ -1993,6 +1994,93 @@ function logReview($: EngineInterface, run: ReviewRun): void {
   ]
   // A transcript row holds one line
   for (const line of lines) $.ui.log(line)
+}
+
+// ---- The list's cells ----
+
+const LOGO = '◆ pr-inbox'
+const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+const HEAT = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
+
+type Cell = { text: string; color?: string; bold?: boolean }
+
+// Risk for a review request (from the analysis), state for one of my PRs; always six columns wide
+function badgeOf(pr: PR): Cell {
+  if (tab === 'review') {
+    if (cfg.analysis === 'off') return { text: '      ' }
+    const a = analysisOf(pr)
+    if (!a || 'failed' in a) return { text: pending.has(pr.url) ? '  …   ' : '  ·   ' }
+    return a.risk === 'high'
+      ? { text: '▲ HIGH', color: 'red', bold: true }
+      : a.risk === 'medium'
+        ? { text: '■ MED ', color: 'yellow' }
+        : { text: '· LOW ', color: 'green' }
+  }
+  if (isSnoozed(pr)) return { text: '⏸ SNZ ' }
+  const group = classify(pr, fetchedAt || Date.now()).group
+  return group === 'action'
+    ? { text: '✗ FIX ', color: 'red', bold: true }
+    : group === 'ready'
+      ? { text: '✓ SHIP', color: 'green', bold: true }
+      : group === 'waiting'
+        ? { text: '… WAIT', color: 'yellow' }
+        : { text: 'z OLD ' }
+}
+
+// How long it has waited, as a bar that grows and heats up
+function heat(since: string, now: number): { bar: string; color: string } {
+  const hours = Math.max(0, (now - Date.parse(since)) / HOUR)
+  const steps = [1, 4, 12, 24, 48, 96, 168]
+  const level = steps.filter((h) => hours >= h).length
+  return { bar: HEAT[level] ?? '█', color: level >= 6 ? 'red' : level >= 4 ? 'yellow' : 'green' }
+}
+
+// 3m, 5h, 2d, 3w, 4mo
+function short(since: string, now: number): string {
+  const ms = Math.max(0, now - Date.parse(since))
+  if (ms < HOUR) return `${Math.floor(ms / MINUTE)}m`
+  if (ms < DAY) return `${Math.floor(ms / HOUR)}h`
+  if (ms < 14 * DAY) return `${Math.floor(ms / DAY)}d`
+  if (ms < 60 * DAY) return `${Math.floor(ms / (7 * DAY))}w`
+  return `${Math.floor(ms / (30 * DAY))}mo`
+}
+
+function ciGlyph(pr: PR): Cell {
+  const ci = ciState(pr)
+  if (ci === 'SUCCESS') return { text: '✓', color: 'green' }
+  if (ci === 'FAILURE' || ci === 'ERROR') return { text: '✗', color: 'red' }
+  if (ci === 'PENDING' || ci === 'EXPECTED') return { text: '◌', color: 'yellow' }
+  return { text: '·' }
+}
+
+// The AI review at a glance: a spinner while it runs
+function aiGlyph(pr: PR): Cell {
+  const r = reviews.get(pr.url)
+  if (r?.state === 'running') return { text: SPINNER[Math.floor(Date.now() / 100) % SPINNER.length] ?? '…', color: 'cyan' }
+  const done = reviewOfHead(pr)
+  if (!done) return { text: '·' }
+  return done.state === 'blocked' ? { text: '✗', color: 'red' } : { text: '✓', color: 'green' }
+}
+
+// Redraws a few times a second while an AI review runs, so its spinner turns
+let spinner: { cancel: () => void } | undefined
+function spin($: EngineInterface): void {
+  if (spinner) return
+  const stop = () => {
+    spinner?.cancel()
+    spinner = undefined
+  }
+  spinner = $.clock.every(120, async () => {
+    // Only while a review runs and the pane is open to show it
+    let open = false
+    try {
+      open = (await $.ui.panes()).some((pane) => pane.id === PANE)
+    } catch {
+      // no pane list: no spinner
+    }
+    if (open && [...reviews.values()].some((r) => r.state === 'running')) $.ui.invalidate('ui.render')
+    else stop()
+  })
 }
 
 // ---- Bulk review of bot PRs (w) ----
@@ -2204,8 +2292,11 @@ export function register(on: On, options: PluginOptions) {
     const small = (key: string, label: string, hotkey: string, onPress: () => void) =>
       Button({ key, label, hotkey, plain: true, dimColor: true, onPress })
 
+    // A thin full-width rule between the parts
+    const rule = () => Text({ dimColor: true, children: ['─'.repeat(columns)] })
+
     // Row 1: tabs and refresh
-    const updated = loading ? 'updating…' : fetchedAt ? `updated ${new Date(fetchedAt).toTimeString().slice(0, 5)}` : 'not fetched yet'
+    const updated = loading ? 'updating…' : fetchedAt ? new Date(fetchedAt).toTimeString().slice(0, 5) : '--:--'
     const tabButton = (name: typeof tab, label: string, hotkey: string) =>
       Button({
         key: `tab-${name}`,
@@ -2221,11 +2312,12 @@ export function register(on: On, options: PluginOptions) {
       })
     // Widths of the top rows' items, to know how many lines they take once wrapped
     const row1 = [
-      `1: To review (${g.humans.length}+${g.bots.length})`,
-      `2: My PRs (${mine.length})`,
-      'r: Refresh',
-      `f: ${filterText ? `Filter: ${filterText}` : 'Filter'}`,
-      'h: Close help',
+      LOGO,
+      `1: review ${g.humans.length}+${g.bots.length}`,
+      `2: mine ${mine.length}`,
+      'r: ⟳',
+      `f: ${filterText ? `/${filterText}` : 'filter'}`,
+      'h: ?',
       updated,
     ]
     let topLines = wrappedRowLines(row1.map(textWidth), 3, columns)
@@ -2236,14 +2328,15 @@ export function register(on: On, options: PluginOptions) {
         flexWrap: 'wrap',
         columnGap: 3,
         children: [
-          tabButton('review', `To review (${g.humans.length}+${g.bots.length})`, '1'),
-          tabButton('mine', `My PRs (${mine.length})`, '2'),
-          small('refresh', 'Refresh', 'r', () => refresh($)),
-          small('filter', filterText ? `Filter: ${filterText}` : 'Filter', 'f', () => {
+          Text({ bold: true, color: 'magenta', children: [LOGO] }),
+          tabButton('review', `review ${g.humans.length}+${g.bots.length}`, '1'),
+          tabButton('mine', `mine ${mine.length}`, '2'),
+          small('refresh', '⟳', 'r', () => refresh($)),
+          small('filter', filterText ? `/${filterText}` : 'filter', 'f', () => {
             filtering = !filtering
             redraw()
           }),
-          small('help', showHelp ? 'Close help' : 'Help', 'h', () => {
+          small('help', showHelp ? 'close' : '?', 'h', () => {
             showHelp = !showHelp
             redraw()
           }),
@@ -2280,7 +2373,9 @@ export function register(on: On, options: PluginOptions) {
       topLines += 1
     }
 
-    // Row 2: action bar, kept at the top so it stays visible when the list overflows
+    // The bottom line: the keys for the selected PR
+    const footer: El[] = []
+    let footerLines = 0
     const pr = selected ? findPr(selected) : undefined
     const nav = (key: string, label: string, hotkey: string, delta: number) =>
       small(key, label, hotkey, () => {
@@ -2293,7 +2388,7 @@ export function register(on: On, options: PluginOptions) {
       const actions: El[] = [
         Button({
           key: 'act-explain',
-          label: isReview ? 'Explain' : 'Diagnose',
+          label: isReview ? 'explain' : 'diagnose',
           hotkey: 'e',
           plain: true,
           onPress: () => {
@@ -2305,17 +2400,12 @@ export function register(on: On, options: PluginOptions) {
       ]
       if (isReview) {
         const r = reviewOfHead(pr)
-        const mark = r?.state === 'blocked' ? ' (AI review ✗)' : r ? ' (AI review ✓)' : ''
-        actions.push(Button({ key: 'act-approve', label: `Approve…${mark}`, hotkey: 'a', plain: true, onPress: () => approve($, pr) }))
+        const mark = r?.state === 'blocked' ? ' ✗' : r ? ' ✓' : ''
+        actions.push(Button({ key: 'act-approve', label: `approve${mark}`, hotkey: 'a', plain: true, onPress: () => approve($, pr) }))
         actions.push(
           Button({
             key: 'act-ai-review',
-            label:
-              reviews.get(pr.url)?.state === 'running'
-                ? 'Cancel AI review'
-                : cfg.ai_approve === 'auto'
-                  ? 'AI review & approve'
-                  : 'AI review…',
+            label: reviews.get(pr.url)?.state === 'running' ? 'cancel review' : cfg.ai_approve === 'auto' ? 'review+approve' : 'review',
             hotkey: 'v',
             plain: true,
             onPress: () => {
@@ -2327,14 +2417,14 @@ export function register(on: On, options: PluginOptions) {
       if (!isReview) {
         const group = classify(pr, now).group
         if (group === 'ready')
-          actions.push(Button({ key: 'act-merge', label: 'Merge…', hotkey: 'm', plain: true, onPress: () => mergePr($, pr) }))
+          actions.push(Button({ key: 'act-merge', label: 'merge', hotkey: 'm', plain: true, onPress: () => mergePr($, pr) }))
         if (ciState(pr) === 'FAILURE' || ciState(pr) === 'ERROR')
-          actions.push(Button({ key: 'act-rerun', label: 'Re-run failed CI', hotkey: 'c', plain: true, onPress: () => rerunFailed($, pr) }))
+          actions.push(Button({ key: 'act-rerun', label: 'rerun ci', hotkey: 'c', plain: true, onPress: () => rerunFailed($, pr) }))
       }
       actions.push(
         Button({
           key: 'act-open',
-          label: 'Open',
+          label: 'open',
           hotkey: 'o',
           plain: true,
           onPress: async () => {
@@ -2343,7 +2433,8 @@ export function register(on: On, options: PluginOptions) {
         }),
         Button({
           key: 'act-details',
-          label: expanded === pr.url ? 'Less' : 'Details',
+          label: expanded === pr.url ? 'less' : 'details',
+          dimColor: true,
           hotkey: 'd',
           plain: true,
           onPress: () => {
@@ -2353,7 +2444,8 @@ export function register(on: On, options: PluginOptions) {
         }),
         Button({
           key: 'act-snooze',
-          label: isSnoozed(pr) ? 'Unsnooze' : 'Snooze',
+          label: isSnoozed(pr) ? 'unsnooze' : 'snooze',
+          dimColor: true,
           hotkey: 'x',
           plain: true,
           onPress: async () => {
@@ -2367,15 +2459,16 @@ export function register(on: On, options: PluginOptions) {
             redraw()
           },
         }),
-        nav('nav-down', 'Next', 'j', 1),
-        nav('nav-up', 'Prev', 'k', -1),
+        nav('nav-down', '↓', 'j', 1),
+        nav('nav-up', '↑', 'k', -1),
       )
-      top.push(Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: actions }))
+      // The keys for the selected PR go to the bottom line, under the list and its details
+      footer.push(Box({ key: 'footer', flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: actions }))
       const labelOf = (b: El) => {
         const props = (b as { props?: { label?: unknown; hotkey?: unknown } }).props
         return `${String(props?.hotkey ?? '')}: ${String(props?.label ?? '')}`
       }
-      topLines += wrappedRowLines(
+      footerLines += wrappedRowLines(
         actions.map((b) => textWidth(labelOf(b))),
         2,
         columns,
@@ -2424,7 +2517,8 @@ export function register(on: On, options: PluginOptions) {
       const r = reviews.get(p.url)
       if (!r) return []
       if (r.state === 'cancelled') return [{ text: 'AI review cancelled', dim: true }]
-      if (r.state === 'running' && r.step !== 'approving…') return [{ text: `AI review: ${r.step}  (v to cancel)`, dim: true }]
+      if (r.state === 'running' && r.step !== 'approving…')
+        return [{ text: `AI review ${aiGlyph(p).text} ${r.step}  (v to cancel)`, color: 'cyan' }]
       if (r.pr.headRefOid !== p.headRefOid)
         return [{ text: `AI review of an older commit (${r.pr.headRefOid.slice(0, 7)}): v to review the new one`, dim: true }]
       // The decision first, then each perspective's conclusion; findings and evidence wait behind d
@@ -2508,6 +2602,7 @@ export function register(on: On, options: PluginOptions) {
       return rows
     }
 
+    const panelLines = (p: PR): number => 1 + linesOf(p)
     const linesOf = (p: PR): number => {
       if (tab !== 'review') {
         const failed = failedChecks(p).length
@@ -2526,11 +2621,9 @@ export function register(on: On, options: PluginOptions) {
       )
     }
 
-    const line = (p: PR) => {
-      const isSelected = selected === p.url
+    // The selected PR's details, under the list: the PR in full, its analysis, the AI review, the failed checks
+    const panelOf = (p: PR) => {
       const repo = p.repository.nameWithOwner.split('/')[1] ?? p.repository.nameWithOwner
-      // Title row: selection marker and icon, PR number as a link (Cmd+click opens GitHub), title
-      const prefix = `${isSelected ? '▶' : ' '}${isUnread(p) ? '●' : ' '}${icon(p)} `
       const label = `${repo}#${p.number}`
       const prLink = safeHref(p.url)
       const title = ` ${p.isDraft ? '[draft] ' : ''}${p.title}`
@@ -2538,14 +2631,9 @@ export function register(on: On, options: PluginOptions) {
         Box({
           flexDirection: 'row',
           children: [
-            Text({ inverse: isSelected, bold: isSelected, children: [prefix] }),
-            prLink ? link(prLink, label, isSelected) : Text({ inverse: isSelected, bold: isSelected, children: [label] }),
-            Text({
-              inverse: isSelected,
-              bold: isSelected,
-              wrap: 'truncate-end',
-              children: [fit(title, Math.max(10, columns - textWidth(prefix) - textWidth(label)))],
-            }),
+            Text({ color: 'magenta', children: [`${icon(p)} `] }),
+            prLink ? link(prLink, label, true) : Text({ bold: true, children: [label] }),
+            Text({ bold: true, wrap: 'wrap', children: [title] }),
           ],
         }),
       ]
@@ -2609,7 +2697,53 @@ export function register(on: On, options: PluginOptions) {
           )
         }
       }
-      return Box({ key: `line-${p.url}`, flexDirection: 'column', children })
+      return Box({ key: `panel-${p.url}`, flexDirection: 'column', children })
+    }
+
+    // One line per PR: selection and unread marks, kind, a badge (risk, or state for my PRs), the PR, its title, then how
+    // long it has waited, CI and the AI review
+    const prWidth = Math.min(
+      24,
+      Math.max(8, ...rows.map((p) => textWidth(`${p.repository.nameWithOwner.split('/')[1] ?? ''}#${p.number}`))),
+    )
+    const rowOf = (p: PR) => {
+      const isSelected = selected === p.url
+      const repo = p.repository.nameWithOwner.split('/')[1] ?? p.repository.nameWithOwner
+      const label = `${repo}#${p.number}`
+      const prLink = safeHref(p.url)
+      const b = badgeOf(p)
+      const since = tab === 'review' ? requestedAt(p) : p.updatedAt
+      const h = heat(since, now)
+      const ci = ciGlyph(p)
+      const ai = tab === 'review' ? aiGlyph(p) : { text: ' ', color: undefined }
+      const right = ` ${h.bar}${short(since, now).padStart(4)}  ${ci.text}  ${ai.text}`
+      const lead = `${isSelected ? '▸' : ' '}${isUnread(p) ? '●' : ' '}${isBot(p) ? '⚙' : ' '}`
+      const titleWidth = Math.max(8, columns - textWidth(lead) - 1 - textWidth(b.text) - 1 - prWidth - 1 - textWidth(right))
+      const title = `${p.isDraft ? '[draft] ' : ''}${p.title}`
+      const padTo = (text: string, width: number) => text + ' '.repeat(Math.max(0, width - textWidth(text)))
+      return Box({
+        key: `line-${p.url}`,
+        flexDirection: 'row',
+        children: [
+          Text({ color: 'magenta', bold: true, children: [lead] }),
+          Text({ children: [' '] }),
+          Text({ ...(b.color ? { color: b.color } : { dimColor: true }), bold: b.bold === true, children: [b.text] }),
+          Text({ children: [' '] }),
+          prLink ? link(prLink, fit(label, prWidth + 1), isSelected) : Text({ children: [label] }),
+          Text({ children: [' '.repeat(Math.max(0, prWidth - textWidth(fit(label, prWidth + 1))) + 1)] }),
+          Text({
+            bold: isSelected,
+            inverse: isSelected,
+            dimColor: !isSelected && !isUnread(p),
+            wrap: 'truncate-end',
+            children: [padTo(fit(title, titleWidth), titleWidth)],
+          }),
+          Text({ color: h.color, children: [` ${h.bar}`] }),
+          Text({ dimColor: true, children: [short(since, now).padStart(4)] }),
+          Text({ ...(ci.color ? { color: ci.color } : { dimColor: true }), children: [`  ${ci.text}`] }),
+          Text({ ...(ai.color ? { color: ai.color } : { dimColor: true }), children: [`  ${ai.text}`] }),
+        ],
+      })
     }
 
     // Folded groups go on the last rows
@@ -2667,42 +2801,25 @@ export function register(on: On, options: PluginOptions) {
       )
     }
 
-    // When the list does not fit, grow a window around the selected PR as far as it fits
-    const heights = rows.map(linesOf)
-    const total = heights.reduce((sum, h) => sum + h, 0)
+    // The details of the selected PR take what they need (up to half the pane); the list gets the rest, as a window
+    // around the selection when it does not fit
+    const selectedPr = rows.find((p) => p.url === selected)
+    const panel = selectedPr ? panelOf(selectedPr) : undefined
     const recentRows = tab === 'review' ? Math.min(3, approvedRecently.filter((x) => !review.some((p) => p.url === x.url)).length) : 0
-    const room = Math.max(3, paneLimit - topLines - folds.length - 1 - (recentRows ? recentRows + 1 : 0))
+    const chrome = topLines + 2 + 1 + (panel ? 1 : 0) + (folds.length > 0 ? 1 : 0) + (recentRows ? recentRows + 1 : 0) + footerLines
+    const panelHeight = selectedPr ? panelLines(selectedPr) : 0
+    const room = Math.max(3, paneLimit - chrome - Math.min(panelHeight, Math.floor(paneLimit / 2)))
     let shown = rows
-    let shownHeight = total
     const more: El[] = []
-    if (total > room) {
-      const budget = Math.max(1, room - 1)
+    if (rows.length > room) {
       const at = Math.max(
         0,
         rows.findIndex((p) => p.url === selected),
       )
-      let lo = at
-      let hi = at
-      let used = heights[at] ?? 1
-      for (let grew = true; grew; ) {
-        grew = false
-        const below = heights[hi + 1]
-        if (below !== undefined && used + below <= budget) {
-          hi += 1
-          used += below
-          grew = true
-        }
-        const above = heights[lo - 1]
-        if (above !== undefined && used + above <= budget) {
-          lo -= 1
-          used += above
-          grew = true
-        }
-      }
-      shown = rows.slice(lo, hi + 1)
-      shownHeight = used
+      const lo = Math.max(0, Math.min(at - Math.floor((room - 1) / 2), rows.length - (room - 1)))
+      shown = rows.slice(lo, lo + room - 1)
       const above = lo
-      const below = rows.length - 1 - hi
+      const below = rows.length - lo - shown.length
       const parts = [above > 0 ? `↑ ${above} more` : '', below > 0 ? `↓ ${below} more` : ''].filter(Boolean)
       more.push(Text({ dimColor: true, children: [`  ${parts.join('  ')}  (j/k to move)`] }))
     }
@@ -2731,19 +2848,33 @@ export function register(on: On, options: PluginOptions) {
         Text({ dimColor: true, children: ['  ● marks PRs updated since you last selected them'] }),
       ]
       lastHeight = topLines + 1 + helpRows.length
-      return Box({ flexDirection: 'column', children: [...top, Text({ children: [' '] }), ...helpRows] })
+      return Box({ flexDirection: 'column', children: [...top, rule(), ...helpRows] })
     }
 
-    const list: El[] = shown.map(line)
+    const list: El[] = shown.map(rowOf)
     if (rows.length === 0) {
-      list.push(
-        Text({
-          dimColor: true,
-          children: [
-            filterText ? `  No PRs match "${filterText}"` : tab === 'review' ? '  No review requests from people' : '  No open PRs',
-          ],
-        }),
-      )
+      if (tab === 'review' && !filterText && g.humans.length === 0) {
+        // Inbox zero deserves a moment
+        list.push(
+          Text({ color: 'green', children: ['  ✦ inbox zero ✦'] }),
+          Text({
+            dimColor: true,
+            children: [
+              g.bots.length
+                ? `  no one is waiting on you · ${plural(g.bots.length, 'bot PR')} behind b`
+                : '  no one is waiting on you. go ship something',
+            ],
+          }),
+        )
+      } else
+        list.push(
+          Text({
+            dimColor: true,
+            children: [
+              filterText ? `  No PRs match "${filterText}"` : tab === 'review' ? '  No review requests from people' : '  No open PRs',
+            ],
+          }),
+        )
     }
 
     // Approved from here in the last day: they left the list, so say where they went
@@ -2772,9 +2903,37 @@ export function register(on: On, options: PluginOptions) {
       }
     }
 
-    const tree = [...top, Text({ children: [' '] }), ...list, ...more, ...recent, ...folds]
-    // Rows drawn (a PR counts as several)
-    lastHeight = topLines + 1 + (rows.length === 0 ? 1 : shownHeight) + more.length + recent.length + folds.length
+    const columnsHead = Text({
+      dimColor: true,
+      children: [
+        `    ${(tab === 'review' ? 'RISK' : 'STATE').padEnd(6)} ${'PR'.padEnd(prWidth)} ${'TITLE'}`.padEnd(Math.max(0, columns - 14)) +
+          (tab === 'review' ? '  WAIT CI AI' : '   AGE CI   '),
+      ],
+    })
+    const foldRow = folds.length > 0 ? [Box({ key: 'folds', flexDirection: 'row', flexWrap: 'wrap', columnGap: 3, children: folds })] : []
+    const tree = [
+      ...top,
+      rule(),
+      ...(rows.length > 0 ? [columnsHead] : []),
+      ...list,
+      ...more,
+      ...(panel ? [rule(), panel] : []),
+      ...recent,
+      ...foldRow,
+      rule(),
+      ...footer,
+    ]
+    // Rows drawn
+    lastHeight =
+      topLines +
+      2 +
+      (rows.length > 0 ? 1 : 0) +
+      (rows.length === 0 ? 2 : shown.length) +
+      more.length +
+      (panel ? 1 + panelHeight : 0) +
+      recent.length +
+      foldRow.length +
+      footerLines
     return Box({ flexDirection: 'column', children: tree })
   })
 }

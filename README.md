@@ -3,7 +3,7 @@
 A Claude Code mod that turns your review requests and your own pull requests into an inbox, ordered by what needs you next.
 
 - A status line under the prompt keeps the counts in view (`👀 To review 3 (+2 bot) · ⚠ High risk 1 · 🔴 Needs action 1 · ✅ Ready 1 · ⏳ Waiting 2`)
-- `/pr-inbox` opens a pane with two tabs
+- `/pr-inbox` opens a pane in the spirit of lazygit and gh-dash: one line per PR (risk or state, how long it has waited as a heat bar, CI, AI review), the selected PR's details under the list, and the keys on the bottom line. Two tabs
   - **To review**: review requests, the longest-waiting first. Each PR gets an AI summary, a risk level (low / medium / high) and its impact on release (visible to users / not visible / cannot tell), taking feature flags into account
   - **My PRs**: needs action (changes requested, CI failed, conflict) → ready to merge → waiting for review → stale. Failed CI checks are listed with links to their runs
 - A toast tells you about new review requests, and when your PRs are approved, get changes requested or fail CI. New review requests also raise an OS notification (macOS and Linux), so you see them outside Claude Code too
