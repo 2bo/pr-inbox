@@ -1626,7 +1626,13 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
       const auto = cfg.ai_approve === 'auto' && (TRUSTED_AUTHORS.has(pr.authorAssociation) || isDependencyBot(pr)) && !pr.isCrossRepository
       run.step = 'approving…'
       redraw()
-      const ok = auto || (await confirmApproval($, pr, passedNote(run, enabledPerspectives(pr).length, nits)))
+      // The notes go to the transcript in full, and the pane opens them beside the dialog, with links to the lines
+      for (const line of reviewPreview(run, enabledPerspectives(pr))) $.ui.log(line)
+      if (!auto) {
+        expanded = pr.url
+        redraw()
+      }
+      const ok = auto || (await confirmReviewed($, run, enabledPerspectives(pr), nits))
       run.state = ok && (await postApproval($, pr)) ? 'approved' : 'passed'
     }
     await $.store.set(`review:${pr.url}`, { head: pr.headRefOid, state: run.state, problems: run.problems, findings: run.findings })
@@ -1700,20 +1706,57 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
   return finish()
 }
 
-// The confirmation dialog's note when the review passed: how many perspectives, and the first nits
-function passedNote(run: ReviewRun, perspectives: number, nits: number): string {
-  const sample = run.findings
-    .filter((f) => f.severity === 'nit')
-    .slice(0, 2)
-    .map((f) => `${f.location} ${fit(f.summary, 60)}`)
-  const more = nits > sample.length ? `, +${nits - sample.length} more` : ''
-  return ` AI review passed ${perspectives} perspectives with no important findings.${nits ? ` Nits: ${sample.join('; ')}${more}.` : ''}`
+// The approval dialog after a passed review. A mod's dialog carries only a question and labels, so the question
+// says where the notes are: the pane opens them beside it, and the transcript gets them in full first
+async function confirmReviewed($: EngineInterface, run: ReviewRun, perspectives: { p: Perspective }[], nits: number): Promise<boolean> {
+  const { pr } = run
+  const n = perspectives.length
+  // Every note that does not block, by kind
+  const count = (what: string, k: number) => (k ? [`${k} ${what}${k === 1 ? '' : 's'}`] : [])
+  const kinds = [
+    ...count('nit', nits),
+    ...count('low-confidence finding', run.findings.filter((f) => f.severity === 'important' && !isCandidate(f)).length),
+    ...count('refuted finding', run.findings.filter((f) => f.confirmed === false).length),
+  ]
+  const notes = kinds.length ? ` It left ${kinds.join(', ')}, listed under the PR in the pane and in the transcript.` : ''
+  return confirmApproval($, pr, ` The AI review passed ${n} perspective${n === 1 ? '' : 's'} with no important findings.${notes}`)
+}
+
+// The passed review in full, for the transcript: the PR, each perspective, then every note
+function reviewPreview(run: ReviewRun, perspectives: { p: Perspective }[]): string[] {
+  const { pr } = run
+  const lines = [
+    `pr-inbox AI review of ${pr.repository.nameWithOwner}#${pr.number} at ${pr.headRefOid.slice(0, 7)}: passed`,
+    pr.title,
+    '',
+    'Perspectives',
+    ...perspectives.map(({ p }) => {
+      const own = run.findings.filter((f) => f.perspective === p.label && f.severity !== 'pre-existing')
+      return `  ✓ ${p.label}${own.length ? ` (${own.length} note${own.length === 1 ? '' : 's'})` : ''}`
+    }),
+  ]
+  const notes = run.findings.filter((f) => f.severity !== 'pre-existing')
+  if (notes.length > 0) {
+    lines.push('', 'Notes (none blocks the approval)')
+    notes.forEach((f, i) => {
+      const kind = f.severity === 'nit' ? 'nit' : f.confirmed === false ? 'refuted' : 'low confidence'
+      lines.push('', `${i + 1}. ${kind} · ${f.perspective} · ${f.location}`, `   ${f.summary}`)
+      if (f.evidence) lines.push(`   → ${f.evidence}`)
+    })
+  } else lines.push('', 'No notes.')
+  // A transcript row holds one line: blank lines are left out
+  return lines.filter((l) => l.trim() !== '')
 }
 
 // Writes the outcome to the transcript, so it stays after the pane closes
 function logReview($: EngineInterface, run: ReviewRun): void {
   const { pr } = run
   const head = `pr-inbox AI review of ${pr.repository.nameWithOwner}#${pr.number} at ${pr.headRefOid.slice(0, 7)}: ${run.state}`
+  // A passed review's notes were written in full before the decision
+  if (run.state === 'approved' || run.state === 'passed') {
+    $.ui.log(head)
+    return
+  }
   const lines = [
     head,
     ...run.problems.map((x) => `  ✗ ${x}`),
@@ -1722,7 +1765,8 @@ function logReview($: EngineInterface, run: ReviewRun): void {
       .filter((f) => f.severity !== 'pre-existing')
       .map((f) => `  · ${f.severity}${f.confirmed === false ? ' (refuted)' : ''} [${f.perspective}] ${f.location} ${f.summary}`),
   ]
-  $.ui.log(lines.join('\n'))
+  // A transcript row holds one line
+  for (const line of lines) $.ui.log(line)
 }
 
 // ---- Language ----
@@ -2028,7 +2072,9 @@ export function register(on: On, options: PluginOptions) {
     const detailRows = (p: PR): DetailRow[] => {
       if (expanded !== p.url) return []
       const r = reviews.get(p.url)
-      if (!r || r.state === 'running' || r.state === 'cancelled') return [{ text: 'No AI review yet: v to run one', dim: true }]
+      if (!r || r.state === 'cancelled') return [{ text: 'No AI review yet: v to run one', dim: true }]
+      // While it runs the findings are still coming; once it is waiting on the approval they are all in
+      if (r.state === 'running' && r.step !== 'approving…') return [{ text: 'The AI review is still running', dim: true }]
       const repo = p.repository.nameWithOwner
       const lineHref = (location: string) => {
         const m = location.match(/^([\w@+./-]+?)(?::(\d+))?(?:[-:,].*)?$/)

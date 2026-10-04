@@ -148,11 +148,15 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
   const statuses: (string | undefined)[] = []
   const toasts: string[] = []
   const questions: string[] = []
+  const logs: string[] = []
   const screened: string[] = []
   // The AI review's model calls: plans, reviews and verifications, with their model
   const reviewCalls: { kind: 'gather' | 'review' | 'verify'; prompt: string; model: string }[] = []
   on('turn.complete', (_, e) => ({ text: e.answer }))
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', (_, e) => {
+    logs.push(e.text)
+    return { value: undefined }
+  })
   const store = new Map<string, unknown>()
   if (opts.snapshot) store.set('snapshot', opts.snapshot)
   for (const [k, v] of Object.entries(opts.store ?? {})) store.set(k, v)
@@ -237,7 +241,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
     if (opts.dismiss) return { deny: 'dismissed' }
     return { result: { answers: { [question]: opts.answer ?? 'Cancel' } } }
   })
-  return { calls, prompts, systems, submitted, statuses, toasts, questions, screened, reviewCalls, store, clock }
+  return { calls, prompts, systems, submitted, statuses, toasts, questions, logs, screened, reviewCalls, store, clock }
 }
 
 // Start the session and run until the fetch and background analyses finish
@@ -984,7 +988,8 @@ test('v reviews from each perspective on the review model, then approves after c
   ])
   expect(s.reviewCalls.every((c) => c.model === 'sonnet')).toBe(true)
   expect(reviewsOf(s)[0]?.prompt).toContain(`acme/app#11 at commit ${HEAD}`)
-  expect(s.questions.at(-1)).toContain('AI review passed 5 perspectives with no important findings.')
+  expect(s.questions.at(-1)).toContain(`Approve acme/app#11 at ${HEAD.slice(0, 7)}`)
+  expect(s.questions.at(-1)).toContain('The AI review passed 5 perspectives with no important findings.')
   expect(approvedAt(s)).toEqual([APPROVE_11])
   expect(await ui.find({ type: 'Text', text: /^AI review ✓ approved at aaaaaaa$/ })).toBeDefined()
   await ui.unmount()
@@ -1043,7 +1048,7 @@ for (const [who, over] of [
     const s = stubs(on, { answer: 'Cancel', graphql: only(member(over)) })
     await start($, s.clock)
     const ui = await pressReview($, s)
-    expect(s.questions.at(-1)).toContain('AI review passed')
+    expect(s.questions.at(-1)).toContain('The AI review passed')
     expect(approvedAt(s)).toEqual([])
     await ui.unmount()
   })
@@ -1251,7 +1256,7 @@ test(
     await start($, s.clock)
     const ui = await pressBotReview($, s)
     expect(reviewsOf(s).length).toBe(5)
-    expect(s.questions.at(-1)).toContain('AI review passed')
+    expect(s.questions.at(-1)).toContain('The AI review passed')
     expect(approvedAt(s)).toEqual([])
     await ui.unmount()
   },
@@ -1277,12 +1282,23 @@ test('d shows every finding of the AI review, with links to the reviewed lines',
   const s = stubs(on, { answer: 'Cancel', review: (p) => (perspectiveOf(p) === 'Tests' ? nitty : PASS) })
   await start($, s.clock)
   const ui = await pressReview($, s)
-  // The dialog names the nits
-  expect(s.questions.at(-1)).toContain('Nits: app/login.rb:30 name could be clearer.')
-  await ui.press({ key: 'act-details' })
+  // The dialog says where the nits are; the transcript gets every note in full, and the pane opens them
+  expect(s.questions.at(-1)).toContain('It left 1 nit, listed under the PR in the pane and in the transcript.')
+  // One transcript row per line
+  expect(s.logs.every((x) => !x.includes('\n'))).toBe(true)
+  const log = s.logs.join('\n')
+  expect(log).toContain('1. nit · Tests · app/login.rb:30')
+  expect(log).toContain('name could be clearer')
+  expect(log).toContain('→ x is vague')
+  // The details are already open beside the dialog
   const line = await lineOf(ui, 11)
   expect(linksIn(line)).toContainEqual(blueLink(`https://github.com/acme/app/blob/${HEAD}/app/login.rb#L30`, 'app/login.rb:30'))
   expect(line).toContain('x is vague')
+  // d closes and reopens them
+  await ui.press({ key: 'act-details' })
+  expect(await lineOf(ui, 11)).not.toContain('x is vague')
+  await ui.press({ key: 'act-details' })
+  expect(await lineOf(ui, 11)).toContain('x is vague')
   await ui.unmount()
 })
 
