@@ -1613,3 +1613,62 @@ test('the approve dialog selects Cancel first, and an approval says in the trans
   expect(s.logs).toContain('pr-inbox approved acme/app#11 at aaaaaaa: you chose Approve in the dialog of a')
   await ui.unmount()
 })
+
+// ---- Small fixes: plural, a after an AI review, recently approved, focus help ----
+
+test('fold labels count in the singular for one', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect((await ui.find({ key: 'fold-bots' }))?.props.label).toBe('Show 1 bot PR 🤖')
+  await ui.unmount()
+})
+
+test('after a passed AI review, a says so in its label and its dialog', async ($, on) => {
+  const s = stubs(on, { answer: 'Cancel' })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('Approve… (AI review ✓)')
+  await ui.press({ key: 'act-approve' })
+  expect(s.questions.at(-1)).toContain('The AI review passed at this commit.')
+  await ui.unmount()
+})
+
+test('after a blocked AI review, a warns with the reason', async ($, on) => {
+  const s = stubs(on, {
+    answer: 'Cancel',
+    review: bugIn('Correctness & compatibility'),
+    verify: () => JSON.stringify({ results: [], injection: false }),
+  })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('Approve… (AI review ✗)')
+  await ui.press({ key: 'act-approve' })
+  expect(s.questions.at(-1)).toContain('⚠ The AI review blocked it: [Correctness & compatibility] app/login.rb:12 nil check missing.')
+  await ui.unmount()
+})
+
+test('an approval says the PR leaves To review, and it is listed as approved recently', async ($, on) => {
+  const gone = { url: 'https://github.com/acme/app/pull/99', label: 'app#99', title: 'Old fix', at: NOW - 2 * 60 * 60 * 1000 }
+  const stale = { url: 'https://github.com/acme/app/pull/98', label: 'app#98', title: 'Older fix', at: NOW - 2 * 24 * 60 * 60 * 1000 }
+  const s = stubs(on, { answer: 'Approve', store: { approved: [gone, stale] } })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  // Approved within a day and no longer requested: listed with a link; older ones are dropped
+  expect(await ui.find({ type: 'Text', text: /^Approved recently/ })).toBeDefined()
+  expect(JSON.stringify(await ui.find({ key: `approved-${gone.url}` }))).toContain('app#99')
+  expect(await ui.find({ key: `approved-${stale.url}` })).toBeUndefined()
+  await ui.press({ key: 'act-approve' })
+  expect(s.toasts.some((t) => t.includes('It leaves To review'))).toBe(true)
+  expect((s.store.get('approved') as { url: string }[])[0]?.url).toBe(HUMAN.url)
+  await ui.unmount()
+})
+
+test('the help says how to move the focus to the pane', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'help' })
+  expect(await ui.find({ type: 'Text', text: /Ctrl\+X Tab {2}move between the prompt and this pane/ })).toBeDefined()
+  await ui.unmount()
+})

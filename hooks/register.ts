@@ -289,6 +289,10 @@ let showHelp = false
 let showSnoozed = false
 // Snoozed PRs, hidden until they are updated, and the update each PR was last seen at (url → updatedAt), kept in $.store
 let snoozed: Record<string, string> = {}
+// PRs approved from here in the last day, shown under To review: GitHub drops the review request once you approve
+type Approved = { url: string; label: string; title: string; at: number }
+let approvedRecently: Approved[] = []
+const APPROVED_FOR = DAY
 let seen: Record<string, string> | undefined
 let showStale = false
 let selected = ''
@@ -495,6 +499,11 @@ function ciMark(pr: PR): string {
   return ''
 }
 
+// "1 PR", "2 PRs"
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`
+}
+
 // Display width in the terminal (2 for full-width)
 function charWidth(ch: string): number {
   return /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]|[\u{1f300}-\u{1faff}]/u.test(ch) ? 2 : 1
@@ -640,6 +649,16 @@ async function loadInboxState($: EngineInterface): Promise<void> {
   // The first time, everything already open counts as seen
   seen = stored === undefined ? Object.fromEntries([...open.values()].map((p) => [p.url, p.updatedAt])) : asMap(stored)
   seen = Object.fromEntries(Object.entries(seen).filter(([url]) => open.has(url)))
+  const now = await $.clock.now()
+  const keptApproved = (await $.store.get('approved')) as unknown
+  approvedRecently = (Array.isArray(keptApproved) ? keptApproved : [])
+    .filter(
+      (x): x is Approved =>
+        typeof x?.url === 'string' && typeof x?.label === 'string' && typeof x?.title === 'string' && typeof x?.at === 'number',
+    )
+    .filter((x) => now - x.at < APPROVED_FOR)
+    .map((x) => ({ ...x, label: clean(x.label), title: clean(x.title) }))
+  await $.store.set('approved', approvedRecently)
   await $.store.set('seen', seen)
   for (const key of await $.store.keys()) {
     if (!key.startsWith('review:')) continue
@@ -920,7 +939,20 @@ const REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 async function approve($: EngineInterface, pr: PR): Promise<void> {
   const a = analysisOf(pr)
   const outdated = !a || 'failed' in a || a.updatedAt !== pr.updatedAt ? ' The analysis does not cover the latest update.' : ''
-  if (await confirmApproval($, pr, outdated)) await postApproval($, pr, 'you chose Approve in the dialog of a')
+  const r = reviewOfHead(pr)
+  const ai =
+    r?.state === 'blocked'
+      ? ` ⚠ The AI review blocked it: ${r.problems[0] ?? 'see the details'}.`
+      : r && (r.state === 'passed' || r.state === 'approved')
+        ? ' The AI review passed at this commit.'
+        : ''
+  if (await confirmApproval($, pr, `${ai}${outdated}`)) await postApproval($, pr, 'you chose Approve in the dialog of a')
+}
+
+// The finished AI review of the PR's current commit, if there is one
+function reviewOfHead(pr: PR): ReviewRun | undefined {
+  const r = reviews.get(pr.url)
+  return r && r.pr.headRefOid === pr.headRefOid && ['passed', 'approved', 'blocked'].includes(r.state) ? r : undefined
 }
 
 // The confirmation dialog: repository, number, commit and a defused title, then a note
@@ -986,7 +1018,13 @@ async function postApproval($: EngineInterface, pr: PR, how: string): Promise<bo
     fail(r.stderr)
     return false
   }
-  $.ui.toast(`✅ Approved #${pr.number} at ${sha}`)
+  $.ui.toast(`✅ Approved #${pr.number} at ${sha}. It leaves To review, as GitHub drops the request once you approve`, { timeoutMs: 8000 })
+  const label = `${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number}`
+  approvedRecently = [
+    { url: pr.url, label, title: pr.title, at: await $.clock.now() },
+    ...approvedRecently.filter((x) => x.url !== pr.url),
+  ].slice(0, 10)
+  await $.store.set('approved', approvedRecently)
   // Who decided, and how, stays in the transcript
   $.ui.log(`pr-inbox approved ${pr.repository.nameWithOwner}#${pr.number} at ${sha}: ${how}`)
   await refresh($)
@@ -2107,7 +2145,9 @@ export function register(on: On, options: PluginOptions) {
         }),
       ]
       if (isReview) {
-        actions.push(Button({ key: 'act-approve', label: 'Approve…', hotkey: 'a', plain: true, onPress: () => approve($, pr) }))
+        const r = reviewOfHead(pr)
+        const mark = r?.state === 'blocked' ? ' (AI review ✗)' : r ? ' (AI review ✓)' : ''
+        actions.push(Button({ key: 'act-approve', label: `Approve…${mark}`, hotkey: 'a', plain: true, onPress: () => approve($, pr) }))
         actions.push(
           Button({
             key: 'act-ai-review',
@@ -2410,7 +2450,7 @@ export function register(on: On, options: PluginOptions) {
     const folds: El[] = []
     if (tab === 'review' && g.bots.length > 0) {
       folds.push(
-        small('fold-bots', `${showBots ? 'Hide' : 'Show'} ${g.bots.length} bot PRs 🤖`, 'b', () => {
+        small('fold-bots', `${showBots ? 'Hide' : 'Show'} ${plural(g.bots.length, 'bot PR')} 🤖`, 'b', () => {
           showBots = !showBots
           redraw()
         }),
@@ -2432,17 +2472,23 @@ export function register(on: On, options: PluginOptions) {
     }
     if (tab === 'mine' && g.stale.length > 0) {
       folds.push(
-        small('fold-stale', `${showStale ? 'Hide' : 'Show'} ${g.stale.length} stale PRs (${cfg.stale_days}+ days) 💤`, 's', () => {
-          showStale = !showStale
-          redraw()
-        }),
+        small(
+          'fold-stale',
+          `${showStale ? 'Hide' : 'Show'} ${plural(g.stale.length, 'stale PR')} (${cfg.stale_days}+ days) 💤`,
+          's',
+          () => {
+            showStale = !showStale
+            redraw()
+          },
+        ),
       )
     }
 
     // When the list does not fit, grow a window around the selected PR as far as it fits
     const heights = rows.map(linesOf)
     const total = heights.reduce((sum, h) => sum + h, 0)
-    const room = Math.max(3, paneLimit - topLines - folds.length - 1)
+    const recentRows = tab === 'review' ? Math.min(3, approvedRecently.filter((x) => !review.some((p) => p.url === x.url)).length) : 0
+    const room = Math.max(3, paneLimit - topLines - folds.length - 1 - (recentRows ? recentRows + 1 : 0))
     let shown = rows
     let shownHeight = total
     const more: El[] = []
@@ -2490,10 +2536,11 @@ export function register(on: On, options: PluginOptions) {
         ['o', 'open in the browser'],
         ['b / s', 'show or hide bot PRs / stale PRs'],
         ['r', 'fetch again'],
+        ['Ctrl+X Tab', 'move between the prompt and this pane (keys reach the pane only while it has the focus)'],
         ['h', 'close this help'],
       ]
       const helpRows = [
-        ...help.map(([k, what]) => Text({ children: [`  ${(k ?? '').padEnd(7)}${what}`] })),
+        ...help.map(([k, what]) => Text({ children: [`  ${(k ?? '').padEnd(12)}${what}`] })),
         Text({ dimColor: true, children: ['  ● marks PRs updated since you last selected them'] }),
       ]
       lastHeight = topLines + 1 + helpRows.length
@@ -2505,9 +2552,35 @@ export function register(on: On, options: PluginOptions) {
       list.push(Text({ dimColor: true, children: [tab === 'review' ? '  No review requests from people' : '  No open PRs'] }))
     }
 
-    const tree = [...top, Text({ children: [' '] }), ...list, ...more, ...folds]
+    // Approved from here in the last day: they left the list, so say where they went
+    const recent: El[] = []
+    if (tab === 'review') {
+      const shownRecent = approvedRecently.filter((x) => !review.some((p) => p.url === x.url)).slice(0, 3)
+      if (shownRecent.length > 0) recent.push(Text({ dimColor: true, children: ['Approved recently (no longer requested):'] }))
+      for (const x of shownRecent) {
+        const href = safeHref(x.url)
+        recent.push(
+          Box({
+            key: `approved-${x.url}`,
+            flexDirection: 'row',
+            paddingLeft: 2,
+            children: [
+              Text({ color: 'green', children: ['✓ '] }),
+              href ? link(href, x.label) : Text({ children: [x.label] }),
+              Text({
+                dimColor: true,
+                wrap: 'truncate-end',
+                children: [fit(` ${x.title}  ${age(new Date(x.at).toISOString(), now)}`, Math.max(10, columns - textWidth(x.label) - 4))],
+              }),
+            ],
+          }),
+        )
+      }
+    }
+
+    const tree = [...top, Text({ children: [' '] }), ...list, ...more, ...recent, ...folds]
     // Rows drawn (a PR counts as several)
-    lastHeight = topLines + 1 + (rows.length === 0 ? 1 : shownHeight) + more.length + folds.length
+    lastHeight = topLines + 1 + (rows.length === 0 ? 1 : shownHeight) + more.length + recent.length + folds.length
     return Box({ flexDirection: 'column', children: tree })
   })
 }

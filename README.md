@@ -35,12 +35,13 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 | `d` | Details: every finding of the AI review, with links to the lines |
 | `x` | Snooze the PR until it is updated (`z` shows snoozed PRs) |
 | `h` | Show the keys |
+| `Ctrl+X` `Tab` | Move between the prompt and the pane. Keys reach the pane only while it has the focus |
 | `o` | Open in the browser |
 | `b` / `s` | Show or hide bot PRs / stale PRs |
 | `r` | Fetch again |
 | `Esc` | Close the pane |
 
-● marks PRs updated since you last selected them.
+● marks PRs updated since you last selected them. A PR you approve leaves To review, as GitHub drops the review request; PRs approved from here stay listed under it as "Approved recently" for a day.
 
 PR numbers and failed checks are hyperlinks: Cmd+click them in a terminal that supports hyperlinks.
 
