@@ -38,7 +38,7 @@ Run `pnpm run check` before every commit; all of it must pass. `claude plugin va
 
 PR titles, bodies, diffs, comments and CI output are untrusted input written by others. Each rule below has tests; keep them passing and add one whenever you touch the area.
 
-- **Display**: pass every string from GitHub or the model through `clean()` before drawing it (escape sequences, control, bidi and invisible characters). Links go through `safeHref()`: canonical `https://` only, no credentials, or the pane refuses to render
+- **Display**: pass every string from GitHub or the model through `clean()` before drawing it (escape sequences, control, bidi and invisible characters). Diff lines given to `Code` go through `cleanCodeLine()` (the same, tabs kept) and stay out of every model call. Links go through `safeHref()`: canonical `https://` only, no credentials, or the pane refuses to render
 - **Analysis**: `$.model.complete` with no tools. PR content goes inside the random `untrusted-<uuid>` fence, file list before body, Unicode tag characters removed. A partial view (`prContent().partial`) is never judged low risk and is shown as partial
 - **Analysis budget**: failures are stored and retried with backoff (`RETRY_BASE`, `MAX_ATTEMPTS`); at most `MAX_ANALYSES_PER_HOUR` start per hour. `analysis` = `off` / `when opened` must send nothing before it allows
 - **`e`**: the request keeps `UNTRUSTED_NOTE`, and the turn it starts runs under the `tool.call` guard (`READ_TOOLS`, `READ_GH`). Never widen the allowlist to a tool that writes, runs arbitrary commands, reaches the network or spawns agents

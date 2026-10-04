@@ -2046,6 +2046,166 @@ function logReview($: EngineInterface, run: ReviewRun): void {
   for (const line of lines) $.ui.log(line)
 }
 
+// ---- The diff (d) ----
+
+// What one Code element may hold is 10000 characters: pieces stay under this, cut between lines with their own @@
+const DIFF_PIECE = 8000
+// A file's diff past this is cut, the rest left to GitHub (o)
+const DIFF_FILE_MAX = 60000
+
+type DiffFile = { path: string; from: string; additions: number; deletions: number; pieces: string[]; note: string; cut: boolean }
+type DiffView = { pr: PR; files: DiffFile[]; at: number; list: boolean; loading: boolean; error: string; showGenerated: Set<string> }
+let diffView: DiffView | undefined
+
+// Lockfiles, minified and generated files: folded until asked for
+function isGenerated(path: string): boolean {
+  return (
+    /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|Gemfile\.lock|Cargo\.lock|poetry\.lock|uv\.lock|composer\.lock|go\.sum|Podfile\.lock|mix\.lock|flake\.lock)$/.test(
+      path,
+    ) ||
+    /\.(min\.(js|css)|map|snap|pb\.go|lock)$/.test(path) ||
+    /(^|\/)(dist|vendor|node_modules|__generated__|generated)\//.test(path)
+  )
+}
+
+// One diff line made safe to hand to the highlighter: tabs stay, every other control, bidi and invisible character
+// goes, so nothing in a PR can move the cursor or reorder what is drawn. The first character (the +, - or space) stays
+function cleanCodeLine(line: string): string {
+  return (
+    line
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: this regex exists to strip control sequences
+      .replace(/\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|\u001b[@-_]?|\u009b[0-?]*[ -/]*[@-~]/g, '')
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: this regex exists to strip control characters
+      .replace(/[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]/g, '')
+      .replace(INVISIBLE, '')
+      .replace(/(\p{M}{3})\p{M}+/gu, '$1')
+  )
+}
+
+// A hunk's lines cut into pieces under DIFF_PIECE characters, each with its own @@ header so it still parses
+function splitHunk(header: string, lines: string[]): string[] {
+  const m = header.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/)
+  if (!m) return []
+  let oldAt = Number(m[1])
+  let newAt = Number(m[2])
+  const tail = m[3] ?? ''
+  const pieces: string[] = []
+  let body: string[] = []
+  let size = 0
+  let start = { old: oldAt, new: newAt, oldCount: 0, newCount: 0 }
+  const flush = () => {
+    if (body.length === 0) return
+    pieces.push(`@@ -${start.old},${start.oldCount} +${start.new},${start.newCount} @@${tail}\n${body.join('\n')}`)
+    body = []
+    size = 0
+    start = { old: oldAt, new: newAt, oldCount: 0, newCount: 0 }
+  }
+  for (const raw of lines) {
+    // A single line longer than a piece is cut; the highlighter would refuse it whole
+    const line = raw.length > DIFF_PIECE - 200 ? `${raw.slice(0, DIFF_PIECE - 201)}…` : raw
+    if (size + line.length + 1 > DIFF_PIECE - 100) flush()
+    body.push(line)
+    size += line.length + 1
+    const mark = line[0]
+    if (mark === '-' || mark === ' ' || mark === undefined) {
+      oldAt++
+      start.oldCount++
+    }
+    if (mark === '+' || mark === ' ' || mark === undefined) {
+      newAt++
+      start.newCount++
+    }
+  }
+  flush()
+  return pieces
+}
+
+// `gh pr diff` output, file by file, made safe and cut into pieces the Code element takes
+function parseDiff(text: string): DiffFile[] {
+  const files: DiffFile[] = []
+  const chunks = text.split(/^(?=diff --git )/m).filter((c) => c.startsWith('diff --git '))
+  for (const chunk of chunks) {
+    const lines = chunk.replace(/\n$/, '').split('\n')
+    const head = lines[0] ?? ''
+    const names = head.match(/^diff --git a\/(.*) b\/(.*)$/)
+    let path = names?.[2] ?? ''
+    let from = names?.[1] ?? ''
+    let note = ''
+    let i = 1
+    for (; i < lines.length && !(lines[i] ?? '').startsWith('@@'); i++) {
+      const l = lines[i] ?? ''
+      if (l.startsWith('+++ b/')) path = l.slice(6)
+      else if (l.startsWith('--- a/')) from = l.slice(6)
+      else if (l.startsWith('new file')) note = 'new file'
+      else if (l.startsWith('deleted file')) note = 'deleted'
+      else if (l.startsWith('rename from ')) from = l.slice(12)
+      else if (l.startsWith('Binary files')) note = 'binary file'
+    }
+    if (from && from !== path && !note) note = `renamed from ${cleanCodeLine(from)}`
+    let additions = 0
+    let deletions = 0
+    const pieces: string[] = []
+    let size = 0
+    let cut = false
+    let header = ''
+    let body: string[] = []
+    const endHunk = () => {
+      if (header && !cut) {
+        for (const p of splitHunk(header, body)) {
+          if (size + p.length > DIFF_FILE_MAX) {
+            cut = true
+            break
+          }
+          pieces.push(p)
+          size += p.length
+        }
+      }
+      header = ''
+      body = []
+    }
+    for (; i < lines.length; i++) {
+      const l = cleanCodeLine(lines[i] ?? '')
+      if (l.startsWith('@@')) {
+        endHunk()
+        header = l
+      } else if (header) {
+        if (l.startsWith('\\')) continue
+        if (l.startsWith('+')) additions++
+        else if (l.startsWith('-')) deletions++
+        body.push(l)
+      }
+    }
+    endHunk()
+    files.push({ path: cleanCodeLine(path), from: cleanCodeLine(from), additions, deletions, pieces, note, cut })
+  }
+  return files
+}
+
+// The AI review's findings that point into a file, for its header (the highlighter's lines take no marks)
+function findingsIn(pr: PR, path: string): Finding[] {
+  const r = reviews.get(pr.url)
+  if (!r || r.pr.headRefOid !== pr.headRefOid) return []
+  return r.findings.filter((f) => f.severity !== 'pre-existing' && (f.location === path || f.location.startsWith(`${path}:`)))
+}
+
+async function openDiff($: EngineInterface, pr: PR): Promise<void> {
+  // The diff takes the pane's place (another pane could not take the keys from this one); q brings the list back
+  diffView = { pr, files: [], at: 0, list: false, loading: true, error: '', showGenerated: new Set() }
+  $.ui.invalidate('ui.render')
+  const view = diffView
+  const r = await $.process.run(['gh', 'pr', 'diff', pr.url])
+  // Closed or another PR opened meanwhile
+  if (diffView !== view) return
+  view.loading = false
+  if (r.exitCode !== 0) view.error = clean(r.stderr) || `gh exited with code ${r.exitCode}`
+  else view.files = parseDiff(r.stdout)
+  // Start at the first file with a finding, else the first one that is not generated
+  const firstFinding = view.files.findIndex((f) => findingsIn(pr, f.path).length > 0)
+  const firstReal = view.files.findIndex((f) => !isGenerated(f.path))
+  view.at = Math.max(0, firstFinding >= 0 ? firstFinding : firstReal)
+  $.ui.invalidate('ui.render')
+}
+
 // ---- The list's cells ----
 
 const LOGO = '▍pr/inbox'
@@ -2349,6 +2509,7 @@ export function register(on: On, options: PluginOptions) {
   // The pane closed (q, ctrl+x x, or the engine): the hint under the prompt goes back to normal
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE) {
+      diffView = undefined
       paneOpen = false
       paneFocused = false
       $.ui.invalidate('ui.render')
@@ -2362,8 +2523,168 @@ export function register(on: On, options: PluginOptions) {
     return next({ ...e, props: { ...e.props, tail: paneFocused ? ' esc → prompt · q close pr-inbox' : ' ctrl+x tab → pr-inbox' } })
   })
 
+  // The diff, in the pane while one is open (d): one file at a time, drawn by Claude Code's own highlighter (the Code
+  // element); the pane scrolls it
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
-    if (e.requestId !== PANE) return next(e)
+    if (e.requestId !== PANE || !diffView) return next(e)
+    const kit = $.ui.resolve(e)
+    const { Box, Text, Button, Link, Code } = kit
+    type El = ReturnType<typeof Box>
+    const redraw = () => $.ui.invalidate('ui.render')
+    const columns = Math.max(40, e.props.bodyColumns ?? 80)
+    const focused = e.props.isFocused === true
+    const v = diffView
+    const key = (k: string, label: string, hotkey: string, onPress: () => void, dim = false) =>
+      Button({ key: k, label, hotkey, plain: true, dimColor: dim, onPress })
+    const close = key('diff-close', 'back to the list', 'q', () => {
+      diffView = undefined
+      redraw()
+    })
+    if (!v) return next(e)
+    const { pr } = v
+    const label = `${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number}`
+    const prLink = safeHref(pr.url)
+    const head: El[] = [
+      Box({
+        flexDirection: 'row',
+        columnGap: 1,
+        children: [
+          Text({ color: focused ? NEON.pink : NEON.rule, children: ['▍'] }),
+          Text({ color: NEON.cyan, bold: true, children: ['diff'] }),
+          prLink
+            ? Link({ href: prLink, children: [Text({ color: NEON.cyan, underline: true, children: [label] })] })
+            : Text({ children: [label] }),
+          Text({ bold: true, wrap: 'truncate-end', children: [fit(pr.title, Math.max(10, columns - textWidth(label) - 8))] }),
+        ],
+      }),
+    ]
+    const rule = Text({ color: focused ? NEON.violet : NEON.rule, children: ['━'.repeat(columns)] })
+    if (v.loading || v.error || v.files.length === 0) {
+      const what = v.loading ? 'fetching the diff…' : v.error ? `✗ ${fit(v.error, columns - 4)}` : 'No changes in the diff'
+      return Box({
+        flexDirection: 'column',
+        children: [...head, rule, Text({ color: v.error ? NEON.red : NEON.muted, children: [what] }), Box({ children: [close] })],
+      })
+    }
+    const files = v.files
+    const at = Math.min(v.at, files.length - 1)
+    const file = files[at] as DiffFile
+    const go = (to: number) => {
+      v.at = (to + files.length) % files.length
+      v.list = false
+      redraw()
+    }
+    const counts = (f: DiffFile) => `+${f.additions} -${f.deletions}`
+    const marks = (f: DiffFile) => {
+      const found = findingsIn(pr, f.path)
+      const bad = found.filter((x) => findingMark(x) === '✗').length
+      const soft = found.length - bad
+      return { bad, soft, text: [bad ? `✗${bad}` : '', soft ? `△${soft}` : ''].filter(Boolean).join(' ') }
+    }
+    const keys = Box({
+      key: 'diff-keys',
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      columnGap: 2,
+      children: [
+        key('diff-next', 'next file', 'n', () => go(at + 1)),
+        key('diff-back', 'back', 'b', () => go(at - 1)),
+        key('diff-list', v.list ? 'diff' : 'files', 'l', () => {
+          v.list = !v.list
+          redraw()
+        }),
+        ...(isGenerated(file.path) && !v.list
+          ? [
+              key('diff-generated', v.showGenerated.has(file.path) ? 'fold' : 'show', 'g', () => {
+                if (v.showGenerated.has(file.path)) v.showGenerated.delete(file.path)
+                else v.showGenerated.add(file.path)
+                redraw()
+              }),
+            ]
+          : []),
+        key(
+          'diff-open',
+          'open',
+          'o',
+          async () => {
+            await $.process.run(['gh', 'pr', 'view', pr.url, '--web'])
+          },
+          true,
+        ),
+        close,
+      ],
+    })
+
+    // l: every file, the one shown marked, each one a click away
+    if (v.list) {
+      const rows = files.map((f, i) => {
+        const m = marks(f)
+        return Button({
+          key: `diff-file-${i}`,
+          plain: true,
+          dimColor: isGenerated(f.path),
+          label: `${i === at ? '▸' : ' '} ${fit(f.path, Math.max(10, columns - 24))}  ${counts(f)}${m.text ? `  ${m.text}` : ''}`,
+          onPress: () => go(i),
+        })
+      })
+      return Box({
+        flexDirection: 'column',
+        children: [...head, keys, rule, Text({ color: NEON.muted, children: [`${plural(files.length, 'file')} changed`] }), ...rows],
+      })
+    }
+
+    // The file: where it is in the PR, its counts and the review's findings in it, then its hunks
+    const m = marks(file)
+    const fileHref = safeHref(
+      `https://github.com/${pr.repository.nameWithOwner}/blob/${pr.headRefOid}/${file.path.split('/').map(encodeURIComponent).join('/')}`,
+    )
+    const title = Box({
+      flexDirection: 'row',
+      columnGap: 2,
+      children: [
+        Text({ color: NEON.muted, children: [`${at + 1}/${files.length}`] }),
+        fileHref
+          ? Link({ href: fileHref, children: [Text({ color: NEON.cyan, underline: true, bold: true, children: [file.path] })] })
+          : Text({ bold: true, children: [file.path] }),
+        Box({
+          flexDirection: 'row',
+          children: [
+            Text({ color: NEON.green, children: [`+${file.additions}`] }),
+            Text({ children: [' '] }),
+            Text({ color: NEON.red, children: [`-${file.deletions}`] }),
+          ],
+        }),
+        ...(m.bad ? [Text({ color: NEON.red, bold: true, children: [`✗${m.bad}`] })] : []),
+        ...(m.soft ? [Text({ color: NEON.yellow, children: [`△${m.soft}`] })] : []),
+        ...(file.note ? [Text({ dimColor: true, children: [file.note] })] : []),
+      ],
+    })
+    const findings = findingsIn(pr, file.path).map((f) =>
+      Box({
+        flexDirection: 'row',
+        children: [
+          Text({ color: findingMark(f) === '✗' ? NEON.red : NEON.yellow, children: [`  ${findingMark(f).split(' ')[0]} `] }),
+          Text({
+            wrap: 'wrap',
+            children: [`${f.location.slice(file.path.length).replace(/^:/, 'L') || 'file'} [${f.perspective}] ${f.summary}`],
+          }),
+        ],
+      }),
+    )
+    const folded = isGenerated(file.path) && !v.showGenerated.has(file.path)
+    const body: El[] = folded
+      ? [Text({ color: NEON.muted, children: [`Generated or lock file, folded · g: show (${counts(file)})`] })]
+      : file.pieces.length === 0
+        ? [Text({ color: NEON.muted, children: [file.note ? `No lines to show (${file.note})` : 'No lines to show'] })]
+        : file.pieces.map((source) => Code({ source, path: file.path, format: 'diff' }))
+    if (!folded && file.cut)
+      body.push(Text({ color: NEON.muted, children: ['The rest of this file is too long to draw here · o: open on GitHub'] }))
+    return Box({ flexDirection: 'column', children: [...head, keys, rule, title, ...findings, ...body] })
+  })
+
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    // The diff draws itself (above) while one is open
+    if (e.requestId !== PANE || diffView) return next(e)
     // Follow the focus, so the hint under the prompt can say where Esc and ctrl+x tab go
     const focused = e.props.isFocused === true
     if (!paneOpen || focused !== paneFocused) {
@@ -2576,10 +2897,17 @@ export function register(on: On, options: PluginOptions) {
           },
         }),
         Button({
+          key: 'act-diff',
+          label: 'diff',
+          hotkey: 'd',
+          plain: true,
+          onPress: () => openDiff($, pr),
+        }),
+        Button({
           key: 'act-details',
           label: expanded === pr.url ? 'less' : 'info',
           dimColor: true,
-          hotkey: 'd',
+          hotkey: 'i',
           plain: true,
           onPress: () => {
             expanded = expanded === pr.url ? '' : pr.url
@@ -2676,7 +3004,7 @@ export function register(on: On, options: PluginOptions) {
         return [{ text: `AI review of an older commit (${r.pr.headRefOid.slice(0, 7)}): v to review the new one`, dim: true }]
       // The decision first, then each perspective's conclusion; findings and evidence wait behind d
       const notes = r.findings.filter((f) => f.severity !== 'pre-existing').length
-      const hint = expanded === p.url ? '' : notes > 0 || r.problems.length > 0 ? '  (d: details)' : ''
+      const hint = expanded === p.url ? '' : notes > 0 || r.problems.length > 0 ? '  (i: details)' : ''
       const head =
         r.state === 'blocked'
           ? { text: `AI review ✗ blocked · ${blockedWhy(r)}${hint}`, color: NEON.red }
@@ -3036,13 +3364,14 @@ export function register(on: On, options: PluginOptions) {
         ['e', 'ask Claude to explain the PR (read-only), or diagnose your own'],
         ['a', 'approve, after a confirmation'],
         ['v', 'AI review, then approve if it passes (v again cancels a running review)'],
-        ['d', 'details: every finding of the AI review, with links to the lines'],
+        ['i', 'info: every finding of the AI review, with links to the lines'],
         ['n', 'next page of the details, when they do not fit (at the end, back to the top)'],
         ['x', 'snooze the PR until it is updated (z shows snoozed PRs)'],
         ['w', 'AI review every bot PR in turn (w again stops)'],
         ['m', 'merge one of your PRs that is ready, after picking a method'],
         ['c', 're-run the failed GitHub Actions jobs of one of your PRs'],
         ['f', 'filter by repository, number, title or @author (Enter keeps it; empty clears)'],
+        ['d', 'the diff, file by file (n / b next and previous file, l the list of files, q back to the PRs)'],
         ['o', 'open in the browser'],
         ['b / s / z', 'show or hide bot PRs / stale PRs / snoozed PRs'],
         ['r', 'fetch again'],

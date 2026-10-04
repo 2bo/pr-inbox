@@ -1995,3 +1995,126 @@ test('the a dialog states the risk, the release impact and that there was no AI 
   expect(s.questions.at(-1)).toContain('Risk: HIGH · release: user-visible change · AI review: none.')
   await ui.unmount()
 })
+
+// ---- The diff pane (p) ----
+
+const SAMPLE_DIFF = `diff --git a/app/login.rb b/app/login.rb
+index 1111111..2222222 100644
+--- a/app/login.rb
++++ b/app/login.rb
+@@ -10,3 +10,4 @@ class Login
+   def call
+-    user.name
++    \tuser&.name
++    "\u001b[31mred\u001b[0m ‮evil"
+   end
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 3333333..4444444 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -1,2 +1,2 @@
+-lockfileVersion: '6.0'
++lockfileVersion: '9.0'
+ settings: {}
+`
+type CodeFinder = { findAll: (query: { type: string }) => Promise<{ props: unknown }[]> }
+const codes = async (ui: CodeFinder) =>
+  (await ui.findAll({ type: 'Code' })).map((c) => c.props as { source: string; path: string; format: string })
+
+test('p shows the diff in the pane, one file at a time, drawn as a diff by the highlighter', async ($, on) => {
+  const s = stubs(on, { diff: SAMPLE_DIFF })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-diff' })
+  expect(s.calls).toContainEqual(['gh', 'pr', 'diff', HUMAN.url])
+  const diff = ui
+  const [code] = await codes(diff)
+  expect(code?.format).toBe('diff')
+  expect(code?.path).toBe('app/login.rb')
+  expect(code?.source).toContain('@@ -10,3 +10,4 @@')
+  expect(await diff.find({ type: 'Text', text: '1/2' })).toBeDefined()
+  // n: the next file. A lockfile is folded until g
+  await diff.press({ key: 'diff-next' })
+  expect(await diff.find({ type: 'Text', text: '2/2' })).toBeDefined()
+  expect(await codes(diff)).toEqual([])
+  expect(await diff.find({ type: 'Text', text: /Generated or lock file, folded/ })).toBeDefined()
+  await diff.press({ key: 'diff-generated' })
+  expect((await codes(diff))[0]?.path).toBe('pnpm-lock.yaml')
+  // l: the list of files, each one a press away
+  await diff.press({ key: 'diff-list' })
+  expect(await diff.find({ key: 'diff-file-1' })).toBeDefined()
+  await diff.press({ key: 'diff-file-0' })
+  expect((await codes(diff))[0]?.path).toBe('app/login.rb')
+  // q: back to the list of PRs
+  await diff.press({ key: 'diff-close' })
+  expect(await codes(diff)).toEqual([])
+  expect(await isSelected(ui, 11)).toBe(true)
+  await ui.unmount()
+})
+
+test('the diff drawn keeps tabs but loses escape sequences and bidi overrides', async ($, on) => {
+  const s = stubs(on, { diff: SAMPLE_DIFF })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-diff' })
+  const diff = ui
+  const source = (await codes(diff))[0]?.source ?? ''
+  expect(source).toContain('+    \tuser&.name')
+  expect(source).toContain('+    "[31mred[0m evil"'.replace(/\[\d+m/g, ''))
+  expect(source).not.toContain('\u001b')
+  expect(source).not.toContain('‮')
+  await ui.unmount()
+})
+
+test('a hunk too big for one Code element is cut into hunks that still parse', async ($, on) => {
+  const lines = Array.from({ length: 900 }, (_, i) => `+line ${i} ${'x'.repeat(30)}`)
+  const big = `diff --git a/big.txt b/big.txt
+--- a/big.txt
++++ b/big.txt
+@@ -1,1 +1,901 @@
+ keep
+${lines.join('\n')}
+`
+  const s = stubs(on, { diff: big })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-diff' })
+  const diff = ui
+  const pieces = await codes(diff)
+  expect(pieces.length).toBeGreaterThan(1)
+  let next = 1
+  for (const p of pieces) {
+    expect(p.source.length).toBeLessThanOrEqual(10000)
+    const m = p.source.match(/^@@ -\d+,\d+ \+(\d+),(\d+) @@/)
+    expect(Number(m?.[1])).toBe(next)
+    const added = p.source.split('\n').slice(1).length
+    expect(Number(m?.[2])).toBe(added)
+    next += added
+  }
+  expect(next).toBe(902)
+  await ui.unmount()
+})
+
+test('the AI review findings in a file are listed above its diff, and the diff starts at that file', async ($, on) => {
+  const diffText = `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,1 +1,1 @@
+-old
++new
+${SAMPLE_DIFF}`
+  const s = stubs(on, {
+    diff: diffText,
+    graphql: only(member()),
+    review: bugIn('Correctness & compatibility'),
+    verify: () => JSON.stringify({ results: [{ id: 1, confirmed: true, reason: 'yes' }], injection: false }),
+  })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  await ui.press({ key: 'act-diff' })
+  const diff = ui
+  expect((await codes(diff))[0]?.path).toBe('app/login.rb')
+  expect(await diff.find({ type: 'Text', text: '✗1' })).toBeDefined()
+  expect(await diff.find({ type: 'Text', text: /L12 \[Correctness & compatibility\] nil check missing/ })).toBeDefined()
+  await ui.unmount()
+})
