@@ -2021,6 +2021,23 @@ const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', 
 
 type Cell = { text: string; color?: string; bold?: boolean }
 
+// n colors sweeping pink → violet → cyan, for the lit rule
+function sweep(n: number): string[] {
+  const stops = [
+    [0xff, 0x2b, 0xd6],
+    [0x9d, 0x4d, 0xff],
+    [0x00, 0xe5, 0xff],
+  ]
+  const hex = (v: number) => Math.round(v).toString(16).padStart(2, '0')
+  return Array.from({ length: n }, (_, i) => {
+    const t = (i / Math.max(1, n - 1)) * (stops.length - 1)
+    const k = Math.min(stops.length - 2, Math.floor(t))
+    const f = t - k
+    const [a, b] = [stops[k] ?? [0, 0, 0], stops[k + 1] ?? [0, 0, 0]]
+    return `#${[0, 1, 2].map((c) => hex((a[c] ?? 0) + ((b[c] ?? 0) - (a[c] ?? 0)) * f)).join('')}`
+  })
+}
+
 // Risk for a review request (from the analysis), state for one of my PRs; always six columns wide
 function badgeOf(pr: PR): Cell {
   if (tab === 'review') {
@@ -2339,18 +2356,17 @@ export function register(on: On, options: PluginOptions) {
     // A thin full-width rule between the parts
     // Lit while the pane holds the keyboard, dark while the keys go to the prompt
     const rule = () => Text({ color: focused ? NEON.violet : NEON.rule, children: ['─'.repeat(columns)] })
-    // The rule under the header says where the keys go: a lit, heavy line while the pane holds them
-    const focusRule = () =>
-      focused
-        ? Box({
-            flexDirection: 'row',
-            children: [
-              Text({ color: NEON.pink, children: ['━━'] }),
-              Text({ backgroundColor: NEON.pink, color: '#000000', bold: true, children: [' ● FOCUS '] }),
-              Text({ color: NEON.pink, children: ['━'.repeat(Math.max(0, columns - 11))] }),
-            ],
-          })
-        : Text({ color: NEON.muted, children: [`── ○ ctrl+x tab to focus ${'─'.repeat(Math.max(0, columns - 25))}`] })
+    // The rule under the header says where the keys go, with no words: a heavy neon sweep (pink → violet → cyan)
+    // while the pane holds them, a thin dark line while they go to the prompt
+    const focusRule = () => {
+      if (!focused) return Text({ color: NEON.rule, children: ['─'.repeat(columns)] })
+      const stops = sweep(12)
+      const width = Math.ceil(columns / stops.length)
+      return Box({
+        flexDirection: 'row',
+        children: stops.map((color, i) => Text({ color, children: ['━'.repeat(Math.max(0, Math.min(width, columns - i * width)))] })),
+      })
+    }
 
     // Row 1: tabs and refresh
     const updated = loading ? 'updating…' : fetchedAt ? new Date(fetchedAt).toTimeString().slice(0, 5) : '--:--'
@@ -2389,10 +2405,11 @@ export function register(on: On, options: PluginOptions) {
           Box({
             flexDirection: 'row',
             children: [
-              Text({ color: NEON.violet, children: ['▍'] }),
-              Text({ color: NEON.pink, bold: true, children: ['pr'] }),
+              // The lamp: lit while the pane holds the keys
+              Text({ color: focused ? NEON.pink : NEON.rule, children: ['▍'] }),
+              Text({ color: NEON.pink, bold: true, dimColor: !focused, children: ['pr'] }),
               Text({ color: NEON.muted, children: ['/'] }),
-              Text({ color: NEON.cyan, bold: true, children: ['inbox'] }),
+              Text({ color: NEON.cyan, bold: true, dimColor: !focused, children: ['inbox'] }),
             ],
           }),
           tabButton('review', `review ${g.humans.length}+${g.bots.length}`, '1'),
@@ -2534,7 +2551,7 @@ export function register(on: On, options: PluginOptions) {
       // The keys for the selected PR go to the bottom line, under the list and its details; while the pane does not
       // hold the keyboard none of them works, so the line says how to get there instead
       if (focused) footer.push(Box({ key: 'footer', flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: actions }))
-      else footer.push(Text({ color: NEON.muted, children: ['○ keys go to the prompt now · ctrl+x tab or click here to use the pane'] }))
+      else footer.push(Text({ color: NEON.muted, children: ['⌃X ⇥  to use the keys'] }))
       const labelOf = (b: El) => {
         const props = (b as { props?: { label?: unknown; hotkey?: unknown } }).props
         return `${String(props?.hotkey ?? '')}: ${String(props?.label ?? '')}`
@@ -2832,7 +2849,7 @@ export function register(on: On, options: PluginOptions) {
             bold: isSelected,
             ...(isSelected && focused ? { backgroundColor: NEON.selection, color: '#ffffff' } : {}),
             ...(isSelected && !focused ? { underline: true } : {}),
-            dimColor: !isSelected && !isUnread(p),
+            dimColor: !focused || (!isSelected && !isUnread(p)),
             wrap: 'truncate-end',
             children: [padTo(fit(title, titleWidth), titleWidth)],
           }),
