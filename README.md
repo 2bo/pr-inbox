@@ -31,6 +31,7 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 | `j` / `k` | Select the next / previous PR |
 | `e` | Ask Claude to explain the PR (for your own PR, to diagnose what blocks it). Claude reads the description, comments, reviews and linked issues and PRs, not only the diff |
 | `a` | Approve (runs only after you choose **Approve** in the confirmation dialog) |
+| `v` | AI review, then approve if it passes (see below) |
 | `o` | Open in the browser |
 | `b` / `s` | Show or hide bot PRs / stale PRs |
 | `r` | Fetch again |
@@ -39,6 +40,26 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 PR numbers and failed checks are hyperlinks: Cmd+click them in a terminal that supports hyperlinks.
 
 `/pr-inbox refresh` fetches again and prints the counts without opening the pane.
+
+## AI review and approve
+
+`v` on a review request runs a review by subagents, one per perspective, and approves the PR when it passes:
+
+1. **Gates, checked in code**: not a draft, CI passed (or there is none), no merge conflict, no reviewer requested changes
+2. **Screening**: the description, diff and comments are checked for instructions aimed at an AI (prompt injection) by a small model. Anything suspicious stops the review
+3. **Reviewers**, in parallel on `review_model` (Sonnet by default):
+   - Purpose & scope: does it do what the description and linked issues ask, without needless complexity or unrelated changes
+   - Correctness & compatibility: bugs, breaking changes, migrations, rollback, performance
+   - Tests: is the changed behavior tested
+   - Security & secrets
+   - Conventions: the repository's CLAUDE.md, AGENTS.md, REVIEW.md, CONTRIBUTING.md and patterns
+   - For **Dependabot and Renovate** PRs, instead: **Upgrade impact** (every package that changes, directly or in the lockfile; upstream release notes and changelogs; whether this repository uses what changed) and **Supply chain**
+4. **Verification**: important findings (confidence 80+) go to a verifier that tries to refute them against the code
+5. **Decision, in code**: it passes only when every gate holds, nothing looked like an injection, every reviewer answered, no important finding survived and the PR got no new commits. Nits do not block
+
+When it passes, `ai_approve` decides: `confirm` (default) asks you first; `auto` approves at once for PRs from members and collaborators of the repository and from Dependabot or Renovate, and still asks for anyone else and for forks. The approval is pinned to the reviewed commit. The outcome shows under the PR and in the transcript.
+
+Each review runs up to six Sonnet subagents and several small screening calls, on your plan.
 
 ## Requirements
 
@@ -56,6 +77,10 @@ Change them with `/config` or `/plugin configure`.
 | `summary_model` | sonnet | The model that writes the summary, risk and release impact |
 | `desktop_notify` | review requests | OS notifications for `review requests`, `all` (also approvals, changes requested and CI failures on your PRs) or `off`. Uses `osascript` on macOS and `notify-send` on Linux. On macOS, allow notifications for Script Editor in System Settings if none appear |
 | `analysis` | auto | When review requests are analyzed: `auto` (from startup), `when opened` (once you open `/pr-inbox` in the session) or `off` |
+| `ai_approve` | confirm | What `v` does when the AI review passes: `confirm` or `auto` |
+| `review_model` | sonnet | The model of the AI review's subagents |
+| `review_purpose` / `review_correctness` / `review_tests` / `review_security` / `review_conventions` | (built-in) | Instructions for each reviewer. `off` skips that perspective |
+| `review_dependency_impact` / `review_supply_chain` | (built-in) | The same, for Dependabot and Renovate PRs |
 | `explain_prompt` | (built-in) | What `e` asks about a review request. `{url}` becomes the PR URL |
 | `risk_high` / `risk_medium` / `risk_low` | (built-in) | What counts as each risk level in the analysis |
 | `release_impact` | (built-in) | How to judge the impact on release (yes / no / unknown) |
@@ -81,6 +106,7 @@ When a PR is too large to read whole (more than 30,000 characters of diff, 4,000
 - **PR content is untrusted input.** Anyone who can open a PR and request your review controls its title, body, diff and CI output, and may plant instructions aimed at the model
   - The analysis call has no tools and only returns text. The PR content is fenced with a random marker, and the model is told not to follow instructions in it. Invisible Unicode tag characters are removed first
   - When you press `e`, that turn runs under a read-only guard enforced by the mod: only Read, Grep, Glob and the read-only `gh pr view`, `gh pr diff`, `gh pr checks`, `gh issue view`, `gh run view`, `gh run list`, and `gh api` GET requests for a PR's or issue's comments and reviews can run. Edits, other commands, web access, subagents, approvals, comments and pushes are refused, even if your permission mode or allow rules would let them through. The guard ends with that turn; anything you ask next runs with your session's usual permissions
+- **AI review (`v`).** Built along Anthropic's guidance on indirect prompt injection. The approval is decided in code from the reviewers' structured answers, never by a model. Reviewers get one tool, `pr_read`, served by the mod: it reads only the PR under review (and, for dependency updates, upstream release notes and files on GitHub), it cannot write, run commands, read local files or reach other sites, and its results come as JSON labeled as untrusted. Content is screened for injected instructions before a reviewer sees it, with invisible characters stripped first. Any error, timeout, unparsable answer or suspected injection blocks the approval. `auto` is still a choice to trust an AI judgment: keep it to repositories where that is acceptable, and keep branch protection and required reviews as the last line
 - **The analysis is a hint.** Do not approve on the strength of the risk or impact judgment. Approve runs only after you choose **Approve** in the confirmation dialog, which names the commit on screen. The approval is pinned to that commit, and it is refused if the PR got new commits in the meantime. Turning on "Dismiss stale pull request approvals" in your repositories' branch rules adds a second line of defense
 - **Displayed text is sanitized.** Terminal escape sequences, control characters, bidirectional override characters and invisible characters are stripped from PR titles, author names, check names and model output before they are drawn. Links open only canonical `https://` URLs. Failed-check links point wherever the CI system says, which may be a third-party site
 - **What is sent, and when.** With `analysis` on `auto`, as soon as Claude Code starts (including `claude -p` runs and sessions in other projects) and on every refresh, each review request that has not been analyzed yet is sent to the model Claude Code is configured with (Anthropic, or your Bedrock, Vertex or gateway setup), under your account: its repository and number, author, title, list of changed files, description (first 4,000 characters) and diff (first 30,000 characters). You do not have to open the pane. Follow your organization's rules for work code: narrow it with `org_filter`, or set `analysis` to `when opened` or `off`

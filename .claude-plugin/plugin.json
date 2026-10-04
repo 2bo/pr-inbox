@@ -1,6 +1,6 @@
 {
   "name": "pr-inbox",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "An inbox for review requests (oldest first, with AI summary, risk and release impact) and your own PRs (what needs action first), with explain and approve from the pane",
   "author": {
     "name": "2bo"
@@ -84,6 +84,62 @@
       "type": "string",
       "title": "Release impact criteria",
       "description": "How to judge the impact on release (yes, no or unknown). Empty uses the default (visible to end or internal users, feature flags taken into account)",
+      "default": ""
+    },
+    "ai_approve": {
+      "type": "string",
+      "title": "AI review: approve",
+      "description": "What v does when the AI review passes: confirm (ask before approving) or auto (approve without asking, for PRs from members and collaborators of the repository and for Dependabot or Renovate; others are still asked)",
+      "default": "confirm",
+      "options": ["confirm", "auto"]
+    },
+    "review_model": {
+      "type": "string",
+      "title": "AI review: model",
+      "description": "The model of the reviewer and verifier subagents",
+      "default": "sonnet",
+      "options": ["sonnet", "opus", "haiku"]
+    },
+    "review_purpose": {
+      "type": "string",
+      "title": "AI review: Purpose & scope",
+      "description": "Instructions for the reviewer that checks whether the PR achieves its stated purpose and stays as simple as it needs. Empty uses the default; off skips this perspective",
+      "default": ""
+    },
+    "review_correctness": {
+      "type": "string",
+      "title": "AI review: Correctness & compatibility",
+      "description": "Instructions for the reviewer that checks bugs, breaking changes, migrations, rollback and performance. Empty uses the default; off skips this perspective",
+      "default": ""
+    },
+    "review_tests": {
+      "type": "string",
+      "title": "AI review: Tests",
+      "description": "Instructions for the reviewer that checks whether tests cover the changed behavior. Empty uses the default; off skips this perspective",
+      "default": ""
+    },
+    "review_security": {
+      "type": "string",
+      "title": "AI review: Security & secrets",
+      "description": "Instructions for the reviewer that checks security problems and secrets or sensitive data in the diff. Empty uses the default; off skips this perspective",
+      "default": ""
+    },
+    "review_conventions": {
+      "type": "string",
+      "title": "AI review: Conventions",
+      "description": "Instructions for the reviewer that checks the repository's written rules (CLAUDE.md, AGENTS.md, REVIEW.md, CONTRIBUTING.md) and its patterns. Empty uses the default; off skips this perspective",
+      "default": ""
+    },
+    "review_dependency_impact": {
+      "type": "string",
+      "title": "AI review: Upgrade impact (dependency PRs)",
+      "description": "Instructions for the reviewer that checks for Dependabot and Renovate PRs: what changed in each upgraded package, direct or indirect, and whether this repository is affected. Empty uses the default; off skips this perspective",
+      "default": ""
+    },
+    "review_supply_chain": {
+      "type": "string",
+      "title": "AI review: Supply chain (dependency PRs)",
+      "description": "Instructions for the reviewer that checks for Dependabot and Renovate PRs: new packages, unexpected registries, typosquats, install scripts. Empty uses the default; off skips this perspective",
       "default": ""
     }
   }
