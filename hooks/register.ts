@@ -80,6 +80,9 @@ type Config = {
   risk_medium: string
   risk_low: string
   release_impact: string
+  // Look: colors for a dark or a light terminal, and plain ASCII marks for terminals that draw symbols double width
+  theme: 'dark' | 'light'
+  glyphs: 'unicode' | 'ascii'
   // AI review and approve (v)
   ai_approve: 'confirm' | 'auto'
   review_model: string
@@ -262,6 +265,8 @@ let cfg: Config = {
   risk_medium: '',
   risk_low: '',
   release_impact: '',
+  theme: 'dark',
+  glyphs: 'unicode',
   ai_approve: 'confirm',
   review_model: 'sonnet',
   review_purpose: '',
@@ -684,8 +689,8 @@ function summary(g: Record<Group, PR[]>): string {
   ]
   const right = [
     ...part(g.action.length, `✗${g.action.length} fix`),
-    ...part(g.ready.length, `✓${g.ready.length} ship`),
-    ...part(g.waiting.length, `…${g.waiting.length} wait`),
+    ...part(g.ready.length, `✓${g.ready.length} ready`),
+    ...part(g.waiting.length, `…${g.waiting.length} in review`),
   ]
   return `${left.join(' · ')} │ mine ${right.length ? right.join(' · ') : mine.length}`
 }
@@ -1382,8 +1387,9 @@ function allowedWhileGuarded(tool: string, command: unknown): boolean {
 }
 
 // Neon, as NEON (declared further down): green / yellow / red for risk; release impact is information, not danger
-const RISK_COLOR: Record<Risk, string> = { low: '#5fff00', medium: '#ffff00', high: '#ff5f5f' }
-const IMPACT_COLOR: Record<Impact, string> = { yes: '#00d7ff', no: '#5fff00', unknown: '#ffff00' }
+// From the palette, so the light theme reads too; a user-visible change is pink (accent), not cyan (links and AI)
+const riskColor = (r: Risk) => ({ low: NEON.green, medium: NEON.yellow, high: NEON.red })[r]
+const impactColor = (i: Impact) => ({ yes: NEON.pink, no: NEON.green, unknown: NEON.yellow })[i]
 
 // ---- AI review and approve (v) ----
 //
@@ -2563,7 +2569,7 @@ function keyCatcher<El>(
 const LOGO = '▍pr/inbox'
 // Neon on dark, each color with one meaning: pink accent, cyan links and AI, green fine, yellow caution, red danger
 // Each one an xterm-256 color, so truecolor and 256-color terminals show the same thing
-const NEON = {
+const DARK = {
   pink: '#ff00d7',
   cyan: '#00d7ff',
   green: '#5fff00',
@@ -2573,6 +2579,105 @@ const NEON = {
   muted: '#8787af',
   rule: '#444444',
   selection: '#5f00af',
+  // Text on the selection
+  onSelection: '#ffffff',
+}
+// The same meanings, dark enough to read on a light background (each still an xterm-256 color)
+const LIGHT: typeof DARK = {
+  pink: '#d7005f',
+  cyan: '#005fd7',
+  green: '#008700',
+  yellow: '#af5f00',
+  red: '#d70000',
+  violet: '#8700af',
+  muted: '#5f5f87',
+  rule: '#bcbcbc',
+  selection: '#d7d7ff',
+  onSelection: '#000000',
+}
+// The palette in use, set from the theme setting at load
+let NEON: typeof DARK = DARK
+
+// Plain ASCII for each symbol the pane draws, one cell for one cell, for terminals that draw the symbols double width
+// (East Asian ambiguous width) and so break the columns
+const ASCII: Record<string, string> = {
+  '━': '=',
+  '─': '-',
+  '┌': '/',
+  '├': '|',
+  '└': '\\',
+  '▸': '>',
+  '◂': '<',
+  '●': '*',
+  '▲': '!',
+  '◆': '~',
+  '○': '.',
+  '⚙': 'b',
+  '◇': 'o',
+  '◈': 'o',
+  '◉': '*',
+  '▰': '#',
+  '▱': '-',
+  '◌': '~',
+  '⟳': '@',
+  '⇡': '^',
+  '↻': 'R',
+  '✓': 'v',
+  '✗': 'x',
+  '△': '^',
+  '⏸': 'z',
+  '…': '.',
+  '▍': '|',
+  '✕': 'x',
+  '↑': '^',
+  '↓': 'v',
+  '✦': '*',
+  '·': '.',
+  '—': '-',
+  '→': '>',
+  '⠋': '-',
+  '⠙': '\\',
+  '⠹': '|',
+  '⠸': '/',
+  '⠼': '-',
+  '⠴': '\\',
+  '⠦': '|',
+  '⠧': '/',
+  '⠇': '-',
+  '⠏': '\\',
+  '?': '?',
+  '⚠': '!',
+  '☑': 'v',
+  '⠿': '@',
+  '⧉': '#',
+  '│': '|',
+  '¤': '.',
+}
+const ASCII_PATTERN = new RegExp(
+  `[${Object.keys(ASCII)
+    .filter((k) => k !== '?')
+    .join('')
+    .replace(/[\\\]^-]/g, '\\$&')}]`,
+  'g',
+)
+function glyph(text: string): string {
+  return cfg.glyphs === 'ascii' ? text.replace(ASCII_PATTERN, (c) => ASCII[c] ?? c) : text
+}
+
+// Text and Button that draw their strings through glyph(), so the ascii setting reaches every mark
+function glyphed<T extends { Text: (props: never) => unknown; Button: (props: never) => unknown }>(kit: T): Pick<T, 'Text' | 'Button'> {
+  if (cfg.glyphs !== 'ascii') return kit
+  const strings = (children: unknown): unknown =>
+    Array.isArray(children)
+      ? children.map((c) => (typeof c === 'string' ? glyph(c) : c))
+      : typeof children === 'string'
+        ? glyph(children)
+        : children
+  return {
+    Text: ((props: { children?: unknown }) => kit.Text({ ...props, children: strings(props.children) } as never)) as T['Text'],
+    Button: ((props: { label?: unknown }) =>
+      kit.Button({ ...props, ...(typeof props.label === 'string' ? { label: glyph(props.label) } : {}) } as never)) as T['Button'],
+  }
 }
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
@@ -2615,9 +2720,9 @@ function badgeOf(pr: PR): Cell {
   return group === 'action'
     ? { text: '✗ FIX ', color: NEON.red, bold: true }
     : group === 'ready'
-      ? { text: '✓ SHIP', color: NEON.green, bold: true }
+      ? { text: '✓ RDY ', color: NEON.green, bold: true }
       : group === 'waiting'
-        ? { text: '… WAIT', color: NEON.yellow }
+        ? { text: '… REVW', color: NEON.yellow }
         : { text: '◇ OLD ' }
 }
 
@@ -3199,6 +3304,7 @@ async function resolveLanguage($: EngineInterface): Promise<string> {
 
 export function register(on: On, options: PluginOptions) {
   cfg = { ...cfg, ...(options as Partial<Config>) }
+  NEON = cfg.theme === 'light' ? LIGHT : DARK
 
   on('session.start', async ($, e, next) => {
     language = await resolveLanguage($)
@@ -3300,10 +3406,12 @@ export function register(on: On, options: PluginOptions) {
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE || !diffView) return next(e)
     const kit = $.ui.resolve(e)
-    const { Box, Text, Button, Link, Code, Markdown } = kit
+    const { Box, Link, Code, Markdown } = kit
+    const { Text, Button } = glyphed(kit)
     type El = ReturnType<typeof Box>
     const redraw = () => $.ui.invalidate('ui.render')
-    const columns = Math.max(40, e.props.bodyColumns ?? 80)
+    // One cell short of the width: a symbol a terminal draws two cells wide does not wrap a full-width row
+    const columns = Math.max(40, (e.props.bodyColumns ?? 80) - 1)
     const focused = e.props.isFocused === true
     const v = diffView
     const key = (k: string, label: string, hotkey: string, onPress: () => void, dim = false) =>
@@ -3321,7 +3429,7 @@ export function register(on: On, options: PluginOptions) {
         columnGap: 1,
         children: [
           Text({ color: focused ? NEON.pink : NEON.rule, children: ['▍'] }),
-          Text({ color: NEON.cyan, bold: true, children: ['read'] }),
+          Text({ color: NEON.pink, bold: true, children: ['read'] }),
           prLink
             ? Link({ href: prLink, children: [Text({ color: NEON.cyan, underline: true, children: [label] })] })
             : Text({ children: [label] }),
@@ -3597,12 +3705,14 @@ export function register(on: On, options: PluginOptions) {
       $.ui.invalidate('ui.render')
     }
     const kit = $.ui.resolve(e)
-    const { Box, Text, Button, Link } = kit
+    const { Box, Link } = kit
+    const { Text, Button } = glyphed(kit)
     // A text field, where the surface has one (not on mobile)
     const Input = 'Input' in kit ? kit.Input : undefined
     type El = ReturnType<typeof Box>
     const redraw = () => $.ui.invalidate('ui.render')
-    const columns = Math.max(40, e.props.bodyColumns ?? 80)
+    // One cell short of the width: a symbol a terminal draws two cells wide does not wrap a full-width row
+    const columns = Math.max(40, (e.props.bodyColumns ?? 80) - 1)
     const now = fetchedAt || Date.now()
     const g = groups(now)
     const rows = visibleRows(g)
@@ -3671,14 +3781,11 @@ export function register(on: On, options: PluginOptions) {
     // Widths of the top rows' items, to know how many lines they take once wrapped
     const row1 = [
       LOGO,
-      'h: ◂',
       `1: ◉ review ${g.humans.length} ⚙${g.bots.length}`,
       `2: ◉ mine ${mine.length}`,
-      'l: ▸',
       `r: ${refreshLabel}`,
       `f: ${filterText ? `/${filterText}` : '/'}`,
       `u: ${showHelp ? 'close help' : '?'}`,
-      'q: ✕',
     ]
     let topLines = wrappedRowLines(row1.map(textWidth), 2, columns)
     const top: El[] = [
@@ -3699,11 +3806,8 @@ export function register(on: On, options: PluginOptions) {
               Text({ color: NEON.cyan, bold: true, dimColor: !focused, children: ['inbox'] }),
             ],
           }),
-          // h / l move between the tabs as 1 / 2 pick one
-          small('tab-prev', '◂', 'h', () => switchTab(-1)),
           tabButton('review', `${tab === 'review' ? '◉ ' : ''}review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`, '1'),
           tabButton('mine', `${tab === 'mine' ? '◉ ' : ''}mine ${mine.length}`, '2'),
-          small('tab-next', '▸', 'l', () => switchTab(1)),
           small('refresh', refreshLabel, 'r', () => refresh($)),
           small('filter', filterText ? `/${filterText}` : '/', 'f', () => {
             filtering = !filtering
@@ -3713,8 +3817,16 @@ export function register(on: On, options: PluginOptions) {
             showHelp = !showHelp
             redraw()
           }),
-          small('close', '✕', 'q', () => {
-            void $.ui.close({ id: PANE })
+          // h / l between the tabs, q to close: hidden keys, in the help, so the header fits one line
+          Box({
+            display: 'none',
+            children: [
+              small('tab-prev', '◂', 'h', () => switchTab(-1)),
+              small('tab-next', '▸', 'l', () => switchTab(1)),
+              small('close', '✕', 'q', () => {
+                void $.ui.close({ id: PANE })
+              }),
+            ],
           }),
         ],
       }),
@@ -3832,7 +3944,7 @@ export function register(on: On, options: PluginOptions) {
         }),
         Button({
           key: 'act-diff',
-          label: 'diff',
+          label: 'read',
           hotkey: 'd',
           plain: true,
           onPress: () => openDiff($, pr),
@@ -3870,13 +3982,13 @@ export function register(on: On, options: PluginOptions) {
             redraw()
           },
         }),
-        nav('nav-down', '↓', 'j', 1),
-        nav('nav-up', '↑', 'k', -1),
+        // j / k move: hidden keys, so the actions stand out
+        Box({ display: 'none', children: [nav('nav-down', '↓', 'j', 1), nav('nav-up', '↑', 'k', -1)] }),
       )
       // The keys for the selected PR go to the bottom line, under the list and its details; while the pane does not
       // hold the keyboard none of them works, so the line says how to get there instead
       if (focused) footer.push(Box({ key: 'footer', flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: actions }))
-      else footer.push(Text({ color: NEON.muted, children: ['⌃X ⇥  to use the keys'] }))
+      else footer.push(Text({ color: NEON.muted, children: ['ctrl+x tab: use the keys'] }))
       const labelOf = (b: El) => {
         const props = (b as { props?: { label?: unknown; hotkey?: unknown } }).props
         return `${String(props?.hotkey ?? '')}: ${String(props?.label ?? '')}`
@@ -3940,7 +4052,7 @@ export function register(on: On, options: PluginOptions) {
       if ('failed' in a) return { text: busy ? L.analyzing : `${L.failed}: ${a.failed}`, dim: true }
       const redo = a.updatedAt !== p.updatedAt ? ` ${L.outdated}` : ''
       const part = a.partial ? ` ${L.partial}` : ''
-      return { text: `${L.risk[a.risk]}${a.summary}${part}${redo}`, color: RISK_COLOR[a.risk], dim: false }
+      return { text: `${L.risk[a.risk]}${a.summary}${part}${redo}`, color: riskColor(a.risk), dim: false }
     }
 
     // Release impact row (only once analyzed)
@@ -3948,7 +4060,7 @@ export function register(on: On, options: PluginOptions) {
       const a = analysisOf(p)
       if (!a || !('impact' in a)) return undefined
       const detail = a.impactDetail ? ` — ${a.impactDetail}` : ''
-      return { text: `${L.release}: ${L.impact[a.impact]}${detail}`, color: IMPACT_COLOR[a.impact] }
+      return { text: `${L.release}: ${L.impact[a.impact]}${detail}`, color: impactColor(a.impact) }
     }
 
     const metaLine = (p: PR): string => {
@@ -4246,16 +4358,18 @@ export function register(on: On, options: PluginOptions) {
       return Box({
         key: `line-${p.url}`,
         flexDirection: 'row',
+        // The selection spans the row, so the eye can follow it to the right-hand columns
+        ...(isSelected && focused ? { backgroundColor: NEON.selection } : {}),
         children: [
           Text({ color: focused ? NEON.pink : NEON.muted, bold: true, children: [lead] }),
-          Text({ color: NEON.violet, bold: true, children: [stackRail(p)] }),
+          Text({ color: NEON.muted, bold: true, children: [stackRail(p)] }),
           Text({ ...(b.color ? { color: b.color } : { dimColor: true }), bold: b.bold === true, children: [b.text] }),
           Text({ children: [' '] }),
           prLink ? (isSelected ? link(prLink, label, true) : quietLink(prLink, label)) : Text({ children: [label] }),
           Text({ children: [' '.repeat(Math.max(0, prWidth - textWidth(label)) + 1)] }),
           Text({
             bold: isSelected || isUnread(p),
-            ...(isSelected && focused ? { backgroundColor: NEON.selection, color: '#ffffff' } : {}),
+            ...(isSelected && focused ? { backgroundColor: NEON.selection, color: NEON.onSelection } : {}),
             ...(isSelected && !focused ? { underline: true } : {}),
             dimColor: !focused,
             wrap: 'truncate-end',
@@ -4313,7 +4427,7 @@ export function register(on: On, options: PluginOptions) {
         if (isApproved(p)) return `✓ approved by you, not merged ${count(g.approved)}`
         return isBot(p) ? `⚙ bots ${count(g.bots)}` : ''
       }
-      return classify(p, now).group === 'stale' ? `◇ stale ${count(g.stale)} (${cfg.stale_days}+ days)` : ''
+      return classify(p, now).group === 'stale' ? `◇ old ${count(g.stale)} (${cfg.stale_days}+ days)` : ''
     }
     const headings = new Set(rows.map(sectionOf).filter(Boolean)).size
     const chrome = topLines + 2 + 1 + (selectedPr ? 1 : 0) + (folds.length > 0 ? 1 : 0) + headings + footerLines
@@ -4340,8 +4454,7 @@ export function register(on: On, options: PluginOptions) {
 
     if (showHelp) {
       const help: [string, string][] = [
-        ['1 / 2', 'To review / My PRs'],
-        ['h / l', 'the tab to the left / right'],
+        ['1 / 2  h / l', 'To review / My PRs, or the tab to the left / right'],
         ['j / k', 'next / previous PR'],
         ['e', 'ask Claude to explain the PR (read-only), or diagnose your own'],
         ['a', 'approve, after a confirmation'],
@@ -4374,14 +4487,20 @@ export function register(on: On, options: PluginOptions) {
             Box({ width: textColumns, children: [Text({ wrap: 'wrap', children: [what] })] }),
           ],
         })
+      // Every mark, column by column
       const legend: [string, string, string][] = [
-        ['● ⚙', 'updated since you last selected it · a bot PR', NEON.pink],
-        ['▲ ◆ ○', 'risk from the analysis: high · medium · low', NEON.yellow],
-        ['✗ ✓ … ◇ ⏸', 'your PRs: fix · ready to merge · waiting · stale · snoozed', NEON.green],
-        ['↻ … ✓', 'approved by you: re-review (changed since) · waiting reviews · ready, or ✗ what blocks it', NEON.green],
-        ['┌ ├ └', 'a stack of PRs, bottom (on the base branch) to top', NEON.violet],
-        ['✓ ✗ ◌ ·', 'CI passed · failed · running · none; AI review: ✓ passed ✗ blocked · none', NEON.cyan],
-        ['▰▰▱', 'how long it has waited, filling up to red', NEON.red],
+        ['▸ ● ⚙ ┌├└', 'selected · updated since you last selected it · a bot · a stack, bottom (on the base) to top', NEON.pink],
+        ['RISK', '▲ HIGH · ◆ MED · ○ LOW from the analysis · … analyzing · · not analyzed', NEON.yellow],
+        ['STATE', '✗ FIX needs you · ✓ RDY ready to merge · … REVW in review · ◇ OLD no update for a while · ⏸ SNZ snoozed', NEON.green],
+        ['', '⟳ WIP Claude is fixing its CI · ⇡ PUSH a fix waits for your push', NEON.cyan],
+        [
+          'approved',
+          '↻ RE changed since you approved (re-review) · … REVW waits on other reviews · ◌ CI running · ✗ CI / CONF / CHG blocks it · ✓ RDY ready',
+          NEON.green,
+        ],
+        ['AGE', '▰▱▱ how long it has waited: one cell at 4 hours, two at a day, three at three days', NEON.red],
+        ['CI', '✓ passed · ✗ failed (the latest run of each check) · ◌ running · · none', NEON.cyan],
+        ['AI', '✓ passed or approved · ✗ blocked · ? passed, waits for you · ⠋ running · · none', NEON.cyan],
       ]
       const helpRows = [
         ...help.map(([k, what]) => entry(k, what)),
@@ -4411,9 +4530,10 @@ export function register(on: On, options: PluginOptions) {
             Box({
               flexDirection: 'row',
               children: [
-                Text({ color: NEON.muted, children: [label] }),
+                Text({ color: NEON.rule, children: ['── '] }),
+                Text({ color: NEON.violet, bold: true, children: [`${name} `] }),
                 ...(onBots ? [Text({ color: NEON.muted, children: ['· '] }), reviewBots, Text({ children: [' '] })] : []),
-                Text({ color: NEON.muted, children: ['─'.repeat(Math.max(0, columns - textWidth(label) - keyWidth))] }),
+                Text({ color: NEON.rule, children: ['─'.repeat(Math.max(0, columns - textWidth(label) - keyWidth))] }),
               ],
             }),
           )
@@ -4467,7 +4587,7 @@ export function register(on: On, options: PluginOptions) {
       color: NEON.muted,
       children: [
         `    ${(tab === 'review' ? 'RISK' : 'STATE').padEnd(6)} ${'PR'.padEnd(prWidth)} ${'TITLE'}`.padEnd(Math.max(0, columns - 14)) +
-          (tab === 'review' ? '    WAIT CI AI' : '     AGE CI   '),
+          (tab === 'review' ? '     AGE CI AI' : '     AGE CI   '),
       ],
     })
     const foldRow =

@@ -306,7 +306,7 @@ async function start($: TestEngine, clock: ReturnType<typeof mock.clock>) {
 test('fetches on start and shows the counts under the prompt', async ($, on) => {
   const s = stubs(on)
   await start($, s.clock)
-  expect(s.statuses.at(-1)).toBe('review 2 ⚙1 · ▲1 high │ mine ✗1 fix · ✓1 ship · …1 wait')
+  expect(s.statuses.at(-1)).toBe('review 2 ⚙1 · ▲1 high │ mine ✗1 fix · ✓1 ready · …1 in review')
 })
 
 // Get a whole PR row (title, summary, status, failed checks)
@@ -358,13 +358,13 @@ test('bot and stale PRs are listed, each group under its heading, with nothing t
   expect((await ui.find({ key: 'tab-review' }))?.props.label).toBe('◉ review 2 ⚙1')
   expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
   expect(await ui.find({ key: `line-${BOT.url}` })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^── ⚙ bots 1 $/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^⚙ bots 1 $/ })).toBeDefined()
 
   await ui.press({ key: 'tab-mine' })
   expect(await ui.find({ key: `line-${CHANGES.url}` })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /changes requested/ })).toBeDefined()
   expect(await ui.find({ key: `line-${STALE.url}` })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^── ◇ stale 1 \(30\+ days\) $/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^◇ old 1 \(30\+ days\) $/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -524,7 +524,7 @@ test('shows the summary, risk, reason and release impact in the list', async ($,
   expect(await ui.find({ type: 'Text', text: /根拠: 認証まわりの変更/ })).toBeDefined()
   // Release impact: yes / no (behind a flag) / unknown when the model returns no impact
   expect(await ui.find({ type: 'Text', text: /^リリース時: 影響あり — エンドユーザー: ログイン失敗時の文言が変わる$/ })).toBeDefined()
-  expect((await ui.find({ type: 'Text', text: /^リリース時: 影響あり$/ }))?.props.color).toBe('#00d7ff')
+  expect((await ui.find({ type: 'Text', text: /^リリース時: 影響あり$/ }))?.props.color).toBe('#ff00d7')
   await ui.press({ key: 'nav-down' })
   expect(await ui.find({ type: 'Text', text: /^一覧の並び順を変更$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^リリース時: 影響なし — フラグ new_list_order が無効のまま入る$/ })).toBeDefined()
@@ -1812,7 +1812,7 @@ test('PRs you approved that are not merged are listed with why, newer commits fi
   await start($, s.clock)
   expect(s.calls.find((c) => c.includes('graphql'))).toContainEqual(expect.stringMatching(/^approved=.*reviewed-by:@me -author:@me/))
   const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: /^── ✓ approved by you, not merged 3 $/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^✓ approved by you, not merged 3 $/ })).toBeDefined()
   expect(await ui.find({ key: 'line-https://github.com/acme/app/pull/64' })).toBeUndefined()
   // New commits since the approval come first, marked, and can be approved again
   expect(await isSelected(ui, 62)).toBe(true)
@@ -1836,7 +1836,7 @@ test('the help says how to move the focus to the pane', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /Ctrl\+X Tab/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^move between the prompt and this pane/ })).toBeDefined()
   // The symbols are explained too
-  expect(await ui.find({ type: 'Text', text: /risk from the analysis/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /LOW from the analysis/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -2049,7 +2049,7 @@ test('the pane shows plainly whether it holds the keyboard', async ($, on) => {
   expect((await dark.find({ type: 'Text', text: /^▍$/ }))?.props.color).not.toBe('#ff00d7')
   // No keys work without the focus, so none are offered; the line says how to get it
   expect(await dark.find({ key: 'act-approve' })).toBeUndefined()
-  expect(await dark.find({ type: 'Text', text: /to use the keys/ })).toBeDefined()
+  expect(await dark.find({ type: 'Text', text: /use the keys/ })).toBeDefined()
   await dark.unmount()
 })
 
@@ -2824,5 +2824,42 @@ test('a PR you approved that changed says how much changed, and by whom', async 
   const ui = await $.ui.mount(PANE)
   for (let i = 0; i < 5; i++) await s.clock.settle()
   expect(await lineOf(ui, 62)).toContain('re-review: 2 commits since your approval (+12 -3 by @alice)')
+  await ui.unmount()
+})
+
+// ---- Look: light terminals, ASCII marks, one line of keys ----
+
+test('theme light draws the same meanings in colors that read on a light background', { options: { theme: 'light' } }, async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect((await ui.find({ type: 'Text', text: /^▲ HIGH$/ }))?.props.color).toBe('#d70000')
+  expect((await ui.find({ type: 'Text', text: /^○ LOW $/ }))?.props.color).toBe('#008700')
+  await ui.unmount()
+})
+
+test('glyphs ascii draws every mark as one plain character', { options: { glyphs: 'ascii' } }, async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: /^! HIGH$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /━/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^=+$/ })).toBeDefined()
+  expect((await ui.find({ key: 'tab-review' }))?.props.label).toBe('* review 2 b1')
+  await ui.unmount()
+})
+
+test('the header and the footer keep to the actions: h, l, j, k and q work, hidden', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  const header = JSON.stringify(await ui.find({ key: 'tab-review' }))
+  expect(header).toBeDefined()
+  // Hidden, yet pressing them works
+  await ui.press({ key: 'nav-down' })
+  expect(await isSelected(ui, 13)).toBe(true)
+  await ui.press({ key: 'tab-next' })
+  expect(String((await ui.find({ key: 'tab-mine' }))?.props.label)).toContain('◉')
+  expect((await ui.find({ key: 'act-diff' }))?.props.label).toBe('read')
   await ui.unmount()
 })

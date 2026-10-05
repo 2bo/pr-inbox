@@ -2,7 +2,7 @@
 
 A Claude Code mod that turns your review requests and your own pull requests into an inbox, ordered by what needs you next.
 
-- A status line under the prompt keeps the counts in view (`review 3 ⚙2 · ▲1 high │ mine ✗1 fix · ✓1 ship · …2 wait`)
+- A status line under the prompt keeps the counts in view (`review 3 ⚙2 · ▲1 high │ mine ✗1 fix · ✓1 ready · …2 in review`)
 - `/pr-inbox` opens a pane in the spirit of lazygit and gh-dash: one line per PR (risk or state, how long it has waited as a heat bar, CI, AI review), the selected PR's details under the list, and the keys on the bottom line. Two tabs
   - **To review**: review requests, the longest-waiting first, then those from bots under their own heading. Each PR gets an AI summary, a risk level (low / medium / high) and its impact on release (visible to users / not visible / cannot tell), taking feature flags into account. Below them, **approved by you, not merged**: PRs whose latest review from you is an approval, with why they are still open as their badge (`… REVW` waiting on other reviews, `◌ CI`, `✗ CI`, `✗ CONF`, `✓ RDY` ready to merge); those that got commits after your approval come first as `↻ RE` (re-review): `d` shows only what changed since your approval (`t` switches to the whole PR), and `a` approves the new commit
   - Stacked PRs (GitHub stacks, as `gh stack` makes them) are listed together, bottom first, with a rail (┌ ├ └) and their place (`stack #18 · 2/3 on #101`), where the stack's most urgent PR would stand
@@ -96,7 +96,9 @@ Change them with `/config` or `/plugin configure`.
 | `summary_model` | sonnet | The model that writes the summary, risk and release impact |
 | `desktop_notify` | review requests | OS notifications for `review requests`, `all` (also approvals, changes requested and CI failures on your PRs) or `off`. Uses `osascript` on macOS and `notify-send` on Linux. On macOS, allow notifications for Script Editor in System Settings if none appear |
 | `analysis` | auto | When review requests are analyzed: `auto` (from startup), `when opened` (once you open `/pr-inbox` in the session) or `off` |
-| `ai_approve` | confirm | What `v` does when the AI review passes: `confirm` or `auto` |
+| `ai_approve` | confirm | When the AI review passes: `confirm` (the row says so, and `a` approves) or `auto` |
+| `theme` | dark | `dark` (neon) or `light` (deeper colors for a light terminal) |
+| `glyphs` | unicode | `ascii` draws every mark as one plain character, for terminals that draw symbols such as ━ ● ◆ ⚙ two cells wide |
 | `review_model` | sonnet | The model of the AI review |
 | `review_purpose` / `review_correctness` / `review_tests` / `review_security` / `review_conventions` | (built-in) | Instructions for each reviewer. `off` skips that perspective |
 | `review_dependency_impact` / `review_supply_chain` | (built-in) | The same, for Dependabot and Renovate PRs |

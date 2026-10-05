@@ -1,6 +1,6 @@
 {
   "name": "pr-inbox",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "An inbox for review requests (oldest first, with AI summary, risk and release impact) and your own PRs (what needs action first), with explain and approve from the pane",
   "author": {
     "name": "2bo"
@@ -86,10 +86,24 @@
       "description": "How to judge the impact on release (yes, no or unknown). Empty uses the default (visible to end or internal users, feature flags taken into account)",
       "default": ""
     },
+    "theme": {
+      "type": "string",
+      "title": "Colors",
+      "description": "dark (neon, for a dark terminal) or light (deeper colors that read on a light background)",
+      "default": "dark",
+      "options": ["dark", "light"]
+    },
+    "glyphs": {
+      "type": "string",
+      "title": "Symbols",
+      "description": "unicode, or ascii if your terminal draws symbols such as ━ ● ◆ ⚙ two cells wide (East Asian ambiguous width) and the columns break",
+      "default": "unicode",
+      "options": ["unicode", "ascii"]
+    },
     "ai_approve": {
       "type": "string",
       "title": "AI review: approve",
-      "description": "What v does when the AI review passes: confirm (ask before approving) or auto (approve without asking, for PRs from members and collaborators of the repository and for Dependabot or Renovate; others are still asked)",
+      "description": "What happens when the AI review (v) passes: confirm (the row says so and a approves, after its dialog) or auto (approve without asking, for PRs from members and collaborators of the repository and for Dependabot or Renovate; others are left to a)",
       "default": "confirm",
       "options": ["confirm", "auto"]
     },
