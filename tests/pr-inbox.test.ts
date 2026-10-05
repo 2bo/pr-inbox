@@ -2469,3 +2469,38 @@ test('/pr-inbox fix takes one of your PRs by repo#number', async ($, on) => {
   })
   expect(none.text).toContain('is not one of your open PRs')
 })
+
+test('review requests in a stack are listed together too, bottom first, with their place', async ($, on) => {
+  const requestedAt = (at: string) => ({
+    timelineItems: { nodes: [{ createdAt: at, requestedReviewer: { __typename: 'User', login: 'me' } }] },
+  })
+  // Requested in the reverse order: the top first. Still listed bottom first, next to each other
+  const top = pr({
+    number: 81,
+    title: 'UI',
+    url: 'https://github.com/acme/app/pull/81',
+    ...stackOf(2, [80, 81]),
+    ...requestedAt('2026-10-01T00:00:00Z'),
+  })
+  const other = pr({ number: 79, title: 'Other', url: 'https://github.com/acme/app/pull/79', ...requestedAt('2026-10-01T06:00:00Z') })
+  const bottom = pr({
+    number: 80,
+    title: 'API',
+    url: 'https://github.com/acme/app/pull/80',
+    ...stackOf(1, [80, 81]),
+    ...requestedAt('2026-10-02T00:00:00Z'),
+  })
+  const s = stubs(on, {
+    graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [bottom, other, top] }, mine: { nodes: [] } } }),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect(await isSelected(ui, 80)).toBe(true)
+  expect(await lineOf(ui, 80)).toContain('"┌"')
+  await ui.press({ key: 'nav-down' })
+  expect(await isSelected(ui, 81)).toBe(true)
+  expect(await lineOf(ui, 81)).toContain('stack #70 · 2/2 on #80')
+  await ui.press({ key: 'nav-down' })
+  expect(await isSelected(ui, 79)).toBe(true)
+  await ui.unmount()
+})
