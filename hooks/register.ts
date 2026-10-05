@@ -2089,7 +2089,31 @@ const DIFF_PIECE = 8000
 const DIFF_FILE_MAX = 60000
 
 type DiffFile = { path: string; from: string; additions: number; deletions: number; pieces: string[]; note: string; cut: boolean }
-type DiffView = { pr: PR; files: DiffFile[]; at: number; list: boolean; loading: boolean; error: string; showGenerated: Set<string> }
+// Page 0 is the PR's description, then one page per file; `body` is undefined until fetched
+type DiffView = {
+  pr: PR
+  body: string | undefined
+  files: DiffFile[]
+  at: number
+  list: boolean
+  loading: boolean
+  error: string
+  showGenerated: Set<string>
+}
+
+// A PR description made safe for the Markdown element: control characters out (newlines and tabs kept), template
+// comments out, local file links not clickable, cut to what the element takes
+function cleanBody(text: string): string {
+  const body = text
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .split(/\r?\n/)
+    .map(cleanCodeLine)
+    .join('\n')
+    .replace(/\]\(\s*file:/gi, '](blocked-file:')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  return body.length > 9000 ? `${body.slice(0, 9000)}\n\n…` : body
+}
 let diffView: DiffView | undefined
 
 // Lockfiles, minified and generated files: folded until asked for
@@ -2225,19 +2249,27 @@ function findingsIn(pr: PR, path: string): Finding[] {
 
 async function openDiff($: EngineInterface, pr: PR): Promise<void> {
   // The diff takes the pane's place (another pane could not take the keys from this one); q brings the list back
-  diffView = { pr, files: [], at: 0, list: false, loading: true, error: '', showGenerated: new Set() }
+  diffView = { pr, body: undefined, files: [], at: 0, list: false, loading: true, error: '', showGenerated: new Set() }
   $.ui.invalidate('ui.render')
   const view = diffView
-  const r = await $.process.run(['gh', 'pr', 'diff', pr.url])
+  const [r, about] = await Promise.all([
+    $.process.run(['gh', 'pr', 'diff', pr.url]),
+    $.process.run(['gh', 'pr', 'view', pr.url, '--json', 'body']),
+  ])
   // Closed or another PR opened meanwhile
   if (diffView !== view) return
   view.loading = false
   if (r.exitCode !== 0) view.error = clean(r.stderr) || `gh exited with code ${r.exitCode}`
   else view.files = parseDiff(r.stdout)
-  // Start at the first file with a finding, else the first one that is not generated
+  try {
+    const body = about.exitCode === 0 ? (JSON.parse(about.stdout) as { body?: unknown }).body : ''
+    view.body = typeof body === 'string' ? cleanBody(body) : ''
+  } catch {
+    view.body = ''
+  }
+  // Start at the description; after an AI review that found something, at the first file it points into
   const firstFinding = view.files.findIndex((f) => findingsIn(pr, f.path).length > 0)
-  const firstReal = view.files.findIndex((f) => !isGenerated(f.path))
-  view.at = Math.max(0, firstFinding >= 0 ? firstFinding : firstReal)
+  view.at = firstFinding >= 0 ? firstFinding + 1 : 0
   $.ui.invalidate('ui.render')
 }
 
@@ -2563,7 +2595,7 @@ export function register(on: On, options: PluginOptions) {
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE || !diffView) return next(e)
     const kit = $.ui.resolve(e)
-    const { Box, Text, Button, Link, Code } = kit
+    const { Box, Text, Button, Link, Code, Markdown } = kit
     type El = ReturnType<typeof Box>
     const redraw = () => $.ui.invalidate('ui.render')
     const columns = Math.max(40, e.props.bodyColumns ?? 80)
@@ -2594,18 +2626,20 @@ export function register(on: On, options: PluginOptions) {
       }),
     ]
     const rule = Text({ color: focused ? NEON.violet : NEON.rule, children: ['━'.repeat(columns)] })
-    if (v.loading || v.error || v.files.length === 0) {
-      const what = v.loading ? 'fetching the diff…' : v.error ? `✗ ${fit(v.error, columns - 4)}` : 'No changes in the diff'
+    if (v.loading || v.error) {
+      const what = v.loading ? 'fetching the PR…' : `✗ ${fit(v.error, columns - 4)}`
       return Box({
         flexDirection: 'column',
         children: [...head, rule, Text({ color: v.error ? NEON.red : NEON.muted, children: [what] }), Box({ children: [close] })],
       })
     }
     const files = v.files
-    const at = Math.min(v.at, files.length - 1)
-    const file = files[at] as DiffFile
+    // Pages: the description, then each file
+    const pages = files.length + 1
+    const at = Math.min(Math.max(0, v.at), pages - 1)
+    const file = at > 0 ? (files[at - 1] as DiffFile) : undefined
     const go = (to: number) => {
-      v.at = (to + files.length) % files.length
+      v.at = Math.min(Math.max(0, to), pages - 1)
       v.list = false
       redraw()
     }
@@ -2622,13 +2656,13 @@ export function register(on: On, options: PluginOptions) {
       flexWrap: 'wrap',
       columnGap: 2,
       children: [
-        key('diff-next', 'next file', 'n', () => go(at + 1)),
-        key('diff-back', 'back', 'b', () => go(at - 1)),
-        key('diff-list', v.list ? 'diff' : 'files', 'l', () => {
+        key('diff-prev', '◂', 'h', () => go(at - 1), at === 0),
+        key('diff-next', '▸', 'l', () => go(at + 1), at === pages - 1),
+        key('diff-list', v.list ? 'close files' : 'files', 'f', () => {
           v.list = !v.list
           redraw()
         }),
-        ...(isGenerated(file.path) && !v.list
+        ...(file && isGenerated(file.path) && !v.list
           ? [
               key('diff-generated', v.showGenerated.has(file.path) ? 'fold' : 'show', 'g', () => {
                 if (v.showGenerated.has(file.path)) v.showGenerated.delete(file.path)
@@ -2650,22 +2684,42 @@ export function register(on: On, options: PluginOptions) {
       ],
     })
 
-    // l: every file, the one shown marked, each one a click away
+    // f: the description and every file, the one shown marked, each one a click away
     if (v.list) {
-      const rows = files.map((f, i) => {
-        const m = marks(f)
-        return Button({
-          key: `diff-file-${i}`,
-          plain: true,
-          dimColor: isGenerated(f.path),
-          label: `${i === at ? '▸' : ' '} ${fit(f.path, Math.max(10, columns - 24))}  ${counts(f)}${m.text ? `  ${m.text}` : ''}`,
-          onPress: () => go(i),
-        })
-      })
+      const rows = [
+        Button({ key: 'diff-file-0', plain: true, label: `${at === 0 ? '▸' : ' '} Description`, onPress: () => go(0) }),
+        ...files.map((f, i) => {
+          const m = marks(f)
+          return Button({
+            key: `diff-file-${i + 1}`,
+            plain: true,
+            dimColor: isGenerated(f.path),
+            label: `${i + 1 === at ? '▸' : ' '} ${fit(f.path, Math.max(10, columns - 24))}  ${counts(f)}${m.text ? `  ${m.text}` : ''}`,
+            onPress: () => go(i + 1),
+          })
+        }),
+      ]
       return Box({
         flexDirection: 'column',
         children: [...head, keys, rule, Text({ color: NEON.muted, children: [`${plural(files.length, 'file')} changed`] }), ...rows],
       })
+    }
+
+    // Page 0: the description, as GitHub would show it
+    if (!file) {
+      const author = pr.author?.login ? `@${clean(pr.author.login)}` : ''
+      const title = Box({
+        flexDirection: 'row',
+        columnGap: 2,
+        children: [
+          Text({ color: NEON.muted, children: [`0/${files.length}`] }),
+          Text({ bold: true, color: NEON.cyan, children: ['Description'] }),
+          Text({ dimColor: true, children: [author] }),
+          Text({ dimColor: true, children: [`${plural(files.length, 'file')} · l: the diff`] }),
+        ],
+      })
+      const text = v.body ? Markdown({ text: v.body }) : Text({ color: NEON.muted, children: ['No description'] })
+      return Box({ flexDirection: 'column', children: [...head, keys, rule, title, text] })
     }
 
     // The file: where it is in the PR, its counts and the review's findings in it, then its hunks
@@ -2677,7 +2731,7 @@ export function register(on: On, options: PluginOptions) {
       flexDirection: 'row',
       columnGap: 2,
       children: [
-        Text({ color: NEON.muted, children: [`${at + 1}/${files.length}`] }),
+        Text({ color: NEON.muted, children: [`${at}/${files.length}`] }),
         fileHref
           ? Link({ href: fileHref, children: [Text({ color: NEON.cyan, underline: true, bold: true, children: [file.path] })] })
           : Text({ bold: true, children: [file.path] }),
@@ -3421,7 +3475,7 @@ export function register(on: On, options: PluginOptions) {
         ['m', 'merge one of your PRs that is ready, after picking a method'],
         ['c', 're-run the failed GitHub Actions jobs of one of your PRs'],
         ['f', 'filter by repository, number, title or @author (Enter keeps it; empty clears)'],
-        ['d', 'the diff, file by file (n / b next and previous file, l the list of files, q back to the PRs)'],
+        ['d', 'read the PR: description, then the diff file by file (h / l pages, f list of pages, q back)'],
         ['o', 'open in the browser'],
         ['b / s / z', 'show or hide bot PRs / stale PRs / snoozed PRs'],
         ['r', 'fetch again'],

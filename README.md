@@ -32,7 +32,7 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 | `e` | Ask Claude to explain the PR (for your own PR, to diagnose what blocks it). Claude reads the description, comments, reviews and linked issues and PRs, not only the diff |
 | `a` | Approve (runs only after you choose **Approve** in the confirmation dialog, where **Cancel** is selected first) |
 | `v` | AI review, then approve if it passes (see below). `v` again cancels a running review |
-| `d` | The diff, one file at a time, drawn like Claude Code's own diffs: `n` / `b` next and previous file, `l` the list of files, `q` back to the PRs. Lockfiles and generated files are folded (`g` shows them); the AI review's findings in a file are listed above it |
+| `d` | Read the PR: its description first, then the diff one file at a time, drawn like Claude Code's own diffs. `h` / `l` previous and next page, `f` the list of pages, `q` back to the PRs; ↑↓ and PgUp/PgDn scroll. Lockfiles and generated files are folded (`g` shows them); the AI review's findings in a file are listed above it, and after a review `d` opens at the first such file |
 | `i` | Info: every finding of the AI review, with links to the lines |
 | `n` | Next page of the info when it does not fit the pane (at the end, back to the top) |
 | `x` | Snooze the PR until it is updated (`z` shows snoozed PRs) |

@@ -126,6 +126,8 @@ type StubOptions = {
   // What gh pr view --json title,body,files and gh pr diff return
   view?: unknown
   diff?: string
+  // The PR description `d` shows
+  body?: string
   // Commands (argv[0]) that exit with an error
   fail?: string[]
   // stderr of a failing command
@@ -179,6 +181,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
     if (e.argv[2] === 'view' && e.argv.includes('title,body,files'))
       stdout = JSON.stringify(opts.view ?? { title: 't', body: 'b', files: [] })
     if (e.argv[2] === 'diff') stdout = opts.diff ?? 'diff --git a/x b/x'
+    if (e.argv[2] === 'view' && e.argv.at(-1) === 'body') stdout = JSON.stringify({ body: opts.body ?? '' })
     if (e.argv[2] === 'view' && e.argv.some((a) => a.includes('closingIssuesReferences')))
       stdout = JSON.stringify({
         title: 't',
@@ -2021,30 +2024,40 @@ type CodeFinder = { findAll: (query: { type: string }) => Promise<{ props: unkno
 const codes = async (ui: CodeFinder) =>
   (await ui.findAll({ type: 'Code' })).map((c) => c.props as { source: string; path: string; format: string })
 
-test('d shows the diff in the pane, one file at a time, drawn as a diff by the highlighter', async ($, on) => {
-  const s = stubs(on, { diff: SAMPLE_DIFF })
+test('d shows the description, then the diff one file at a time, drawn as a diff by the highlighter', async ($, on) => {
+  const s = stubs(on, { diff: SAMPLE_DIFF, body: '## Why\n<!-- template note -->\nLogins were slow' })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-diff' })
   expect(s.calls).toContainEqual(['gh', 'pr', 'diff', HUMAN.url])
   const diff = ui
+  // Page 0: the description as Markdown, template comments left out
+  const md = (await diff.find({ type: 'Markdown' }))?.props as { text: string } | undefined
+  expect(md?.text).toBe('## Why\n\nLogins were slow')
+  expect(await codes(diff)).toEqual([])
+  await diff.press({ key: 'diff-next' })
   const [code] = await codes(diff)
   expect(code?.format).toBe('diff')
   expect(code?.path).toBe('app/login.rb')
   expect(code?.source).toContain('@@ -10,3 +10,4 @@')
   expect(await diff.find({ type: 'Text', text: '1/2' })).toBeDefined()
-  // n: the next file. A lockfile is folded until g
+  // l: the next file. A lockfile is folded until g
   await diff.press({ key: 'diff-next' })
   expect(await diff.find({ type: 'Text', text: '2/2' })).toBeDefined()
   expect(await codes(diff)).toEqual([])
   expect(await diff.find({ type: 'Text', text: /Generated or lock file, folded/ })).toBeDefined()
   await diff.press({ key: 'diff-generated' })
   expect((await codes(diff))[0]?.path).toBe('pnpm-lock.yaml')
-  // l: the list of files, each one a press away
+  // At the last page l stays; h goes back
+  await diff.press({ key: 'diff-next' })
+  expect(await diff.find({ type: 'Text', text: '2/2' })).toBeDefined()
+  // f: the description and the files, each one a press away
   await diff.press({ key: 'diff-list' })
-  expect(await diff.find({ key: 'diff-file-1' })).toBeDefined()
-  await diff.press({ key: 'diff-file-0' })
+  expect(await diff.find({ key: 'diff-file-0' })).toBeDefined()
+  await diff.press({ key: 'diff-file-1' })
   expect((await codes(diff))[0]?.path).toBe('app/login.rb')
+  await diff.press({ key: 'diff-prev' })
+  expect(await diff.find({ type: 'Markdown' })).toBeDefined()
   // q: back to the list of PRs
   await diff.press({ key: 'diff-close' })
   expect(await codes(diff)).toEqual([])
@@ -2058,6 +2071,7 @@ test('the diff drawn keeps tabs but loses escape sequences and bidi overrides', 
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-diff' })
   const diff = ui
+  await diff.press({ key: 'diff-next' })
   const source = (await codes(diff))[0]?.source ?? ''
   expect(source).toContain('+    \tuser&.name')
   expect(source).toContain('+    "[31mred[0m evil"'.replace(/\[\d+m/g, ''))
@@ -2080,6 +2094,7 @@ ${lines.join('\n')}
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-diff' })
   const diff = ui
+  await diff.press({ key: 'diff-next' })
   const pieces = await codes(diff)
   expect(pieces.length).toBeGreaterThan(1)
   let next = 1
@@ -2208,5 +2223,18 @@ test('the latest run decides: a pass then a failure is a failure, and a run in p
   expect(await isSelected(ui, 43)).toBe(true)
   expect(await lineOf(ui, 43)).not.toContain('"✗ "')
   expect(await ui.find({ key: 'act-merge' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the description shown loses escape sequences, and local file links do not open', async ($, on) => {
+  const s = stubs(on, { body: 'see [notes](file:///etc/passwd)\n\u001b[2Jcleared \u202eevil' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-diff' })
+  const text = ((await ui.find({ type: 'Markdown' }))?.props as { text: string } | undefined)?.text ?? ''
+  expect(text).not.toContain('\u001b')
+  expect(text).not.toContain('\u202e')
+  expect(text).not.toContain('](file:')
+  expect(text).toContain('cleared')
   await ui.unmount()
 })
