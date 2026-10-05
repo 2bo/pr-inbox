@@ -583,13 +583,26 @@ function approvalOutdated(pr: PR): boolean {
 
 // Why a PR you approved is still open
 function approvedWhy(pr: PR, now: number): string {
-  if (approvalOutdated(pr)) return 'new commits since your approval'
+  if (approvalOutdated(pr)) return 're-review: new commits since your approval'
   const reasons = classify(pr, now).reasons
   if (reasons.length > 0) return reasons.join(', ')
   const ci = ciState(pr)
   if (ci === 'PENDING' || ci === 'EXPECTED') return 'CI running'
   if (pr.reviewDecision === 'REVIEW_REQUIRED') return 'waiting other reviews'
   return 'ready to merge'
+}
+
+// Why a PR you approved is still open, as its badge: changed since (re-review), then what blocks it, or ready
+function approvedBadge(pr: PR): Cell {
+  if (approvalOutdated(pr)) return { text: '↻ RE  ', color: NEON.yellow, bold: true }
+  const reasons = classify(pr, fetchedAt || Date.now()).reasons
+  if (reasons.includes('changes requested')) return { text: '✗ CHG ', color: NEON.red }
+  if (reasons.includes('CI failed')) return { text: '✗ CI  ', color: NEON.red }
+  if (reasons.includes('conflict')) return { text: '✗ CONF', color: NEON.red }
+  const ci = ciState(pr)
+  if (ci === 'PENDING' || ci === 'EXPECTED') return { text: '◌ CI  ', color: NEON.yellow }
+  if (pr.reviewDecision === 'REVIEW_REQUIRED') return { text: '… REVW', color: NEON.yellow }
+  return { text: '✓ RDY ', color: NEON.green }
 }
 
 function isApproved(pr: PR): boolean {
@@ -617,7 +630,7 @@ function summary(g: Record<Group, PR[]>): string {
     ...part(reviewing, `⠿ AI ${reviewing}${botBatch ? ` (bots ${botBatch.done}/${botBatch.total})` : ''}`),
     ...part(passed, `☑${passed} to approve`),
     // Approved by you, then changed: worth another look
-    ...part(g.approved.filter(approvalOutdated).length, `⚠${g.approved.filter(approvalOutdated).length} re-review`),
+    ...part(g.approved.filter(approvalOutdated).length, `↻${g.approved.filter(approvalOutdated).length} re-review`),
   ]
   const right = [
     ...part(g.action.length, `✗${g.action.length} fix`),
@@ -2199,6 +2212,8 @@ function logReview($: EngineInterface, run: ReviewRun): void {
 
 // What one Code element may hold is 10000 characters: pieces stay under this, cut between lines with their own @@
 const DIFF_PIECE = 8000
+// And at most this many lines, so j/k scroll by a block of about this size
+const DIFF_BLOCK_LINES = 12
 // A file's diff past this is cut, the rest left to GitHub (o)
 const DIFF_FILE_MAX = 60000
 
@@ -2209,6 +2224,14 @@ type DiffView = {
   body: string | undefined
   files: DiffFile[]
   at: number
+  // The block of lines j/k last scrolled to, and the row picked in the list of files (f)
+  block: number
+  cursor: number
+  // A line above the pages (the fix not pushed yet)
+  note?: string
+  // Showing only what changed after your approval at this commit, and how many commits that is
+  since?: string
+  sinceCommits?: number
   list: boolean
   loading: boolean
   error: string
@@ -2276,7 +2299,7 @@ function splitHunk(header: string, lines: string[]): string[] {
   for (const raw of lines) {
     // A single line longer than a piece is cut; the highlighter would refuse it whole
     const line = raw.length > DIFF_PIECE - 200 ? `${raw.slice(0, DIFF_PIECE - 201)}…` : raw
-    if (size + line.length + 1 > DIFF_PIECE - 100) flush()
+    if (size + line.length + 1 > DIFF_PIECE - 100 || body.length >= DIFF_BLOCK_LINES) flush()
     body.push(line)
     size += line.length + 1
     const mark = line[0]
@@ -2361,30 +2384,93 @@ function findingsIn(pr: PR, path: string): Finding[] {
   return r.findings.filter((f) => f.severity !== 'pre-existing' && (f.location === path || f.location.startsWith(`${path}:`)))
 }
 
-async function openDiff($: EngineInterface, pr: PR): Promise<void> {
-  // The diff takes the pane's place (another pane could not take the keys from this one); q brings the list back
-  diffView = { pr, body: undefined, files: [], at: 0, list: false, loading: true, error: '', showGenerated: new Set() }
+// d: the reader. A PR you approved that changed since opens at what changed after your approval ('since'); t
+// switches to the whole PR ('all') and back
+async function openDiff($: EngineInterface, pr: PR, mode: 'auto' | 'since' | 'all' = 'auto'): Promise<void> {
+  // The reader takes the pane's place (another pane could not take the keys from this one); q brings the list back
+  const approvedAt = isApproved(pr) && approvalOutdated(pr) ? myApproval(pr)?.oid : undefined
+  const since =
+    mode !== 'all' && approvedAt && /^[0-9a-f]{40}$/.test(approvedAt) && /^[0-9a-f]{40}$/.test(pr.headRefOid) ? approvedAt : undefined
+  const keep = diffView?.pr.url === pr.url ? diffView : undefined
+  diffView = {
+    pr,
+    body: keep?.body,
+    files: [],
+    at: 0,
+    block: 0,
+    cursor: 0,
+    list: false,
+    loading: true,
+    error: '',
+    showGenerated: keep?.showGenerated ?? new Set(),
+  }
   $.ui.invalidate('ui.render')
   const view = diffView
-  const [r, about] = await Promise.all([
-    $.process.run(['gh', 'pr', 'diff', pr.url]),
-    $.process.run(['gh', 'pr', 'view', pr.url, '--json', 'body']),
+  const repo = pr.repository.nameWithOwner
+  const compare = `repos/${repo}/compare/${since}...${pr.headRefOid}`
+  const [r, about, commits] = await Promise.all([
+    since && REPO_NAME.test(repo)
+      ? $.process.run(['gh', 'api', '-H', 'Accept: application/vnd.github.v3.diff', compare])
+      : $.process.run(['gh', 'pr', 'diff', pr.url]),
+    keep?.body !== undefined
+      ? Promise.resolve({ exitCode: 0, stdout: JSON.stringify({ body: keep.body }) })
+      : $.process.run(['gh', 'pr', 'view', pr.url, '--json', 'body']),
+    since ? $.process.run(['gh', 'api', compare, '--jq', '.total_commits']) : Promise.resolve(undefined),
   ])
   // Closed or another PR opened meanwhile
   if (diffView !== view) return
   view.loading = false
-  if (r.exitCode !== 0) view.error = clean(r.stderr) || `gh exited with code ${r.exitCode}`
-  else view.files = parseDiff(r.stdout)
+  if (r.exitCode !== 0) {
+    // The approved commit may be gone (a force push): show the whole PR instead
+    if (since) return openDiff($, pr, 'all')
+    view.error = clean(r.stderr) || `gh exited with code ${r.exitCode}`
+  } else view.files = parseDiff(r.stdout)
+  if (since) {
+    view.since = since
+    const n = Number(commits?.stdout.trim())
+    if (Number.isInteger(n) && n > 0) view.sinceCommits = n
+  }
   try {
     const body = about.exitCode === 0 ? (JSON.parse(about.stdout) as { body?: unknown }).body : ''
-    view.body = typeof body === 'string' ? cleanBody(body) : ''
+    view.body = typeof body === 'string' ? (keep?.body === body ? body : cleanBody(body)) : ''
   } catch {
     view.body = ''
   }
-  // Start at the description; after an AI review that found something, at the first file it points into
+  // What changed since your approval starts at its first file; after an AI review that found something, at the first
+  // file it points into; else at the description
   const firstFinding = view.files.findIndex((f) => findingsIn(pr, f.path).length > 0)
-  view.at = firstFinding >= 0 ? firstFinding + 1 : 0
+  view.at = since && view.files.length > 0 ? 1 : firstFinding >= 0 ? firstFinding + 1 : 0
   $.ui.invalidate('ui.render')
+}
+
+// Every key a pane does not use, caught so it neither reaches the prompt nor takes the focus there: pressing one says
+// what to do instead. Hidden (display none); hotkeys of hidden buttons still work
+const PANE_KEYS = 'abcdefghijklmnopqrstuvwxyz0123456789'.split('')
+
+function hotkeysIn(el: unknown, out = new Set<string>()): Set<string> {
+  if (!el || typeof el !== 'object') return out
+  if (Array.isArray(el)) {
+    for (const x of el) hotkeysIn(x, out)
+    return out
+  }
+  const node = el as { props?: { hotkey?: unknown; children?: unknown }; children?: unknown }
+  if (typeof node.props?.hotkey === 'string') out.add(node.props.hotkey)
+  hotkeysIn(node.props?.children, out)
+  hotkeysIn(node.children, out)
+  return out
+}
+
+function keyCatcher<El>(
+  kit: { Box: (props: never) => El; Button: (props: never) => El },
+  tree: unknown[],
+  why: (key: string) => string,
+  toast: (text: string) => void,
+): El {
+  const used = hotkeysIn(tree)
+  const children = PANE_KEYS.filter((k) => !used.has(k)).map((k) =>
+    kit.Button({ key: `unbound-${k}`, label: k, hotkey: k, plain: true, onPress: () => toast(why(k)) } as never),
+  )
+  return kit.Box({ display: 'none', children } as never)
 }
 
 // ---- The list's cells ----
@@ -2426,8 +2512,7 @@ function sweep(n: number): string[] {
 
 // Risk for a review request (from the analysis), state for one of my PRs; always six columns wide
 function badgeOf(pr: PR): Cell {
-  if (isApproved(pr))
-    return approvalOutdated(pr) ? { text: '⚠ NEW ', color: NEON.yellow, bold: true } : { text: '✓ APPR', color: NEON.green }
+  if (isApproved(pr)) return approvedBadge(pr)
   if (tab === 'review') {
     if (cfg.analysis === 'off') return { text: '      ' }
     const a = analysisOf(pr)
@@ -2439,6 +2524,8 @@ function badgeOf(pr: PR): Cell {
         : { text: '○ LOW ', color: NEON.green }
   }
   if (isSnoozed(pr)) return { text: '⏸ SNZ ' }
+  if (fixJob?.pr.url === pr.url) return { text: '⟳ WIP ', color: NEON.cyan, bold: true }
+  if (fixReady.has(pr.url)) return { text: '⇡ PUSH', color: NEON.cyan, bold: true }
   const group = classify(pr, fetchedAt || Date.now()).group
   return group === 'action'
     ? { text: '✗ FIX ', color: NEON.red, bold: true }
@@ -2676,8 +2763,10 @@ async function rerunFailed($: EngineInterface, pr: PR): Promise<void> {
 
 // Claude fixes the failing CI of one of your PRs in a git worktree of its own, at the PR's head (detached), commits,
 // and stops: pr-inbox asks you before it pushes. The turn runs with your session's usual permissions
-type FixJob = { pr: PR; repo: string; branch: string; dir: string; base: string; turnId?: string }
+type FixJob = { pr: PR; repo: string; branch: string; dir: string; base: string; startedAt: number; turnId?: string; commits?: string[] }
 let fixJob: FixJob | undefined
+// Fixes that made commits you have not pushed yet (you cancelled, or looked at the diff first), by PR URL: c pushes them
+const fixReady = new Map<string, FixJob>()
 const FIX_MARK = '[pr-inbox fix-ci]'
 // A branch name safe to hand to git as one argument
 const BRANCH_NAME = /^(?!-)(?!.*\.\.)[\w./-]{1,200}$/
@@ -2764,10 +2853,21 @@ async function fixCi($: EngineInterface, pr: PR): Promise<void> {
     }
   }
   const base = (await $.process.run(['git', '-C', dir, 'rev-parse', 'HEAD'])).stdout.trim()
-  fixJob = { pr, repo, branch, dir, base }
+  const job: FixJob = { pr, repo, branch, dir, base, startedAt: await $.clock.now() }
+  fixJob = job
+  fixReady.delete(pr.url)
   // Not awaited: the call waits until the turn starts
-  void $.prompt.submit({ text: fixRequest(fixJob), asUser: true })
+  void $.prompt.submit({ text: fixRequest(job), asUser: true })
   $.ui.toast(`Claude is fixing the CI of #${pr.number} in ${dir}`, { timeoutMs: 8000 })
+  $.ui.invalidate('ui.render')
+  // A request that never became a turn (queued behind another, then dropped) does not hold c forever
+  $.clock.after(2 * MINUTE, () => {
+    if (fixJob === job && !job.turnId) {
+      fixJob = undefined
+      $.ui.toast(`The fix of #${pr.number} did not start · c tries again`, { timeoutMs: 8000 })
+      $.ui.invalidate('ui.render')
+    }
+  })
 }
 
 function fixRequest(job: FixJob): string {
@@ -2791,29 +2891,40 @@ function fixRequest(job: FixJob): string {
   ].join(' ')
 }
 
-// The turn ended: push what it committed, once you say so in the dialog (Cancel first). Never a force push
+// The turn ended (or you asked early): what it committed waits for your word to push
 async function afterFix($: EngineInterface, job: FixJob): Promise<void> {
-  fixJob = undefined
+  if (fixJob === job) fixJob = undefined
   const log = await $.process.run(['git', '-C', job.dir, 'log', '--format=%h %s', `${job.base}..HEAD`])
   const commits = log.exitCode === 0 ? log.stdout.split('\n').map(clean).filter(Boolean) : []
+  $.ui.invalidate('ui.render')
   if (commits.length === 0) {
+    fixReady.delete(job.pr.url)
     $.ui.toast(`No new commit for #${job.pr.number} in ${job.dir}`, { timeoutMs: 8000 })
     return
   }
+  const ready = { ...job, commits }
+  fixReady.set(job.pr.url, ready)
+  await askPush($, ready)
+}
+
+// The push dialog: the commits, then Push, or a look at the diff first (Cancel first). Never a force push
+async function askPush($: EngineInterface, job: FixJob): Promise<void> {
+  const commits = job.commits ?? []
   const dirty = (await $.process.run(['git', '-C', job.dir, 'status', '--porcelain'])).stdout.trim()
   const shown = commits.slice(0, 5).join('; ') + (commits.length > 5 ? `; and ${commits.length - 5} more` : '')
   let answer = ''
   try {
     answer = await $.ui.ask(
       `Push ${plural(commits.length, 'commit')} to ${job.branch} of ${job.repo} (#${job.pr.number})? ${shown}${dirty ? ' (uncommitted changes stay in the worktree)' : ''}`,
-      { options: ['Cancel', 'Push'], header: 'Push' },
+      { options: ['Cancel', 'Push', 'Show the diff first'], header: 'Push' },
     )
   } catch {
     // Dismissed
   }
   await focusPane($)
+  if (answer === 'Show the diff first') return openFixDiff($, job)
   if (answer !== 'Push') {
-    $.ui.toast(`Not pushed. The commits stay in ${job.dir}`, { timeoutMs: 8000 })
+    $.ui.toast(`Not pushed · c pushes it or shows the diff (${job.dir})`, { timeoutMs: 8000 })
     return
   }
   const r = await $.process.run(['git', '-C', job.dir, 'push', 'origin', `HEAD:refs/heads/${job.branch}`], { timeoutMs: 120000 })
@@ -2821,24 +2932,84 @@ async function afterFix($: EngineInterface, job: FixJob): Promise<void> {
     $.ui.toast(`Push failed: ${fit(clean(r.stderr), 100)}`, { timeoutMs: 10000 })
     return
   }
+  fixReady.delete(job.pr.url)
   $.ui.toast(`✦ pushed ${plural(commits.length, 'commit')} to ${job.branch} · CI runs again`, { timeoutMs: 8000 })
   $.ui.log(`pr-inbox pushed ${commits.length} commit(s) to ${job.repo} ${job.branch} from ${job.dir}: you chose it in the dialog after c`)
   await refresh($)
 }
 
-// c on one of your PRs with a failed CI: fix it with Claude, or re-run the failed jobs
-async function ciMenu($: EngineInterface, pr: PR): Promise<void> {
-  let answer = ''
-  try {
-    answer = await $.ui.ask(`CI failed on ${pr.repository.nameWithOwner}#${pr.number}. What now?`, {
-      options: ['Cancel', 'Fix it with Claude in a worktree', 'Re-run the failed jobs'],
-      header: 'CI',
-    })
-  } catch {
-    // Dismissed
+// The fix's own diff (from the worktree) in the reader, before you push it
+async function openFixDiff($: EngineInterface, job: FixJob): Promise<void> {
+  const r = await $.process.run(['git', '-C', job.dir, 'diff', `${job.base}..HEAD`])
+  diffView = {
+    pr: job.pr,
+    body: '',
+    files: r.exitCode === 0 ? parseDiff(r.stdout) : [],
+    at: 1,
+    block: 0,
+    cursor: 0,
+    note: `the fix, not pushed yet: ${plural(job.commits?.length ?? 0, 'commit')} in ${job.dir} · q, then c pushes it`,
+    list: false,
+    loading: false,
+    error: r.exitCode === 0 ? '' : clean(r.stderr) || 'git diff failed',
+    showGenerated: new Set(),
   }
-  await focusPane($)
-  if (answer === 'Fix it with Claude in a worktree') await fixCi($, pr)
+  $.ui.invalidate('ui.render')
+}
+
+// c on one of your PRs: while Claude fixes it, push now or stop following; with a fix not pushed, push or look at it;
+// with a failed CI, say what a fix would do and start it, or re-run the failed jobs
+const FIX_IT = 'Fix with Claude (asks before push)'
+async function ciMenu($: EngineInterface, pr: PR): Promise<void> {
+  const ask = async (question: string, options: string[], header: string) => {
+    let answer = ''
+    try {
+      answer = await $.ui.ask(question, { options: ['Cancel', ...options], header })
+    } catch {
+      // Dismissed
+    }
+    await focusPane($)
+    return answer
+  }
+  if (fixJob?.pr.url === pr.url) {
+    const job = fixJob
+    const answer = await ask(
+      `Claude is fixing #${pr.number} in ${job.dir} (${elapsed(new Date(job.startedAt).toISOString(), Date.now())}).`,
+      ['Ask to push what it has now', 'Stop following the fix'],
+      'Fixing',
+    )
+    if (answer === 'Ask to push what it has now') await afterFix($, job)
+    else if (answer === 'Stop following the fix') {
+      fixJob = undefined
+      $.ui.toast(`Stopped following the fix of #${pr.number}; the worktree stays in ${job.dir}`, { timeoutMs: 8000 })
+      $.ui.invalidate('ui.render')
+    }
+    return
+  }
+  const ready = fixReady.get(pr.url)
+  if (ready) {
+    const n = ready.commits?.length ?? 0
+    const answer = await ask(
+      `A fix of #${pr.number} waits in ${ready.dir}: ${plural(n, 'commit')} not pushed.`,
+      [`Push ${plural(n, 'commit')}`, 'Show the diff', 'Forget it (the worktree stays)'],
+      'Fix ready',
+    )
+    if (answer.startsWith('Push')) await askPush($, ready)
+    else if (answer === 'Show the diff') await openFixDiff($, ready)
+    else if (answer.startsWith('Forget')) {
+      fixReady.delete(pr.url)
+      $.ui.invalidate('ui.render')
+    }
+    return
+  }
+  const failed = failedChecks(pr).map((c) => `✗ ${c.name}`)
+  const answer = await ask(
+    `CI failed on ${pr.repository.nameWithOwner}#${pr.number}: ${failed.join(', ') || 'see the checks'}. ` +
+      `A fix: Claude reads the failed logs and fixes it in a worktree of its own (~/.cache/pr-inbox/worktrees), with this session's permissions, runs the tests and commits. Nothing is pushed until you say so.`,
+    [FIX_IT, 'Re-run the failed jobs'],
+    'CI',
+  )
+  if (answer === FIX_IT) await fixCi($, pr)
   else if (answer === 'Re-run the failed jobs') await rerunFailed($, pr)
 }
 
@@ -2956,8 +3127,8 @@ export function register(on: On, options: PluginOptions) {
     return next({ ...e, props: { ...e.props, tail: paneFocused ? ' esc → prompt · q close pr-inbox' : ' ctrl+x tab → pr-inbox' } })
   })
 
-  // The diff, in the pane while one is open (d): one file at a time, drawn by Claude Code's own highlighter (the Code
-  // element); the pane scrolls it
+  // The reader, in the pane while one is open (d): the description, then one file at a time, drawn by Claude Code's
+  // own highlighter (the Code element). j/k scroll it by a block of lines, h/l turn the page
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE || !diffView) return next(e)
     const kit = $.ui.resolve(e)
@@ -2969,11 +3140,10 @@ export function register(on: On, options: PluginOptions) {
     const v = diffView
     const key = (k: string, label: string, hotkey: string, onPress: () => void, dim = false) =>
       Button({ key: k, label, hotkey, plain: true, dimColor: dim, onPress })
-    const close = key('diff-close', 'back to the list', 'q', () => {
+    const close = key('diff-close', 'back', 'q', () => {
       diffView = undefined
       redraw()
     })
-    if (!v) return next(e)
     const { pr } = v
     const label = `${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number}`
     const prLink = safeHref(pr.url)
@@ -2983,7 +3153,7 @@ export function register(on: On, options: PluginOptions) {
         columnGap: 1,
         children: [
           Text({ color: focused ? NEON.pink : NEON.rule, children: ['▍'] }),
-          Text({ color: NEON.cyan, bold: true, children: ['diff'] }),
+          Text({ color: NEON.cyan, bold: true, children: ['read'] }),
           prLink
             ? Link({ href: prLink, children: [Text({ color: NEON.cyan, underline: true, children: [label] })] })
             : Text({ children: [label] }),
@@ -2992,12 +3162,13 @@ export function register(on: On, options: PluginOptions) {
       }),
     ]
     const rule = Text({ color: focused ? NEON.violet : NEON.rule, children: ['━'.repeat(columns)] })
+    const toast = (text: string) => $.ui.toast(text, { timeoutMs: 4000 })
     if (v.loading || v.error) {
-      const what = v.loading ? 'fetching the PR…' : `✗ ${fit(v.error, columns - 4)}`
-      return Box({
-        flexDirection: 'column',
-        children: [...head, rule, Text({ color: v.error ? NEON.red : NEON.muted, children: [what] }), Box({ children: [close] })],
-      })
+      const what = v.loading
+        ? `${SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]} fetching the PR…`
+        : `✗ ${fit(v.error, columns - 4)}`
+      const tree = [...head, rule, Text({ color: v.error ? NEON.red : NEON.muted, children: [what] }), Box({ children: [close] })]
+      return Box({ flexDirection: 'column', children: [...tree, keyCatcher(kit, tree, () => 'Still fetching · q goes back', toast)] })
     }
     const files = v.files
     // Pages: the description, then each file
@@ -3006,6 +3177,7 @@ export function register(on: On, options: PluginOptions) {
     const file = at > 0 ? (files[at - 1] as DiffFile) : undefined
     const go = (to: number) => {
       v.at = Math.min(Math.max(0, to), pages - 1)
+      v.block = 0
       v.list = false
       redraw()
     }
@@ -3016,59 +3188,130 @@ export function register(on: On, options: PluginOptions) {
       const soft = found.length - bad
       return { bad, soft, text: [bad ? `✗${bad}` : '', soft ? `△${soft}` : ''].filter(Boolean).join(' ') }
     }
+    // j/k: the next or previous block of lines, scrolled to the top of the pane
+    const blocks = file && !(isGenerated(file.path) && !v.showGenerated.has(file.path)) ? file.pieces.length : 0
+    const scrollTo = (block: number) => {
+      if (blocks === 0) return toast(file ? 'Nothing to scroll here · l: next file' : 'j/k scroll a file · l: the first file')
+      v.block = Math.min(Math.max(0, block), blocks - 1)
+      $.ui.scroll(v.block === 0 ? { to: 'start', in: PANE } : { to: { key: `block-${v.block}` }, in: PANE, block: 'start' }).catch(() => {
+        // A surface that does not scroll: the arrow keys still do
+      })
+    }
+    // What you can do with the PR without leaving the reader
+    const isReview = review.some((p) => p.url === pr.url)
+    const actOnPr: El[] = []
+    if (isReview && reviews.get(pr.url)?.state !== 'running') actOnPr.push(key('diff-approve', 'approve', 'a', () => void approve($, pr)))
+    if (isApproved(pr) && approvalOutdated(pr)) actOnPr.push(key('diff-approve', 'approve again', 'a', () => void approve($, pr)))
+    if (isReview)
+      actOnPr.push(
+        key('diff-review', reviews.get(pr.url)?.state === 'running' ? 'cancel review' : 'review', 'v', () => void aiReview($, pr)),
+      )
+    actOnPr.push(
+      key('diff-explain', mine.some((p) => p.url === pr.url) ? 'diagnose' : 'explain', 'e', () => {
+        void $.prompt.submit({ text: explainRequest(pr), asUser: true })
+        toast(`Asked Claude about #${pr.number}`)
+      }),
+    )
+    // Since your approval, or the whole PR
+    const since = v.since
+    const toggleSince =
+      isApproved(pr) && approvalOutdated(pr)
+        ? [
+            key('diff-since', since ? 'all changes' : 'since approval', 't', () => {
+              void openDiff($, pr, since ? 'all' : 'since')
+            }),
+          ]
+        : []
     const keys = Box({
       key: 'diff-keys',
       flexDirection: 'row',
       flexWrap: 'wrap',
       columnGap: 2,
-      children: [
-        key('diff-prev', '◂', 'h', () => go(at - 1), at === 0),
-        key('diff-next', '▸', 'l', () => go(at + 1), at === pages - 1),
-        key('diff-list', v.list ? 'close files' : 'files', 'f', () => {
-          v.list = !v.list
-          redraw()
-        }),
-        ...(file && isGenerated(file.path) && !v.list
-          ? [
-              key('diff-generated', v.showGenerated.has(file.path) ? 'fold' : 'show', 'g', () => {
-                if (v.showGenerated.has(file.path)) v.showGenerated.delete(file.path)
-                else v.showGenerated.add(file.path)
-                redraw()
-              }),
-            ]
-          : []),
-        key(
-          'diff-open',
-          'open',
-          'o',
-          async () => {
-            await $.process.run(['gh', 'pr', 'view', pr.url, '--web'])
-          },
-          true,
-        ),
-        close,
-      ],
+      children: v.list
+        ? [
+            key('diff-cursor-down', '↓', 'j', () => {
+              v.cursor = Math.min(pages - 1, v.cursor + 1)
+              redraw()
+            }),
+            key('diff-cursor-up', '↑', 'k', () => {
+              v.cursor = Math.max(0, v.cursor - 1)
+              redraw()
+            }),
+            key('diff-pick', 'open', 'l', () => go(v.cursor)),
+            key('diff-list', 'close', 'f', () => {
+              v.list = false
+              redraw()
+            }),
+            close,
+          ]
+        : [
+            key('diff-prev', '◂', 'h', () => go(at - 1), at === 0),
+            key('diff-next', '▸', 'l', () => go(at + 1), at === pages - 1),
+            key('diff-down', '↓', 'j', () => scrollTo(v.block + 1), blocks === 0),
+            key('diff-up', '↑', 'k', () => scrollTo(v.block - 1), blocks === 0),
+            key('diff-list', 'files', 'f', () => {
+              v.list = true
+              v.cursor = at
+              redraw()
+            }),
+            ...(file && isGenerated(file.path)
+              ? [
+                  key('diff-generated', v.showGenerated.has(file.path) ? 'fold' : 'show', 'g', () => {
+                    if (v.showGenerated.has(file.path)) v.showGenerated.delete(file.path)
+                    else v.showGenerated.add(file.path)
+                    redraw()
+                  }),
+                ]
+              : []),
+            ...toggleSince,
+            ...actOnPr,
+            key('diff-open', 'open', 'o', async () => void (await $.process.run(['gh', 'pr', 'view', pr.url, '--web'])), true),
+            close,
+          ],
     })
+    const sinceNote = v.note
+      ? [Text({ color: NEON.cyan, children: [`⇡ ${v.note}`] })]
+      : since
+        ? [
+            Text({
+              color: NEON.yellow,
+              children: [
+                `↻ only what changed since your approval at ${since.slice(0, 7)}${v.sinceCommits ? ` (${plural(v.sinceCommits, 'commit')})` : ''} · t: all changes`,
+              ],
+            }),
+          ]
+        : []
+    const done = (tree: El[], why: (k: string) => string) =>
+      Box({ flexDirection: 'column', children: [...tree, keyCatcher(kit, tree, why, toast)] })
+    const notHere = (k: string) => `${k}: no such key in the reader · h/l pages · j/k scroll · f files · q back`
 
-    // f: the description and every file, the one shown marked, each one a click away
+    // f: the description and every file. j/k move, l opens, 1-9 open a file straight away
     if (v.list) {
       const rows = [
-        Button({ key: 'diff-file-0', plain: true, label: `${at === 0 ? '▸' : ' '} Description`, onPress: () => go(0) }),
+        Button({ key: 'diff-file-0', plain: true, label: `${v.cursor === 0 ? '▸' : ' '}    Description`, onPress: () => go(0) }),
         ...files.map((f, i) => {
           const m = marks(f)
+          const n = i + 1
+          const number = n <= 9 ? `${n}` : ' '
           return Button({
-            key: `diff-file-${i + 1}`,
+            key: `diff-file-${n}`,
             plain: true,
+            ...(n <= 9 ? { hotkey: number } : {}),
             dimColor: isGenerated(f.path),
-            label: `${i + 1 === at ? '▸' : ' '} ${fit(f.path, Math.max(10, columns - 24))}  ${counts(f)}${m.text ? `  ${m.text}` : ''}`,
-            onPress: () => go(i + 1),
+            label: `${v.cursor === n ? '▸' : ' '}${n <= 9 ? '' : '   '} ${fit(f.path, Math.max(10, columns - 26))}  ${counts(f)}${m.text ? `  ${m.text}` : ''}`,
+            onPress: () => go(n),
           })
         }),
       ]
-      return Box({
-        flexDirection: 'column',
-        children: [...head, keys, rule, Text({ color: NEON.muted, children: [`${plural(files.length, 'file')} changed`] }), ...rows],
-      })
+      const tree = [
+        ...head,
+        keys,
+        rule,
+        ...sinceNote,
+        Text({ color: NEON.muted, children: [`${plural(files.length, 'file')} changed`] }),
+        ...rows,
+      ]
+      return done(tree, (k) => `${k}: no such key in the list · j/k move · l or 1-9 open · f closes`)
     }
 
     // Page 0: the description, as GitHub would show it
@@ -3078,17 +3321,16 @@ export function register(on: On, options: PluginOptions) {
         flexDirection: 'row',
         columnGap: 2,
         children: [
-          Text({ color: NEON.muted, children: [`0/${files.length}`] }),
           Text({ bold: true, color: NEON.cyan, children: ['Description'] }),
           Text({ dimColor: true, children: [author] }),
-          Text({ dimColor: true, children: [`${plural(files.length, 'file')} · l: the diff`] }),
+          Text({ dimColor: true, children: [`${plural(files.length, 'file')} · l: the first`] }),
         ],
       })
       const text = v.body ? Markdown({ text: v.body }) : Text({ color: NEON.muted, children: ['No description'] })
-      return Box({ flexDirection: 'column', children: [...head, keys, rule, title, text] })
+      return done([...head, keys, rule, ...sinceNote, title, text], notHere)
     }
 
-    // The file: where it is in the PR, its counts and the review's findings in it, then its hunks
+    // The file: where it is in the PR, its counts and the review's findings in it, then its lines in blocks
     const m = marks(file)
     const fileHref = safeHref(
       `https://github.com/${pr.repository.nameWithOwner}/blob/${pr.headRefOid}/${file.path.split('/').map(encodeURIComponent).join('/')}`,
@@ -3097,7 +3339,7 @@ export function register(on: On, options: PluginOptions) {
       flexDirection: 'row',
       columnGap: 2,
       children: [
-        Text({ color: NEON.muted, children: [`${at}/${files.length}`] }),
+        Text({ color: NEON.muted, children: [`file ${at}/${files.length}`] }),
         fileHref
           ? Link({ href: fileHref, children: [Text({ color: NEON.cyan, underline: true, bold: true, children: [file.path] })] })
           : Text({ bold: true, children: [file.path] }),
@@ -3131,10 +3373,10 @@ export function register(on: On, options: PluginOptions) {
       ? [Text({ color: NEON.muted, children: [`Generated or lock file, folded · g: show (${counts(file)})`] })]
       : file.pieces.length === 0
         ? [Text({ color: NEON.muted, children: [file.note ? `No lines to show (${file.note})` : 'No lines to show'] })]
-        : file.pieces.map((source) => Code({ source, path: file.path, format: 'diff' }))
+        : file.pieces.map((source, i) => Box({ key: `block-${i}`, children: [Code({ source, path: file.path, format: 'diff' })] }))
     if (!folded && file.cut)
       body.push(Text({ color: NEON.muted, children: ['The rest of this file is too long to draw here · o: open on GitHub'] }))
-    return Box({ flexDirection: 'column', children: [...head, keys, rule, title, ...findings, ...body] })
+    return done([...head, keys, rule, ...sinceNote, title, ...findings, ...body], notHere)
   })
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
@@ -3223,8 +3465,8 @@ export function register(on: On, options: PluginOptions) {
     const row1 = [
       LOGO,
       'h: ◂',
-      `1: ◆ review ${g.humans.length} ⚙${g.bots.length}`,
-      `2: ◆ mine ${mine.length}`,
+      `1: ◉ review ${g.humans.length} ⚙${g.bots.length}`,
+      `2: ◉ mine ${mine.length}`,
       'l: ▸',
       `r: ${refreshLabel}`,
       `f: ${filterText ? `/${filterText}` : '/'}`,
@@ -3252,8 +3494,8 @@ export function register(on: On, options: PluginOptions) {
           }),
           // h / l move between the tabs as 1 / 2 pick one
           small('tab-prev', '◂', 'h', () => switchTab(-1)),
-          tabButton('review', `${tab === 'review' ? '◆ ' : ''}review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`, '1'),
-          tabButton('mine', `${tab === 'mine' ? '◆ ' : ''}mine ${mine.length}`, '2'),
+          tabButton('review', `${tab === 'review' ? '◉ ' : ''}review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`, '1'),
+          tabButton('mine', `${tab === 'mine' ? '◉ ' : ''}mine ${mine.length}`, '2'),
           small('tab-next', '▸', 'l', () => switchTab(1)),
           small('refresh', refreshLabel, 'r', () => refresh($)),
           small('filter', filterText ? `/${filterText}` : '/', 'f', () => {
@@ -3294,13 +3536,14 @@ export function register(on: On, options: PluginOptions) {
           autoFocus: true,
           onInput: (value: string) => {
             filterText = value
-            selected = ''
             redraw()
           },
           onSubmit: (value: string) => {
             filterText = value.trim()
             filtering = false
             redraw()
+            // Submitting gives the keys back to the prompt; the list is where they are wanted next
+            void focusPane($)
           },
         }),
       )
@@ -3356,8 +3599,18 @@ export function register(on: On, options: PluginOptions) {
         const group = classify(pr, now).group
         if (group === 'ready')
           actions.push(Button({ key: 'act-merge', label: 'merge', hotkey: 'm', plain: true, onPress: () => mergePr($, pr) }))
-        if (ciState(pr) === 'FAILURE' || ciState(pr) === 'ERROR')
-          actions.push(Button({ key: 'act-ci', label: 'fix ci', hotkey: 'c', plain: true, onPress: () => ciMenu($, pr) }))
+        const fixing = fixJob?.pr.url === pr.url
+        const ready = fixReady.has(pr.url)
+        if (fixing || ready || ciState(pr) === 'FAILURE' || ciState(pr) === 'ERROR')
+          actions.push(
+            Button({
+              key: 'act-ci',
+              label: fixing ? 'fixing…' : ready ? 'push fix' : 'fix ci',
+              hotkey: 'c',
+              plain: true,
+              onPress: () => ciMenu($, pr),
+            }),
+          )
       }
       actions.push(
         Button({
@@ -3429,10 +3682,41 @@ export function register(on: On, options: PluginOptions) {
         : 1
     }
 
+    // Keys that do nothing for this PR or tab say why, instead of falling through to the prompt
+    const whyNot = (k: string): string => {
+      const n = pr ? `#${pr.number}` : 'this PR'
+      const ownTab = 'on your PRs (2 or l: My PRs)'
+      switch (k) {
+        case 'a':
+          if (!pr) return 'a approves the selected review request'
+          if (mine.some((p) => p.url === pr.url)) return 'a approves review requests (1 or h: To review), not your own PRs'
+          if (isApproved(pr)) return `You approved ${n} at its current commit already`
+          return `Wait for the AI review of ${n} to end (v cancels it)`
+        case 'v':
+          return pr && isApproved(pr)
+            ? `You approved ${n} already · d reads it`
+            : 'v runs an AI review of a review request (1 or h: To review)'
+        case 'c':
+          return pr && mine.some((p) => p.url === pr.url) ? `CI has not failed on ${n}` : `c fixes failed CI ${ownTab}`
+        case 'm':
+          if (!pr || !mine.some((p) => p.url === pr.url)) return `m merges ${ownTab}`
+          return `${n} is not ready to merge: ${classify(pr, now).reasons.join(', ') || approvedWhy(pr, now)}`
+        case 'i':
+          return `No AI review of ${n} yet${pr && review.some((p) => p.url === pr.url) ? ' · v runs one' : ''}`
+        case 'w':
+          return 'Every bot PR has an AI review of its current commit'
+        case 'n':
+          return 'n pages long details · these fit already'
+        default:
+          return `${k}: no such key · u shows the keys`
+      }
+    }
+    const catcher = (tree: El[]) => (filtering ? [] : [keyCatcher(kit, tree, whyNot, (t) => $.ui.toast(t, { timeoutMs: 4000 }))])
+
     // List: title row, summary row (review requests only), status row
     const icon = (p: PR): string => {
-      if (isApproved(p)) return approvalOutdated(p) ? '⚠' : '✓'
-      if (tab === 'review') return isBot(p) ? '⚙' : '◇'
+      if (isApproved(p)) return approvedBadge(p).text.slice(0, 1)
+      if (tab === 'review') return isBot(p) ? '⚙' : '◈'
       return badgeOf(p).text.slice(0, 1)
     }
     const bodyColumns = columns - INDENT
@@ -3458,8 +3742,15 @@ export function register(on: On, options: PluginOptions) {
     }
 
     const metaLine = (p: PR): string => {
-      const stacked = stackNote(p)
-      return stacked ? `${stacked}  ${metaOf(p)}` : metaOf(p)
+      // Claude fixing it, or a fix waiting for your push, comes first
+      const ready = fixReady.get(p.url)
+      const fixing =
+        fixJob?.pr.url === p.url
+          ? `⟳ Claude is fixing it in ${fixJob.dir} (${elapsed(new Date(fixJob.startedAt).toISOString(), now)})`
+          : ready
+            ? `⇡ fix ready: ${plural(ready.commits?.length ?? 0, 'commit')} not pushed · c`
+            : ''
+      return [fixing, stackNote(p), metaOf(p)].filter(Boolean).join('  ')
     }
     const metaOf = (p: PR): string => {
       if (isApproved(p)) {
@@ -3603,10 +3894,8 @@ export function register(on: On, options: PluginOptions) {
               Text({
                 wrap: 'wrap',
                 dimColor: a.dim,
-                children:
-                  riskLabel && a.text.startsWith(riskLabel)
-                    ? [Text({ color: a.color, bold: true, children: [riskLabel] }), a.text.slice(riskLabel.length)]
-                    : [a.text],
+                // The risk is on the row already: the summary alone
+                children: [riskLabel && a.text.startsWith(riskLabel) ? a.text.slice(riskLabel.length).trimStart() : a.text],
               }),
             ],
           }),
@@ -3737,7 +4026,9 @@ export function register(on: On, options: PluginOptions) {
       const ci = ciGlyph(p)
       const ai = tab === 'review' && !isApproved(p) ? aiGlyph(p) : { text: ' ', color: undefined }
       const right = ` ${h.filled}${h.empty}${short(since, now).padStart(4)}  ${ci.text}  ${ai.text}`
-      const lead = `${isSelected ? '▸' : ' '}${isUnread(p) ? '●' : ' '}${isBot(p) ? '⚙' : ' '}`
+      // Under the bots heading every row is a bot's: the ⚙ only marks bots elsewhere (approved by you)
+      const botMark = isBot(p) && !(tab === 'review' && review.some((r) => r.url === p.url))
+      const lead = `${isSelected ? '▸' : ' '}${isUnread(p) ? '●' : ' '}${botMark ? '⚙' : ' '}`
       const titleWidth = Math.max(8, columns - textWidth(lead) - 1 - textWidth(b.text) - 1 - prWidth - 1 - textWidth(right))
       const title = `${p.isDraft ? '[draft] ' : ''}${p.title}`
       const padTo = (text: string, width: number) => text + ' '.repeat(Math.max(0, width - textWidth(text)))
@@ -3773,21 +4064,15 @@ export function register(on: On, options: PluginOptions) {
     const folds: El[] = []
     // AI review every bot PR in turn: those with no review of their current commit yet
     const unreviewedBots = g.bots.filter((p) => !reviewOfHead(p) && reviews.get(p.url)?.state !== 'running').length
-    if (tab === 'review' && (unreviewedBots > 0 || botBatch)) {
-      folds.push(
-        small(
-          'review-bots',
-          botBatch
-            ? `Stop reviewing bot PRs (${botBatch.done}/${botBatch.total} done)`
-            : `AI review all ${plural(g.bots.length, 'bot PR')}`,
-          'w',
-          () => {
+    // w sits on the bots heading
+    const reviewBotsLabel = botBatch ? `stop AI review (${botBatch.done}/${botBatch.total})` : `AI review ${unreviewedBots} not reviewed`
+    const reviewBots =
+      tab === 'review' && (unreviewedBots > 0 || botBatch)
+        ? small('review-bots', reviewBotsLabel, 'w', () => {
             void reviewAllBots($)
             redraw()
-          },
-        ),
-      )
-    }
+          })
+        : undefined
     const snoozedHere = tab === 'review' ? g.snoozedReview : g.snoozedMine
     if (snoozedHere.length > 0) {
       folds.push(
@@ -3807,15 +4092,17 @@ export function register(on: On, options: PluginOptions) {
     // around the selection when it does not fit
     const selectedPr = rows.find((p) => p.url === selected)
     // Each group after the first opens with a heading row: bots, approved by you, stale, snoozed
+    // With a filter, a heading counts what matches out of all: "bots 1/3"
+    const count = (list: PR[]) => (filterText ? `${list.filter(matchesFilter).length}/${list.length}` : `${list.length}`)
     const sectionOf = (q: PR): string => {
       // A stacked PR goes under its stack's heading
       const p = findPr(stackLead.get(q.url) ?? q.url) ?? q
-      if (isSnoozed(p)) return `⏸ snoozed ${(tab === 'review' ? g.snoozedReview : g.snoozedMine).length}`
+      if (isSnoozed(p)) return `⏸ snoozed ${count(tab === 'review' ? g.snoozedReview : g.snoozedMine)}`
       if (tab === 'review') {
-        if (isApproved(p)) return `✓ approved by you, not merged ${g.approved.length}`
-        return isBot(p) ? `⚙ bots ${g.bots.length}` : ''
+        if (isApproved(p)) return `✓ approved by you, not merged ${count(g.approved)}`
+        return isBot(p) ? `⚙ bots ${count(g.bots)}` : ''
       }
-      return classify(p, now).group === 'stale' ? `◇ stale ${g.stale.length} (${cfg.stale_days}+ days)` : ''
+      return classify(p, now).group === 'stale' ? `◇ stale ${count(g.stale)} (${cfg.stale_days}+ days)` : ''
     }
     const headings = new Set(rows.map(sectionOf).filter(Boolean)).size
     const chrome = topLines + 2 + 1 + (selectedPr ? 1 : 0) + (folds.length > 0 ? 1 : 0) + headings + footerLines
@@ -3858,7 +4145,7 @@ export function register(on: On, options: PluginOptions) {
         ['d', 'read the PR: description, then the diff file by file (h / l pages, f list of pages, q back)'],
         ['o', 'open in the browser'],
         ['z', 'show or hide snoozed PRs'],
-        ['a (again)', 'on a PR you approved that got new commits (⚠ NEW): approve the new commit'],
+        ['a (again)', 'on a PR you approved that changed since (↻ RE): approve its current commit; d shows only the change'],
         ['r', 'fetch again'],
         ['Esc', 'back to the prompt; the pane stays open (ctrl+x tab comes back)'],
         ['Ctrl+X Tab', 'move between the prompt and this pane (keys reach the pane only while it has the focus)'],
@@ -3880,7 +4167,9 @@ export function register(on: On, options: PluginOptions) {
         ['● ⚙', 'updated since you last selected it · a bot PR', NEON.pink],
         ['▲ ◆ ○', 'risk from the analysis: high · medium · low', NEON.yellow],
         ['✗ ✓ … ◇ ⏸', 'your PRs: fix · ready to merge · waiting · stale · snoozed', NEON.green],
-        ['✓ ⚠', 'approved by you: not merged yet · new commits since', NEON.green],
+        ['↻ … ✓', 'approved by you: re-review (changed since) · waiting reviews · ready, or ✗ what blocks it', NEON.green],
+        ['┌ ├ └', 'a stack of PRs, bottom (on the base branch) to top', NEON.violet],
+        ['✓ ✗ ◌ ·', 'CI passed · failed · running · none; AI review: ✓ passed ✗ blocked · none', NEON.cyan],
         ['▰▰▱', 'how long it has waited, filling up to red', NEON.red],
       ]
       const helpRows = [
@@ -3894,7 +4183,8 @@ export function register(on: On, options: PluginOptions) {
         help.reduce((n, [, what]) => n + wrappedLines(what, textColumns), 0) +
         1 +
         legend.reduce((n, [, what]) => n + wrappedLines(what, textColumns), 0)
-      return Box({ flexDirection: 'column', children: [...top, rule(), ...helpRows] })
+      const helpTree = [...top, rule(), ...helpRows]
+      return Box({ flexDirection: 'column', children: [...helpTree, ...catcher(helpTree)] })
     }
 
     const list: El[] = []
@@ -3904,7 +4194,18 @@ export function register(on: On, options: PluginOptions) {
       if (name !== section || (i === 0 && name)) {
         if (name) {
           const label = `── ${name} `
-          list.push(Text({ color: NEON.muted, children: [label + '─'.repeat(Math.max(0, columns - textWidth(label)))] }))
+          const onBots = reviewBots && name.startsWith('⚙')
+          const keyWidth = onBots ? textWidth(`· w: ${reviewBotsLabel} `) : 0
+          list.push(
+            Box({
+              flexDirection: 'row',
+              children: [
+                Text({ color: NEON.muted, children: [label] }),
+                ...(onBots ? [Text({ color: NEON.muted, children: ['· '] }), reviewBots, Text({ children: [' '] })] : []),
+                Text({ color: NEON.muted, children: ['─'.repeat(Math.max(0, columns - textWidth(label) - keyWidth))] }),
+              ],
+            }),
+          )
         }
         section = name
       }
@@ -3983,6 +4284,6 @@ export function register(on: On, options: PluginOptions) {
       (panel ? 1 + panelHeight : 0) +
       foldRow.length +
       footerLines
-    return Box({ flexDirection: 'column', children: tree })
+    return Box({ flexDirection: 'column', children: [...tree, ...catcher(tree)] })
   })
 }

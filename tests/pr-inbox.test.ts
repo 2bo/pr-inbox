@@ -353,16 +353,16 @@ test('bot and stale PRs are listed, each group under its heading, with nothing t
   const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
-  expect((await ui.find({ key: 'tab-review' }))?.props.label).toBe('◆ review 2 ⚙1')
+  expect((await ui.find({ key: 'tab-review' }))?.props.label).toBe('◉ review 2 ⚙1')
   expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
   expect(await ui.find({ key: `line-${BOT.url}` })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^── ⚙ bots 1 ─/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^── ⚙ bots 1 $/ })).toBeDefined()
 
   await ui.press({ key: 'tab-mine' })
   expect(await ui.find({ key: `line-${CHANGES.url}` })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /changes requested/ })).toBeDefined()
   expect(await ui.find({ key: `line-${STALE.url}` })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^── ◇ stale 1 \(30\+ days\) ─/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^── ◇ stale 1 \(30\+ days\) $/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -510,15 +510,15 @@ test('shows the summary, risk, reason and release impact in the list', async ($,
   // The rows carry the risk as a badge; the selected PR's details carry the rest
   expect((await ui.find({ type: 'Text', text: /^▲ HIGH$/ }))?.props.color).toBe('#ff5f5f')
   expect(await ui.find({ type: 'Text', text: /^○ LOW $/ })).toBeDefined()
-  // Only the label is colored; the sentence stays plain
-  expect(await ui.find({ type: 'Text', text: /^【高】ログイン画面のバリデーションを修正$/ })).toBeDefined()
-  expect((await ui.find({ type: 'Text', text: /^【高】$/ }))?.props.color).toBe('#ff5f5f')
+  // The risk is on the row; the details give the summary alone
+  expect(await ui.find({ type: 'Text', text: /^ログイン画面のバリデーションを修正$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /【高】/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /根拠: 認証まわりの変更/ })).toBeDefined()
   // Release impact: yes / no (behind a flag) / unknown when the model returns no impact
   expect(await ui.find({ type: 'Text', text: /^リリース時: 影響あり — エンドユーザー: ログイン失敗時の文言が変わる$/ })).toBeDefined()
   expect((await ui.find({ type: 'Text', text: /^リリース時: 影響あり$/ }))?.props.color).toBe('#00d7ff')
   await ui.press({ key: 'nav-down' })
-  expect(await ui.find({ type: 'Text', text: /^【低】一覧の並び順を変更$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^一覧の並び順を変更$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^リリース時: 影響なし — フラグ new_list_order が無効のまま入る$/ })).toBeDefined()
   await ui.press({ key: 'nav-down' })
   expect(await ui.find({ type: 'Text', text: /^リリース時: 判定不能$/ })).toBeDefined()
@@ -552,7 +552,7 @@ test('strips control characters from PR titles and model output', async ($, on) 
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   expect(await ui.find({ type: 'Text', text: /^ ログイン画面を直す 二行目$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^【低】要約です$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^要約です$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^@eve {2}.*根拠: 赤字$/ })).toBeDefined()
   await ui.unmount()
 })
@@ -656,7 +656,7 @@ test('with Claude Code language Japanese, asks for Japanese analysis and shows J
   await start($, s.clock)
   expect(s.systems.at(-1)).toContain('Write summary, reason and impact_detail in Japanese.')
   const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: /^【高】/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^リリース時: 影響あり/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -665,7 +665,7 @@ test('with no language setting and an English LANG, asks for English analysis an
   await start($, s.clock)
   expect(s.systems.at(-1)).toContain('Write summary, reason and impact_detail in English.')
   const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: /^\[High\] ログイン画面のバリデーションを修正$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ログイン画面のバリデーションを修正$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^On release: user-visible change — / })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: / why: 認証まわりの変更$/ })).toBeDefined()
   await ui.unmount()
@@ -810,7 +810,7 @@ test('a partly read PR is marked and never judged low risk', async ($, on) => {
   const ui = await $.ui.mount(PANE)
   // #13 answers low, but only the first 30,000 characters of the diff were shown
   await ui.press({ key: 'nav-down' })
-  expect(await ui.find({ type: 'Text', text: /^【中】一覧の並び順を変更 \(PR の一部だけで判定\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^一覧の並び順を変更 \(PR の一部だけで判定\)$/ })).toBeDefined()
   expect(s.prompts.at(-1)).toContain('Diff (first 30000 characters only')
   await ui.unmount()
 })
@@ -1781,12 +1781,12 @@ test('PRs you approved that are not merged are listed with why, newer commits fi
   await start($, s.clock)
   expect(s.calls.find((c) => c.includes('graphql'))).toContainEqual(expect.stringMatching(/^approved=.*reviewed-by:@me -author:@me/))
   const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: /^── ✓ approved by you, not merged 3 ─/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^── ✓ approved by you, not merged 3 $/ })).toBeDefined()
   expect(await ui.find({ key: 'line-https://github.com/acme/app/pull/64' })).toBeUndefined()
   // New commits since the approval come first, marked, and can be approved again
   expect(await isSelected(ui, 62)).toBe(true)
-  expect(await lineOf(ui, 62)).toContain('⚠ NEW')
-  expect(await lineOf(ui, 62)).toContain('new commits since your approval')
+  expect(await lineOf(ui, 62)).toContain('↻ RE')
+  expect(await lineOf(ui, 62)).toContain('re-review: new commits since your approval')
   expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('approve again')
   expect(await ui.find({ key: 'act-ai-review' })).toBeUndefined()
   await ui.press({ key: 'nav-down' })
@@ -1863,7 +1863,7 @@ test('w reviews every bot PR in turn and sums up', { options: { ai_approve: 'aut
   const s = stubs(on, { graphql: twoBots })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
-  expect((await ui.find({ key: 'review-bots' }))?.props.label).toBe('AI review all 2 bot PRs')
+  expect((await ui.find({ key: 'review-bots' }))?.props.label).toBe('AI review 2 not reviewed')
   await ui.press({ key: 'review-bots' })
   await settleReview(s)
   await settleReview(s)
@@ -1880,7 +1880,7 @@ test('w again stops the bulk review', { options: { ai_approve: 'auto' } }, async
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'review-bots' })
   await settleReview(s)
-  expect((await ui.find({ key: 'review-bots' }))?.props.label).toBe('Stop reviewing bot PRs (0/2 done)')
+  expect((await ui.find({ key: 'review-bots' }))?.props.label).toBe('stop AI review (0/2)')
   await ui.press({ key: 'review-bots' })
   for (let i = 0; i < 6; i++) {
     await s.clock.advance(60_000)
@@ -1925,7 +1925,7 @@ test('c, then re-run, re-runs only the failed GitHub Actions runs', async ($, on
   await ui.press({ key: 'tab-mine' })
   expect(await isSelected(ui, 21)).toBe(true)
   await ui.press({ key: 'act-ci' })
-  expect(s.choices.at(-1)).toEqual(['Cancel', 'Fix it with Claude in a worktree', 'Re-run the failed jobs'])
+  expect(s.choices.at(-1)).toEqual(['Cancel', 'Fix with Claude (asks before push)', 'Re-run the failed jobs'])
   const reruns = s.calls.filter((c) => c[1] === 'run')
   expect(reruns).toEqual([['gh', 'run', 'rerun', '1', '--failed', '-R', 'acme/app']])
   // A ready PR has no failed CI: no c
@@ -2219,14 +2219,14 @@ test('h and l move to the tab on the left and right', async ($, on) => {
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   const label = async () => String((await ui.find({ key: 'tab-mine' }))?.props.label)
-  expect(await label()).not.toContain('◆')
+  expect(await label()).not.toContain('◉')
   await ui.press({ key: 'tab-next' })
-  expect(await label()).toContain('◆')
+  expect(await label()).toContain('◉')
   // Past the last tab it stays
   await ui.press({ key: 'tab-next' })
-  expect(await label()).toContain('◆')
+  expect(await label()).toContain('◉')
   await ui.press({ key: 'tab-prev' })
-  expect(String((await ui.find({ key: 'tab-review' }))?.props.label)).toContain('◆')
+  expect(String((await ui.find({ key: 'tab-review' }))?.props.label)).toContain('◉')
   await ui.unmount()
 })
 
@@ -2405,7 +2405,7 @@ const fixGit =
   }
 
 test('c, then fix: a worktree at the PR head, a request to fix and commit, and a push only after you say so', async ($, on) => {
-  const s = stubs(on, { answer: 'Fix it with Claude in a worktree', git: fixGit(), locale: { HOME: '/home/me' } })
+  const s = stubs(on, { answer: 'Fix with Claude (asks before push)', git: fixGit(), locale: { HOME: '/home/me' } })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
@@ -2433,7 +2433,7 @@ test('c, then fix: a worktree at the PR head, a request to fix and commit, and a
 })
 
 test('after the fix turn, Cancel pushes nothing, and no commit means nothing to ask', async ($, on) => {
-  const s = stubs(on, { answer: 'Fix it with Claude in a worktree', git: fixGit(''), locale: { HOME: '/home/me' } })
+  const s = stubs(on, { answer: 'Fix with Claude (asks before push)', git: fixGit(''), locale: { HOME: '/home/me' } })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
@@ -2502,5 +2502,139 @@ test('review requests in a stack are listed together too, bottom first, with the
   expect(await lineOf(ui, 81)).toContain('stack #70 · 2/2 on #80')
   await ui.press({ key: 'nav-down' })
   expect(await isSelected(ui, 79)).toBe(true)
+  await ui.unmount()
+})
+
+// ---- Keys that do nothing here, the reader's keys, re-review, the fix waiting to be pushed ----
+
+test('a key the list does not use says why, instead of falling through to the prompt', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  // c and m are for your own PRs; the review tab catches them
+  await ui.press({ key: 'unbound-c' })
+  expect(s.toasts.at(-1)).toContain('c fixes failed CI on your PRs')
+  await ui.press({ key: 'unbound-m' })
+  expect(s.toasts.at(-1)).toContain('m merges on your PRs')
+  await ui.press({ key: 'unbound-y' })
+  expect(s.toasts.at(-1)).toContain('y: no such key · u shows the keys')
+  // Keys in use are not caught
+  expect(await ui.find({ key: 'unbound-a' })).toBeUndefined()
+  expect(await ui.find({ key: 'unbound-j' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('in the reader, j/k scroll by blocks of lines, the list of files moves with j/k and opens with l or a digit', async ($, on) => {
+  const lines = Array.from({ length: 30 }, (_, i) => `+line ${i}`)
+  const diff = `diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -0,0 +1,30 @@
+${lines.join('\n')}
+${SAMPLE_DIFF}`
+  const s = stubs(on, { diff })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-diff' })
+  await ui.press({ key: 'diff-next' })
+  // 30 lines in blocks of 12: three blocks, keyed for scrolling
+  expect(await ui.find({ key: 'block-2' })).toBeDefined()
+  const before = s.toasts.length
+  await ui.press({ key: 'diff-down' })
+  // It scrolls (a surface does that); nothing to say about it
+  expect(s.toasts.length).toBe(before)
+  // j on a page without lines is caught, not sent to the prompt
+  await ui.press({ key: 'diff-prev' })
+  await ui.press({ key: 'diff-down' })
+  expect(s.toasts.at(-1)).toContain('l: the first file')
+  // f: j/k move the cursor, l opens it; a digit opens a file straight away
+  await ui.press({ key: 'diff-list' })
+  await ui.press({ key: 'diff-cursor-down' })
+  await ui.press({ key: 'diff-cursor-down' })
+  await ui.press({ key: 'diff-pick' })
+  expect((await codes(ui))[0]?.path).toBe('app/login.rb')
+  await ui.press({ key: 'diff-list' })
+  expect((await ui.find({ key: 'diff-file-3' }))?.props.hotkey).toBe('3')
+  await ui.press({ key: 'diff-file-3' })
+  expect(await ui.find({ type: 'Text', text: /Generated or lock file/ })).toBeDefined()
+  // Approving from the reader
+  expect(await ui.find({ key: 'diff-approve' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('d on a PR you approved that changed since shows only the change since your approval; t shows it all', async ($, on) => {
+  const moved = pr({ number: 62, title: 'Got new commits', url: 'https://github.com/acme/app/pull/62', ...mineApproved('c'.repeat(40)) })
+  const s = stubs(on, {
+    diff: SAMPLE_DIFF,
+    graphql: JSON.stringify({
+      data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [] }, approved: { nodes: [moved] } },
+    }),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect(await lineOf(ui, 62)).toContain('↻ RE')
+  await ui.press({ key: 'act-diff' })
+  expect(s.calls).toContainEqual([
+    'gh',
+    'api',
+    '-H',
+    'Accept: application/vnd.github.v3.diff',
+    `repos/acme/app/compare/${'c'.repeat(40)}...${HEAD}`,
+  ])
+  expect(await ui.find({ type: 'Text', text: /^↻ only what changed since your approval at ccccccc/ })).toBeDefined()
+  await ui.press({ key: 'diff-since' })
+  expect(s.calls).toContainEqual(['gh', 'pr', 'diff', moved.url])
+  expect(await ui.find({ type: 'Text', text: /^↻ only what changed/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('approved PRs carry why they are still open as their badge', async ($, on) => {
+  const waiting = pr({ number: 61, url: 'https://github.com/acme/app/pull/61', ...mineApproved(HEAD) })
+  const ready = pr({ number: 63, url: 'https://github.com/acme/app/pull/63', reviewDecision: 'APPROVED', ...mineApproved(HEAD) })
+  const s = stubs(on, {
+    graphql: JSON.stringify({
+      data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [] }, approved: { nodes: [waiting, ready] } },
+    }),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect(await lineOf(ui, 61)).toContain('… REVW')
+  expect(await lineOf(ui, 63)).toContain('✓ RDY')
+  await ui.unmount()
+})
+
+test('w sits on the bots heading and counts the bot PRs not reviewed yet', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect((await ui.find({ key: 'review-bots' }))?.props.label).toBe('AI review 1 not reviewed')
+  await ui.unmount()
+})
+
+test('after the fix, you can look at its diff first; c then pushes it', async ($, on) => {
+  const s = stubs(on, { answer: 'Fix with Claude (asks before push)', git: fixGit(), locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-ci' })
+  expect(s.questions.at(-1)).toContain('✗ rspec')
+  expect(s.questions.at(-1)).toContain('Nothing is pushed until you say so')
+  // While Claude works, the row says so
+  expect(await lineOf(ui, 21)).toContain('⟳ WIP')
+  await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'fix3' })
+  s.setAnswer('Show the diff first')
+  await $.turn.complete({ turnId: 'fix3', answer: '' } as never)
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.choices.at(-1)).toEqual(['Cancel', 'Push', 'Show the diff first'])
+  expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'diff', `${HEAD}..HEAD`])
+  expect(await ui.find({ type: 'Text', text: /^⇡ the fix, not pushed yet/ })).toBeDefined()
+  expect(s.calls.some((c) => c.includes('push'))).toBe(false)
+  // Back in the list it waits as ⇡ PUSH; c offers the push
+  await ui.press({ key: 'diff-close' })
+  expect(await lineOf(ui, 21)).toContain('⇡ PUSH')
+  s.setAnswer('Push 1 commit')
+  await ui.press({ key: 'act-ci' })
+  expect(s.questions.at(-2)).toContain('A fix of #21 waits')
   await ui.unmount()
 })
