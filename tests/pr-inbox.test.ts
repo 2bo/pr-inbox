@@ -2152,3 +2152,61 @@ test('h and l move to the tab on the left and right', async ($, on) => {
   expect(String((await ui.find({ key: 'tab-review' }))?.props.label)).toContain('◆')
   await ui.unmount()
 })
+
+// ---- CI from the latest run of each check ----
+
+const run = (name: string, conclusion: string | null, startedAt: string, workflow = 'CI', status = 'COMPLETED') => ({
+  __typename: 'CheckRun',
+  name,
+  status,
+  conclusion,
+  startedAt,
+  detailsUrl: `https://github.com/acme/app/actions/runs/${startedAt.slice(11, 13)}`,
+  checkSuite: { workflowRun: { workflow: { name: workflow } } },
+})
+const withChecks = (over: Record<string, unknown>, nodes: unknown[]) =>
+  pr({ ...over, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'FAILURE', contexts: { nodes } } } }] } })
+
+test('a check that failed and then passed on a re-run counts as passed', async ($, on) => {
+  const rerun = withChecks({ number: 41, url: 'https://github.com/acme/app/pull/41', reviewDecision: 'APPROVED' }, [
+    run('test', 'FAILURE', '2026-10-02T01:00:00Z'),
+    run('test', 'SUCCESS', '2026-10-02T02:00:00Z'),
+    // The same job name in another workflow is another check
+    run('test', 'SUCCESS', '2026-10-02T01:30:00Z', 'Nightly'),
+  ])
+  const s = stubs(on, {
+    graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [rerun] } } }),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  // Ready to merge, with no failed check listed
+  expect(await ui.find({ key: 'act-merge' })).toBeDefined()
+  expect(await lineOf(ui, 41)).not.toContain('"✗ "')
+  await ui.unmount()
+})
+
+test('the latest run decides: a pass then a failure is a failure, and a run in progress is pending', async ($, on) => {
+  const failed = withChecks({ number: 42, url: 'https://github.com/acme/app/pull/42', reviewDecision: 'APPROVED' }, [
+    run('lint', 'SUCCESS', '2026-10-02T01:00:00Z'),
+    run('lint', 'FAILURE', '2026-10-02T02:00:00Z'),
+  ])
+  const pending = withChecks({ number: 43, url: 'https://github.com/acme/app/pull/43', reviewDecision: 'APPROVED' }, [
+    run('build', 'FAILURE', '2026-10-02T01:00:00Z'),
+    run('build', null, '2026-10-02T02:00:00Z', 'CI', 'IN_PROGRESS'),
+  ])
+  const s = stubs(on, {
+    graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [failed, pending] } } }),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await isSelected(ui, 42)).toBe(true)
+  expect(await lineOf(ui, 42)).toContain('lint')
+  expect(await ui.find({ key: 'act-merge' })).toBeUndefined()
+  await ui.press({ key: 'nav-down' })
+  expect(await isSelected(ui, 43)).toBe(true)
+  expect(await lineOf(ui, 43)).not.toContain('"✗ "')
+  expect(await ui.find({ key: 'act-merge' })).toBeUndefined()
+  await ui.unmount()
+})

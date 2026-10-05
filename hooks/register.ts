@@ -33,8 +33,16 @@ type PR = {
 
 // One CI check: a CheckRun (GitHub Actions and the like) or a legacy commit status (StatusContext)
 type CheckContext =
-  | { __typename: 'CheckRun'; name: string; conclusion: string | null; detailsUrl: string | null }
-  | { __typename: 'StatusContext'; context: string; state: string; targetUrl: string | null }
+  | {
+      __typename: 'CheckRun'
+      name: string
+      status?: string
+      conclusion: string | null
+      startedAt?: string | null
+      detailsUrl: string | null
+      checkSuite?: { workflowRun: { workflow: { name: string } | null } | null } | null
+    }
+  | { __typename: 'StatusContext'; context: string; state: string; createdAt?: string | null; targetUrl: string | null }
   | { __typename: string }
 
 type Group = 'humans' | 'bots' | 'action' | 'ready' | 'waiting' | 'stale' | 'snoozedReview' | 'snoozedMine'
@@ -153,7 +161,7 @@ const INDENT = 2
 
 const QUERY = `query($review: String!, $mine: String!) {
   viewer { login }
-  review: search(query: $review, type: ISSUE, first: 50) { nodes { ...pr ...requested } }
+  review: search(query: $review, type: ISSUE, first: 50) { nodes { ...pr ...checks ...requested } }
   mine: search(query: $mine, type: ISSUE, first: 50) { nodes { ...pr ...checks } }
 }
 fragment pr on PullRequest {
@@ -166,8 +174,8 @@ fragment pr on PullRequest {
 fragment checks on PullRequest {
   commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
     __typename
-    ... on CheckRun { name conclusion detailsUrl }
-    ... on StatusContext { context state targetUrl }
+    ... on CheckRun { name status conclusion startedAt detailsUrl checkSuite { workflowRun { workflow { name } } } }
+    ... on StatusContext { context state createdAt targetUrl }
   } } } } } }
 }
 fragment requested on PullRequest {
@@ -384,8 +392,47 @@ function cleanPr(pr: PR): PR {
   }
 }
 
+// The CI state from the latest run of each check: a check re-run, or run again by another event, counts once, as it
+// last ended. GitHub's own rollup counts the old failures too. Falls back to the rollup when no checks were fetched
 function ciState(pr: PR): string {
-  return pr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? 'NONE'
+  const rollup = pr.commits?.nodes?.[0]?.commit?.statusCheckRollup
+  const checks = latestChecks(pr)
+  if (checks.length === 0) return rollup?.contexts?.nodes?.length === 0 ? 'NONE' : (rollup?.state ?? 'NONE')
+  if (checks.some((c) => c.state === 'failed')) return 'FAILURE'
+  if (checks.some((c) => c.state === 'pending')) return 'PENDING'
+  return 'SUCCESS'
+}
+
+type Check = { name: string; url?: string; state: 'failed' | 'pending' | 'passed' }
+
+// Each check once: the latest run per workflow and check name (CheckRun), per context (commit status)
+function latestChecks(pr: PR): Check[] {
+  const contexts = pr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes ?? []
+  const latest = new Map<string, { at: string; check: Check }>()
+  for (const c of contexts) {
+    if (!c) continue
+    let key: string
+    let at: string
+    let check: Check
+    if (c.__typename === 'CheckRun' && 'name' in c) {
+      const workflow = c.checkSuite?.workflowRun?.workflow?.name ?? ''
+      key = `run:${workflow}/${c.name}`
+      at = c.startedAt ?? ''
+      const done = c.status === undefined || c.status === 'COMPLETED'
+      const state = !done ? 'pending' : FAILED_CONCLUSIONS.has(c.conclusion ?? '') ? 'failed' : 'passed'
+      const href = safeHref(c.detailsUrl)
+      check = { name: clean(c.name) || '(unnamed)', state, ...(href ? { url: href } : {}) }
+    } else if (c.__typename === 'StatusContext' && 'context' in c) {
+      key = `status:${c.context}`
+      at = c.createdAt ?? ''
+      const state = c.state === 'FAILURE' || c.state === 'ERROR' ? 'failed' : c.state === 'SUCCESS' ? 'passed' : 'pending'
+      const href = safeHref(c.targetUrl)
+      check = { name: clean(c.context) || '(unnamed)', state, ...(href ? { url: href } : {}) }
+    } else continue
+    const seen = latest.get(key)
+    if (!seen || at >= seen.at) latest.set(key, { at, check })
+  }
+  return [...latest.values()].map((x) => x.check)
 }
 
 function isBot(pr: PR): boolean {
@@ -492,24 +539,9 @@ function elapsed(iso: string, now: number): string {
 const FAILED_CONCLUSIONS = new Set(['FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE', 'ACTION_REQUIRED'])
 
 function failedChecks(pr: PR): { name: string; url?: string }[] {
-  const contexts = pr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes ?? []
-  const out: { name: string; url?: string }[] = []
-  for (const c of contexts) {
-    if (!c) continue
-    let name: string | undefined
-    let url: string | null | undefined
-    if ('name' in c && c.__typename === 'CheckRun' && FAILED_CONCLUSIONS.has(c.conclusion ?? '')) {
-      name = c.name
-      url = c.detailsUrl
-    } else if ('context' in c && c.__typename === 'StatusContext' && (c.state === 'FAILURE' || c.state === 'ERROR')) {
-      name = c.context
-      url = c.targetUrl
-    }
-    if (name === undefined) continue
-    const href = safeHref(url)
-    out.push({ name: clean(name) || '(unnamed)', ...(href ? { url: href } : {}) })
-  }
-  return out
+  return latestChecks(pr)
+    .filter((c) => c.state === 'failed')
+    .map(({ name, url }) => ({ name, ...(url ? { url } : {}) }))
 }
 
 // Max failed checks listed under a PR
