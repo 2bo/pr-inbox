@@ -16,7 +16,7 @@
     "stale_days": {
       "type": "number",
       "title": "Stale after (days)",
-      "description": "Your PRs not updated for this many days are folded under Stale",
+      "description": "Your PRs not updated for this many days are listed under Stale",
       "default": 30,
       "min": 1,
       "max": 365

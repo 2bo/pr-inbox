@@ -68,6 +68,22 @@ const REVIEW = [
   }),
 ]
 
+// PRs by others that you approved, not merged yet: one waiting on others, one that got commits after your approval
+const mineApproval = (number, hours) => ({
+  latestReviews: { nodes: [{ author: { login: 'you' }, state: 'APPROVED', submittedAt: ago(hours), commit: { oid: oid(number) } }] },
+})
+const APPROVED = [
+  pr('billing-api', 1270, 'Add CSV export for invoices', 'mtanaka', { ...mineApproval(1270, 30) }),
+  pr('infra', 91, 'Raise the worker pool to 12', 'rkumar', {
+    ...mineApproval(9100, 50),
+    reviewDecision: 'APPROVED',
+  }),
+  pr('storefront', 484, 'chore(deps): bump rack from 3.0.9 to 3.1.8', 'dependabot[bot]', {
+    ...mineApproval(484, 20),
+    reviewDecision: 'APPROVED',
+  }),
+]
+
 const MINE = [
   pr('storefront', 475, 'Move session storage to Redis', 'you', {
     additions: 188,
@@ -306,7 +322,7 @@ const flag = (name) => {
 }
 
 if (args[0] === 'api' && args[1] === 'graphql') {
-  out({ data: { viewer: { login: 'you' }, review: { nodes: REVIEW }, mine: { nodes: MINE } } })
+  out({ data: { viewer: { login: 'you' }, review: { nodes: REVIEW }, mine: { nodes: MINE }, approved: { nodes: APPROVED } } })
 } else if (args[0] === 'api' && args.includes('event=APPROVE')) {
   out({ state: 'APPROVED' })
 } else if (args[0] === 'api') {

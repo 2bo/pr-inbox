@@ -27,6 +27,10 @@ type PR = {
   reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN'
   commits: { nodes: { commit: { statusCheckRollup: { state: string; contexts?: { nodes: (CheckContext | null)[] } } | null } }[] }
+  // Only on PRs you reviewed: each reviewer's latest review
+  latestReviews?: {
+    nodes: ({ author: { login: string } | null; state: string; submittedAt: string | null; commit: { oid: string } | null } | null)[]
+  }
   // Only on review requests
   timelineItems?: { nodes: ({ createdAt: string; requestedReviewer: { __typename: string; login?: string } | null } | null)[] }
 }
@@ -45,7 +49,7 @@ type CheckContext =
   | { __typename: 'StatusContext'; context: string; state: string; createdAt?: string | null; targetUrl: string | null }
   | { __typename: string }
 
-type Group = 'humans' | 'bots' | 'action' | 'ready' | 'waiting' | 'stale' | 'snoozedReview' | 'snoozedMine'
+type Group = 'humans' | 'bots' | 'approved' | 'action' | 'ready' | 'waiting' | 'stale' | 'snoozedReview' | 'snoozedMine'
 
 // When review requests are analyzed: from startup (auto), once the pane has been opened in this session, or never
 type AnalysisMode = 'auto' | 'when opened' | 'off'
@@ -159,10 +163,14 @@ const MAX_ANALYSES_PER_HOUR = 30
 // Indent for the summary and detail lines
 const INDENT = 2
 
-const QUERY = `query($review: String!, $mine: String!) {
+const QUERY = `query($review: String!, $mine: String!, $approved: String!) {
   viewer { login }
   review: search(query: $review, type: ISSUE, first: 50) { nodes { ...pr ...checks ...requested } }
   mine: search(query: $mine, type: ISSUE, first: 50) { nodes { ...pr ...checks } }
+  approved: search(query: $approved, type: ISSUE, first: 50) { nodes { ...pr ...checks ...reviewed } }
+}
+fragment reviewed on PullRequest {
+  latestReviews(first: 30) { nodes { author { login } state submittedAt commit { oid } } }
 }
 fragment pr on PullRequest {
   number title url isDraft createdAt updatedAt headRefOid authorAssociation isCrossRepository additions deletions
@@ -293,7 +301,6 @@ function labels(): Labels {
 
 // Pane state
 let tab: 'review' | 'mine' = 'review'
-let showBots = false
 // The PR whose details (the AI review's findings) are open, the key help, and snoozed PRs shown
 let expanded = ''
 // How far the details panel is paged down (n), for which PR and which view; another PR or view starts at the top
@@ -307,17 +314,14 @@ let showHelp = false
 let showSnoozed = false
 // Snoozed PRs, hidden until they are updated, and the update each PR was last seen at (url → updatedAt), kept in $.store
 let snoozed: Record<string, string> = {}
-// PRs approved from here in the last day, shown under To review: GitHub drops the review request once you approve
-type Approved = { url: string; label: string; title: string; at: number }
-let approvedRecently: Approved[] = []
-const APPROVED_FOR = DAY
 let seen: Record<string, string> | undefined
-let showStale = false
 let selected = ''
 
 // Fetch results
 let viewer = ''
 let review: PR[] = []
+// Open PRs by others whose latest review from you is an approval: not merged yet, and why
+let approved: PR[] = []
 let mine: PR[] = []
 let fetchedAt = 0
 let loading = false
@@ -477,17 +481,61 @@ function isUnread(pr: PR): boolean {
 }
 
 function groups(now: number): Record<Group, PR[]> {
-  const g: Record<Group, PR[]> = { humans: [], bots: [], action: [], ready: [], waiting: [], stale: [], snoozedReview: [], snoozedMine: [] }
+  const g: Record<Group, PR[]> = {
+    humans: [],
+    bots: [],
+    approved: [],
+    action: [],
+    ready: [],
+    waiting: [],
+    stale: [],
+    snoozedReview: [],
+    snoozedMine: [],
+  }
   // Longest-waiting first
   for (const pr of [...review].sort(byRequestedAt)) {
     if (isSnoozed(pr)) g.snoozedReview.push(pr)
     else (isBot(pr) ? g.bots : g.humans).push(pr)
+  }
+  // Those that need you again (new commits) first, then the longest since your approval
+  const since = (p: PR) => Date.parse(myApproval(p)?.at ?? p.updatedAt)
+  for (const pr of [...approved].sort((a, b) => Number(approvalOutdated(b)) - Number(approvalOutdated(a)) || since(a) - since(b))) {
+    if (isSnoozed(pr)) g.snoozedReview.push(pr)
+    else g.approved.push(pr)
   }
   for (const pr of mine) {
     if (isSnoozed(pr)) g.snoozedMine.push(pr)
     else g[classify(pr, now).group].push(pr)
   }
   return g
+}
+
+// Your latest approval of a PR, when your latest review of it is one
+function myApproval(pr: PR): { oid: string; at: string } | undefined {
+  const mineReview = (pr.latestReviews?.nodes ?? []).find((r) => r?.author?.login === viewer)
+  if (mineReview?.state !== 'APPROVED') return undefined
+  return { oid: mineReview.commit?.oid ?? '', at: mineReview.submittedAt ?? pr.updatedAt }
+}
+
+// Commits came after your approval: it may need you again
+function approvalOutdated(pr: PR): boolean {
+  const a = myApproval(pr)
+  return a !== undefined && a.oid !== '' && a.oid !== pr.headRefOid
+}
+
+// Why a PR you approved is still open
+function approvedWhy(pr: PR, now: number): string {
+  if (approvalOutdated(pr)) return 'new commits since your approval'
+  const reasons = classify(pr, now).reasons
+  if (reasons.length > 0) return reasons.join(', ')
+  const ci = ciState(pr)
+  if (ci === 'PENDING' || ci === 'EXPECTED') return 'CI running'
+  if (pr.reviewDecision === 'REVIEW_REQUIRED') return 'waiting other reviews'
+  return 'ready to merge'
+}
+
+function isApproved(pr: PR): boolean {
+  return approved.some((p) => p.url === pr.url)
 }
 
 function analysisOf(pr: PR): Analysis | undefined {
@@ -510,6 +558,8 @@ function summary(g: Record<Group, PR[]>): string {
     ...part(high, `▲${high} high`),
     ...part(reviewing, `⠿ AI ${reviewing}${botBatch ? ` (bots ${botBatch.done}/${botBatch.total})` : ''}`),
     ...part(passed, `☑${passed} to approve`),
+    // Approved by you, then changed: worth another look
+    ...part(g.approved.filter(approvalOutdated).length, `⚠${g.approved.filter(approvalOutdated).length} re-review`),
   ]
   const right = [
     ...part(g.action.length, `✗${g.action.length} fix`),
@@ -614,15 +664,15 @@ function wrappedLines(text: string, columns: number): number {
 }
 
 function findPr(url: string): PR | undefined {
-  return review.find((p) => p.url === url) ?? mine.find((p) => p.url === url)
+  return review.find((p) => p.url === url) ?? approved.find((p) => p.url === url) ?? mine.find((p) => p.url === url)
 }
 
 // PRs visible on the current tab, in screen order (what j/k move through)
 function visibleRows(g: Record<Group, PR[]>): PR[] {
   const rows =
     tab === 'review'
-      ? [...g.humans, ...(showBots ? g.bots : []), ...(showSnoozed ? g.snoozedReview : [])]
-      : [...g.action, ...g.ready, ...g.waiting, ...(showStale ? g.stale : []), ...(showSnoozed ? g.snoozedMine : [])]
+      ? [...g.humans, ...g.bots, ...g.approved, ...(showSnoozed ? g.snoozedReview : [])]
+      : [...g.action, ...g.ready, ...g.waiting, ...g.stale, ...(showSnoozed ? g.snoozedMine : [])]
   return rows.filter(matchesFilter)
 }
 
@@ -670,6 +720,7 @@ async function fetchAll($: EngineInterface): Promise<void> {
   try {
     const reviewQuery = searchQuery('review-requested:@me')
     const mineQuery = searchQuery('author:@me')
+    const approvedQuery = searchQuery('reviewed-by:@me -author:@me')
     const r = await $.process.run([
       'gh',
       'api',
@@ -680,17 +731,25 @@ async function fetchAll($: EngineInterface): Promise<void> {
       `review=${reviewQuery}`,
       '-f',
       `mine=${mineQuery}`,
+      '-f',
+      `approved=${approvedQuery}`,
     ])
     if (r.exitCode !== 0) throw new Error(r.stderr.trim() || `gh exited with code ${r.exitCode}`)
     const data = JSON.parse(r.stdout).data as {
       viewer: { login: string }
       review: { nodes: (PR | null)[] }
       mine: { nodes: (PR | null)[] }
+      approved?: { nodes: (PR | null)[] }
     }
     viewer = data.viewer?.login ?? ''
     // Search results can contain nulls for PRs we have no access to
     review = data.review.nodes.filter((n): n is PR => Boolean(n?.url)).map(cleanPr)
     mine = data.mine.nodes.filter((n): n is PR => Boolean(n?.url)).map(cleanPr)
+    // Asked again for a review, a PR is a review request, not an approved one
+    approved = (data.approved?.nodes ?? [])
+      .filter((n): n is PR => Boolean(n?.url))
+      .map(cleanPr)
+      .filter((p) => myApproval(p) !== undefined && !review.some((r) => r.url === p.url))
     fetchedAt = await $.clock.now()
     error = ''
     await loadInboxState($)
@@ -716,7 +775,7 @@ function friendlyError(message: string): string {
 
 // Snoozes, what was seen, and the stored AI reviews of the current commits. Entries of closed PRs are dropped
 async function loadInboxState($: EngineInterface): Promise<void> {
-  const open = new Map([...review, ...mine].map((p) => [p.url, p]))
+  const open = new Map([...review, ...approved, ...mine].map((p) => [p.url, p]))
   const asMap = (x: unknown): Record<string, string> =>
     x && typeof x === 'object' ? Object.fromEntries(Object.entries(x).filter(([, v]) => typeof v === 'string')) : {}
   // A snooze ends when the PR is updated
@@ -726,21 +785,13 @@ async function loadInboxState($: EngineInterface): Promise<void> {
   // The first time, everything already open counts as seen
   seen = stored === undefined ? Object.fromEntries([...open.values()].map((p) => [p.url, p.updatedAt])) : asMap(stored)
   seen = Object.fromEntries(Object.entries(seen).filter(([url]) => open.has(url)))
-  const now = await $.clock.now()
-  const keptApproved = (await $.store.get('approved')) as unknown
-  approvedRecently = (Array.isArray(keptApproved) ? keptApproved : [])
-    .filter(
-      (x): x is Approved =>
-        typeof x?.url === 'string' && typeof x?.label === 'string' && typeof x?.title === 'string' && typeof x?.at === 'number',
-    )
-    .filter((x) => now - x.at < APPROVED_FOR)
-    .map((x) => ({ ...x, label: clean(x.label), title: clean(x.title) }))
-  await $.store.set('approved', approvedRecently)
+  // The approvals pr-inbox used to keep itself: GitHub lists them now
+  await $.store.delete('approved')
   await $.store.set('seen', seen)
   for (const key of await $.store.keys()) {
     if (!key.startsWith('review:')) continue
     const url = key.slice('review:'.length)
-    const pr = review.find((p) => p.url === url)
+    const pr = review.find((p) => p.url === url) ?? approved.find((p) => p.url === url)
     const saved = asStoredReview(await $.store.get(key))
     if (!pr || !saved || saved.head !== pr.headRefOid) {
       await $.store.delete(key)
@@ -1105,13 +1156,18 @@ async function postApproval($: EngineInterface, pr: PR, how: string): Promise<bo
     return false
   }
   const repoLabel = `${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number}`
-  $.ui.toast(`✦ approved ${repoLabel} @${sha} · moved to Approved recently`, { timeoutMs: 6000 })
-  const label = `${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number}`
-  approvedRecently = [
-    { url: pr.url, label, title: pr.title, at: await $.clock.now() },
-    ...approvedRecently.filter((x) => x.url !== pr.url),
-  ].slice(0, 10)
-  await $.store.set('approved', approvedRecently)
+  $.ui.toast(`✦ approved ${repoLabel} @${sha} · moved to approved by you`, { timeoutMs: 6000 })
+  // Into the approved section now; the next fetch confirms it from GitHub
+  const at = new Date(await $.clock.now()).toISOString()
+  const others = (pr.latestReviews?.nodes ?? []).filter((r) => r?.author?.login !== viewer)
+  const nowApproved: PR = {
+    ...pr,
+    latestReviews: {
+      nodes: [...others, { author: { login: viewer }, state: 'APPROVED', submittedAt: at, commit: { oid: pr.headRefOid } }],
+    },
+  }
+  review = review.filter((p) => p.url !== pr.url)
+  approved = [nowApproved, ...approved.filter((p) => p.url !== pr.url)]
   // Who decided, and how, stays in the transcript
   $.ui.log(`pr-inbox approved ${pr.repository.nameWithOwner}#${pr.number} at ${sha}: ${how}`)
   await refresh($)
@@ -2312,6 +2368,8 @@ function sweep(n: number): string[] {
 
 // Risk for a review request (from the analysis), state for one of my PRs; always six columns wide
 function badgeOf(pr: PR): Cell {
+  if (isApproved(pr))
+    return approvalOutdated(pr) ? { text: '⚠ NEW ', color: NEON.yellow, bold: true } : { text: '✓ APPR', color: NEON.green }
   if (tab === 'review') {
     if (cfg.analysis === 'off') return { text: '      ' }
     const a = analysisOf(pr)
@@ -2410,7 +2468,6 @@ async function reviewAllBots($: EngineInterface): Promise<void> {
     $.ui.toast('Every bot PR already has an AI review of its current commit')
     return
   }
-  showBots = true
   botBatch = { total: targets.length, done: 0, current: '', stop: false }
   for (const pr of targets) {
     if (botBatch.stop) break
@@ -2953,10 +3010,11 @@ export function register(on: On, options: PluginOptions) {
     if (pr) void markSeen($, pr)
     if (pr) {
       const isReview = review.some((p) => p.url === pr.url)
+      const isMine = mine.some((p) => p.url === pr.url)
       const actions: El[] = [
         Button({
           key: 'act-explain',
-          label: isReview ? 'explain' : 'diagnose',
+          label: isMine ? 'diagnose' : 'explain',
           hotkey: 'e',
           plain: true,
           onPress: () => {
@@ -2982,7 +3040,10 @@ export function register(on: On, options: PluginOptions) {
           }),
         )
       }
-      if (!isReview) {
+      // Approved before and changed since: approve again
+      if (isApproved(pr) && approvalOutdated(pr))
+        actions.push(Button({ key: 'act-approve', label: 'approve again', hotkey: 'a', plain: true, onPress: () => approve($, pr) }))
+      if (isMine) {
         const group = classify(pr, now).group
         if (group === 'ready')
           actions.push(Button({ key: 'act-merge', label: 'merge', hotkey: 'm', plain: true, onPress: () => mergePr($, pr) }))
@@ -3006,17 +3067,22 @@ export function register(on: On, options: PluginOptions) {
           plain: true,
           onPress: () => openDiff($, pr),
         }),
-        Button({
-          key: 'act-details',
-          label: expanded === pr.url ? 'less' : 'info',
-          dimColor: true,
-          hotkey: 'i',
-          plain: true,
-          onPress: () => {
-            expanded = expanded === pr.url ? '' : pr.url
-            redraw()
-          },
-        }),
+        // The AI review's findings: for review requests, and for approved PRs that had a review
+        ...(isReview || (isApproved(pr) && reviews.has(pr.url))
+          ? [
+              Button({
+                key: 'act-details',
+                label: expanded === pr.url ? 'less' : 'info',
+                dimColor: true,
+                hotkey: 'i',
+                plain: true,
+                onPress: () => {
+                  expanded = expanded === pr.url ? '' : pr.url
+                  redraw()
+                },
+              }),
+            ]
+          : []),
         Button({
           key: 'act-snooze',
           label: isSnoozed(pr) ? 'unsnooze' : 'snooze',
@@ -3056,6 +3122,7 @@ export function register(on: On, options: PluginOptions) {
 
     // List: title row, summary row (review requests only), status row
     const icon = (p: PR): string => {
+      if (isApproved(p)) return approvalOutdated(p) ? '⚠' : '✓'
       if (tab === 'review') return isBot(p) ? '⚙' : '◇'
       return badgeOf(p).text.slice(0, 1)
     }
@@ -3082,6 +3149,11 @@ export function register(on: On, options: PluginOptions) {
     }
 
     const metaLine = (p: PR): string => {
+      if (isApproved(p)) {
+        const a = myApproval(p)
+        const when = a ? `approved by you ${elapsed(a.at, now)} ago${a.oid ? ` at ${a.oid.slice(0, 7)}` : ''}` : 'approved by you'
+        return `@${p.author?.login ?? '?'}  ${when}  ${approvedWhy(p, now)}  ${ciMark(p)}  +${p.additions} -${p.deletions}`
+      }
       if (tab === 'review') {
         const a = analysisOf(p)
         const reason = a && 'reason' in a && a.reason ? `  ${L.why}: ${a.reason}` : ''
@@ -3206,7 +3278,7 @@ export function register(on: On, options: PluginOptions) {
         children.push(el)
         heights.push(lines)
       }
-      if (tab === 'review' && cfg.analysis !== 'off') {
+      if (tab === 'review' && !isApproved(p) && cfg.analysis !== 'off') {
         // Only the label carries the color; the sentence stays plain, so it reads calmly
         const a = analysisLine(p)
         const an = analysisOf(p)
@@ -3347,10 +3419,10 @@ export function register(on: On, options: PluginOptions) {
       const label = shortLabel(`${repo}#${p.number}`, prWidth)
       const prLink = safeHref(p.url)
       const b = badgeOf(p)
-      const since = tab === 'review' ? requestedAt(p) : p.updatedAt
+      const since = isApproved(p) ? (myApproval(p)?.at ?? p.updatedAt) : tab === 'review' ? requestedAt(p) : p.updatedAt
       const h = heat(since, now)
       const ci = ciGlyph(p)
-      const ai = tab === 'review' ? aiGlyph(p) : { text: ' ', color: undefined }
+      const ai = tab === 'review' && !isApproved(p) ? aiGlyph(p) : { text: ' ', color: undefined }
       const right = ` ${h.filled}${h.empty}${short(since, now).padStart(4)}  ${ci.text}  ${ai.text}`
       const lead = `${isSelected ? '▸' : ' '}${isUnread(p) ? '●' : ' '}${isBot(p) ? '⚙' : ' '}`
       const titleWidth = Math.max(8, columns - textWidth(lead) - 1 - textWidth(b.text) - 1 - prWidth - 1 - textWidth(right))
@@ -3384,16 +3456,8 @@ export function register(on: On, options: PluginOptions) {
       })
     }
 
-    // Folded groups go on the last rows
+    // Keys for whole groups go on the last rows
     const folds: El[] = []
-    if (tab === 'review' && g.bots.length > 0) {
-      folds.push(
-        small('fold-bots', `${showBots ? 'Hide' : 'Show'} ${plural(g.bots.length, 'bot PR')} ⚙`, 'b', () => {
-          showBots = !showBots
-          redraw()
-        }),
-      )
-    }
     // AI review every bot PR in turn: those with no review of their current commit yet
     const unreviewedBots = g.bots.filter((p) => !reviewOfHead(p) && reviews.get(p.url)?.state !== 'running').length
     if (tab === 'review' && (unreviewedBots > 0 || botBatch)) {
@@ -3425,20 +3489,21 @@ export function register(on: On, options: PluginOptions) {
         ),
       )
     }
-    if (tab === 'mine' && g.stale.length > 0) {
-      folds.push(
-        small('fold-stale', `${showStale ? 'Hide' : 'Show'} ${plural(g.stale.length, 'stale PR')} (${cfg.stale_days}+ days) ◇`, 's', () => {
-          showStale = !showStale
-          redraw()
-        }),
-      )
-    }
 
     // The details of the selected PR take what they need (up to half the pane); the list gets the rest, as a window
     // around the selection when it does not fit
     const selectedPr = rows.find((p) => p.url === selected)
-    const recentRows = tab === 'review' ? Math.min(3, approvedRecently.filter((x) => !review.some((p) => p.url === x.url)).length) : 0
-    const chrome = topLines + 2 + 1 + (selectedPr ? 1 : 0) + (folds.length > 0 ? 1 : 0) + (recentRows ? recentRows + 1 : 0) + footerLines
+    // Each group after the first opens with a heading row: bots, approved by you, stale, snoozed
+    const sectionOf = (p: PR): string => {
+      if (isSnoozed(p)) return `⏸ snoozed ${(tab === 'review' ? g.snoozedReview : g.snoozedMine).length}`
+      if (tab === 'review') {
+        if (isApproved(p)) return `✓ approved by you, not merged ${g.approved.length}`
+        return isBot(p) ? `⚙ bots ${g.bots.length}` : ''
+      }
+      return classify(p, now).group === 'stale' ? `◇ stale ${g.stale.length} (${cfg.stale_days}+ days)` : ''
+    }
+    const headings = new Set(rows.map(sectionOf).filter(Boolean)).size
+    const chrome = topLines + 2 + 1 + (selectedPr ? 1 : 0) + (folds.length > 0 ? 1 : 0) + headings + footerLines
     // The list keeps at least three rows (and its "more" line); the panel gets the rest, and the keys stay on screen
     const listMin = Math.min(rows.length, 3) + (rows.length > 3 ? 1 : 0)
     const built = selectedPr ? panelOf(selectedPr, Math.max(2, paneLimit - chrome - listMin)) : undefined
@@ -3477,7 +3542,8 @@ export function register(on: On, options: PluginOptions) {
         ['f', 'filter by repository, number, title or @author (Enter keeps it; empty clears)'],
         ['d', 'read the PR: description, then the diff file by file (h / l pages, f list of pages, q back)'],
         ['o', 'open in the browser'],
-        ['b / s / z', 'show or hide bot PRs / stale PRs / snoozed PRs'],
+        ['z', 'show or hide snoozed PRs'],
+        ['a (again)', 'on a PR you approved that got new commits (⚠ NEW): approve the new commit'],
         ['r', 'fetch again'],
         ['Esc', 'back to the prompt; the pane stays open (ctrl+x tab comes back)'],
         ['Ctrl+X Tab', 'move between the prompt and this pane (keys reach the pane only while it has the focus)'],
@@ -3499,6 +3565,7 @@ export function register(on: On, options: PluginOptions) {
         ['● ⚙', 'updated since you last selected it · a bot PR', NEON.pink],
         ['▲ ◆ ○', 'risk from the analysis: high · medium · low', NEON.yellow],
         ['✗ ✓ … ◇ ⏸', 'your PRs: fix · ready to merge · waiting · stale · snoozed', NEON.green],
+        ['✓ ⚠', 'approved by you: not merged yet · new commits since', NEON.green],
         ['▰▰▱', 'how long it has waited, filling up to red', NEON.red],
       ]
       const helpRows = [
@@ -3515,7 +3582,19 @@ export function register(on: On, options: PluginOptions) {
       return Box({ flexDirection: 'column', children: [...top, rule(), ...helpRows] })
     }
 
-    const list: El[] = shown.map(rowOf)
+    const list: El[] = []
+    let section = ''
+    for (const [i, p] of shown.entries()) {
+      const name = sectionOf(p)
+      if (name !== section || (i === 0 && name)) {
+        if (name) {
+          const label = `── ${name} `
+          list.push(Text({ color: NEON.muted, children: [label + '─'.repeat(Math.max(0, columns - textWidth(label)))] }))
+        }
+        section = name
+      }
+      list.push(rowOf(p))
+    }
     if (rows.length === 0) {
       if (!fetchedAt) {
         // Nothing fetched yet: say so, instead of an empty or celebrating list
@@ -3539,11 +3618,7 @@ export function register(on: On, options: PluginOptions) {
           }),
           Text({
             dimColor: true,
-            children: [
-              g.bots.length
-                ? `  no one is waiting on you · ${plural(g.bots.length, 'bot PR')} behind b`
-                : '  no one is waiting on you. go ship something',
-            ],
+            children: ['  no one is waiting on you. go ship something'],
           }),
         )
       } else
@@ -3559,32 +3634,6 @@ export function register(on: On, options: PluginOptions) {
             ],
           }),
         )
-    }
-
-    // Approved from here in the last day: they left the list, so say where they went
-    const recent: El[] = []
-    if (tab === 'review') {
-      const shownRecent = approvedRecently.filter((x) => !review.some((p) => p.url === x.url)).slice(0, 3)
-      if (shownRecent.length > 0) recent.push(Text({ dimColor: true, children: ['Approved recently (no longer requested):'] }))
-      for (const x of shownRecent) {
-        const href = safeHref(x.url)
-        recent.push(
-          Box({
-            key: `approved-${x.url}`,
-            flexDirection: 'row',
-            paddingLeft: 2,
-            children: [
-              Text({ color: NEON.green, children: ['✓ '] }),
-              href ? link(href, x.label) : Text({ children: [x.label] }),
-              Text({
-                dimColor: true,
-                wrap: 'truncate-end',
-                children: [fit(` ${x.title}  ${age(new Date(x.at).toISOString(), now)}`, Math.max(10, columns - textWidth(x.label) - 4))],
-              }),
-            ],
-          }),
-        )
-      }
     }
 
     const columnsHead = Text({
@@ -3605,7 +3654,6 @@ export function register(on: On, options: PluginOptions) {
       ...list,
       ...more,
       ...(panel ? [rule(), panel] : []),
-      ...recent,
       ...foldRow,
       rule(),
       ...footer,
@@ -3615,10 +3663,9 @@ export function register(on: On, options: PluginOptions) {
       topLines +
       2 +
       (rows.length > 0 ? 1 : 0) +
-      (rows.length === 0 ? 2 : shown.length) +
+      (rows.length === 0 ? 2 : list.length) +
       more.length +
       (panel ? 1 + panelHeight : 0) +
-      recent.length +
       foldRow.length +
       footerLines
     return Box({ flexDirection: 'column', children: tree })

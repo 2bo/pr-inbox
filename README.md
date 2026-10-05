@@ -4,8 +4,8 @@ A Claude Code mod that turns your review requests and your own pull requests int
 
 - A status line under the prompt keeps the counts in view (`review 3 ⚙2 · ▲1 high │ mine ✗1 fix · ✓1 ship · …2 wait`)
 - `/pr-inbox` opens a pane in the spirit of lazygit and gh-dash: one line per PR (risk or state, how long it has waited as a heat bar, CI, AI review), the selected PR's details under the list, and the keys on the bottom line. Two tabs
-  - **To review**: review requests, the longest-waiting first. Each PR gets an AI summary, a risk level (low / medium / high) and its impact on release (visible to users / not visible / cannot tell), taking feature flags into account
-  - **My PRs**: needs action (changes requested, CI failed, conflict) → ready to merge → waiting for review → stale. Failed CI checks are listed with links to their runs
+  - **To review**: review requests, the longest-waiting first, then those from bots under their own heading. Each PR gets an AI summary, a risk level (low / medium / high) and its impact on release (visible to users / not visible / cannot tell), taking feature flags into account. Below them, **approved by you, not merged**: PRs whose latest review from you is an approval, with why they are still open (waiting on other reviews, CI, conflict, ready to merge); those that got commits after your approval come first, as ⚠ NEW, and `a` approves the new commit
+  - **My PRs**: needs action (changes requested, CI failed, conflict) → ready to merge → waiting for review → stale (under its heading). Failed CI checks are listed with links to their runs. CI is judged from the latest run of each check, so a job that failed and passed on a re-run counts as passed
 - A toast tells you about new review requests, and when your PRs are approved, get changes requested or fail CI. New review requests also raise an OS notification (macOS and Linux), so you see them outside Claude Code too
 
 ![The To review tab: one line per review request with its risk, wait and CI, and the selected PR's summary and release impact below](docs/screenshot.png)
@@ -44,12 +44,12 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 | `u` | Show the keys |
 | `Ctrl+X` `Tab` | From the prompt back to the pane (or click it). Keys reach the pane only while it has the focus. The hint line under the prompt says which way to go |
 | `o` | Open in the browser |
-| `b` / `s` / `z` | Show or hide bot PRs / stale PRs / snoozed PRs |
+| `z` | Show or hide snoozed PRs |
 | `r` | Fetch again |
 | `Esc` | Back to the prompt; the pane stays open |
 | `q` | Close the pane (`/pr-inbox` opens it again) |
 
-● marks PRs updated since you last selected them. A PR you approve leaves To review, as GitHub drops the review request; PRs approved from here stay listed under it as "Approved recently" for a day.
+● marks PRs updated since you last selected them. Nothing is folded: every group is listed under its heading, and only snoozed PRs wait behind `z`.
 
 PR numbers and failed checks are hyperlinks: Cmd+click them in a terminal that supports hyperlinks.
 
@@ -90,7 +90,7 @@ Change them with `/config` or `/plugin configure`.
 | Setting | Default | What it does |
 | :- | :- | :- |
 | `org_filter` | (empty) | Only show PRs in this GitHub organization |
-| `stale_days` | 30 | Fold your PRs not updated for this many days under Stale |
+| `stale_days` | 30 | List your PRs not updated for this many days under Stale |
 | `refresh_minutes` | 5 | How often to fetch from GitHub |
 | `summary_model` | sonnet | The model that writes the summary, risk and release impact |
 | `desktop_notify` | review requests | OS notifications for `review requests`, `all` (also approvals, changes requested and CI failures on your PRs) or `off`. Uses `osascript` on macOS and `notify-send` on Linux. On macOS, allow notifications for Script Editor in System Settings if none appear |

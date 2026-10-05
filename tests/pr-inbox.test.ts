@@ -314,25 +314,24 @@ const linksIn = (json: string) => {
 const blueLink = (href: string, text: string) => expect.objectContaining({ href, text, color: '#00d7ff', underline: true })
 
 // The selected row starts with "▸"
+const isSelectedUrl = async (ui: Finder, url: string) => JSON.stringify(await ui.find({ key: `line-${url}` })).includes('"▸')
 const isSelected = async (ui: Finder, number: number) =>
   JSON.stringify(await ui.find({ key: `line-https://github.com/acme/app/pull/${number}` })).includes('"▸')
 
-test('folds bot and stale PRs and expands them', async ($, on) => {
+test('bot and stale PRs are listed, each group under its heading, with nothing to unfold', async ($, on) => {
   const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   expect((await ui.find({ key: 'tab-review' }))?.props.label).toBe('◆ review 2 ⚙1')
   expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
-  expect(await ui.find({ key: `line-${BOT.url}` })).toBeUndefined()
-  await ui.press({ key: 'fold-bots' })
   expect(await ui.find({ key: `line-${BOT.url}` })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^── ⚙ bots 1 ─/ })).toBeDefined()
 
   await ui.press({ key: 'tab-mine' })
   expect(await ui.find({ key: `line-${CHANGES.url}` })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /changes requested/ })).toBeDefined()
-  expect(await ui.find({ key: `line-${STALE.url}` })).toBeUndefined()
-  await ui.press({ key: 'fold-stale' })
   expect(await ui.find({ key: `line-${STALE.url}` })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^── ◇ stale 1 \(30\+ days\) ─/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -426,11 +425,13 @@ test('selects the first PR on open and moves with j/k', async ($, on) => {
   await ui.press({ key: 'nav-down' })
   expect(await isSelected(ui, 22)).toBe(true)
   await ui.press({ key: 'nav-down' })
-  await ui.press({ key: 'nav-down' })
-  // Stops at the end (does not enter the folded stale PRs)
   expect(await isSelected(ui, 23)).toBe(true)
+  // On into the stale PRs, and it stops at the end
+  await ui.press({ key: 'nav-down' })
+  await ui.press({ key: 'nav-down' })
+  expect(await isSelected(ui, 24)).toBe(true)
   await ui.press({ key: 'nav-up' })
-  expect(await isSelected(ui, 22)).toBe(true)
+  expect(await isSelected(ui, 23)).toBe(true)
   await ui.unmount()
 })
 
@@ -488,7 +489,6 @@ test('shows the summary, risk, reason and release impact in the list', async ($,
   await ui.press({ key: 'nav-down' })
   expect(await ui.find({ type: 'Text', text: /^【低】一覧の並び順を変更$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^リリース時: 影響なし — フラグ new_list_order が無効のまま入る$/ })).toBeDefined()
-  await ui.press({ key: 'fold-bots' })
   await ui.press({ key: 'nav-down' })
   expect(await ui.find({ type: 'Text', text: /^リリース時: 判定不能$/ })).toBeDefined()
   // The analysis fetches the diff
@@ -1319,7 +1319,8 @@ const renovate = (over: Record<string, unknown> = {}) =>
 
 async function pressBotReview($: TestEngine, s: Stubs) {
   const ui = await $.ui.mount(PANE)
-  await ui.press({ key: 'fold-bots' })
+  // The bot PRs come after the people's
+  for (let i = 0; i < 5 && !(await isSelectedUrl(ui, BOT.url)); i++) await ui.press({ key: 'nav-down' })
   await ui.press({ key: 'act-ai-review' })
   await settleReview(s)
   return ui
@@ -1688,14 +1689,6 @@ test('the approve dialog selects Cancel first, and an approval says in the trans
 
 // ---- Small fixes: plural, a after an AI review, recently approved, focus help ----
 
-test('fold labels count in the singular for one', async ($, on) => {
-  const s = stubs(on)
-  await start($, s.clock)
-  const ui = await $.ui.mount(PANE)
-  expect((await ui.find({ key: 'fold-bots' }))?.props.label).toBe('Show 1 bot PR ⚙')
-  await ui.unmount()
-})
-
 test('after a passed AI review, a says so in its label and its dialog', async ($, on) => {
   const s = stubs(on, { answer: 'Cancel' })
   await start($, s.clock)
@@ -1720,19 +1713,56 @@ test('after a blocked AI review, a warns with the reason', async ($, on) => {
   await ui.unmount()
 })
 
-test('an approval says the PR leaves To review, and it is listed as approved recently', async ($, on) => {
-  const gone = { url: 'https://github.com/acme/app/pull/99', label: 'app#99', title: 'Old fix', at: NOW - 2 * 60 * 60 * 1000 }
-  const stale = { url: 'https://github.com/acme/app/pull/98', label: 'app#98', title: 'Older fix', at: NOW - 2 * 24 * 60 * 60 * 1000 }
-  const s = stubs(on, { answer: 'Approve', store: { approved: [gone, stale] } })
+test('an approval moves the PR to approved by you, in the same tab', async ($, on) => {
+  // The fetch after the approval still lists it as requested: the local move holds until GitHub catches up
+  const s = stubs(on, { answer: 'Approve' })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
-  // Approved within a day and no longer requested: listed with a link; older ones are dropped
-  expect(await ui.find({ type: 'Text', text: /^Approved recently/ })).toBeDefined()
-  expect(JSON.stringify(await ui.find({ key: `approved-${gone.url}` }))).toContain('app#99')
-  expect(await ui.find({ key: `approved-${stale.url}` })).toBeUndefined()
   await ui.press({ key: 'act-approve' })
-  expect(s.toasts.some((t) => t.includes('moved to Approved recently'))).toBe(true)
-  expect((s.store.get('approved') as { url: string }[])[0]?.url).toBe(HUMAN.url)
+  expect(s.toasts.some((t) => t.includes('moved to approved by you'))).toBe(true)
+  await ui.unmount()
+})
+
+// ---- Approved by you, not merged ----
+
+const mineApproved = (oid: string, at = '2026-10-02T00:00:00Z') => ({
+  latestReviews: { nodes: [{ author: { login: 'me' }, state: 'APPROVED', submittedAt: at, commit: { oid } }] },
+})
+
+test('PRs you approved that are not merged are listed with why, newer commits first', async ($, on) => {
+  const waiting = pr({ number: 61, title: 'Waits on others', url: 'https://github.com/acme/app/pull/61', ...mineApproved(HEAD) })
+  const moved = pr({ number: 62, title: 'Got new commits', url: 'https://github.com/acme/app/pull/62', ...mineApproved('old0000') })
+  const ready = pr({ number: 63, url: 'https://github.com/acme/app/pull/63', reviewDecision: 'APPROVED', ...mineApproved(HEAD) })
+  // Your latest review asked for changes: not approved
+  const changed = pr({
+    number: 64,
+    url: 'https://github.com/acme/app/pull/64',
+    latestReviews: {
+      nodes: [{ author: { login: 'me' }, state: 'CHANGES_REQUESTED', submittedAt: '2026-10-02T00:00:00Z', commit: { oid: HEAD } }],
+    },
+  })
+  const s = stubs(on, {
+    answer: 'Approve',
+    graphql: JSON.stringify({
+      data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [] }, approved: { nodes: [waiting, moved, ready, changed] } },
+    }),
+  })
+  await start($, s.clock)
+  expect(s.calls.find((c) => c.includes('graphql'))).toContainEqual(expect.stringMatching(/^approved=.*reviewed-by:@me -author:@me/))
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: /^── ✓ approved by you, not merged 3 ─/ })).toBeDefined()
+  expect(await ui.find({ key: 'line-https://github.com/acme/app/pull/64' })).toBeUndefined()
+  // New commits since the approval come first, marked, and can be approved again
+  expect(await isSelected(ui, 62)).toBe(true)
+  expect(await lineOf(ui, 62)).toContain('⚠ NEW')
+  expect(await lineOf(ui, 62)).toContain('new commits since your approval')
+  expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('approve again')
+  expect(await ui.find({ key: 'act-ai-review' })).toBeUndefined()
+  await ui.press({ key: 'nav-down' })
+  expect(await lineOf(ui, 61)).toContain('waiting other reviews')
+  expect(await ui.find({ key: 'act-approve' })).toBeUndefined()
+  await ui.press({ key: 'nav-down' })
+  expect(await lineOf(ui, 63)).toContain('ready to merge')
   await ui.unmount()
 })
 
