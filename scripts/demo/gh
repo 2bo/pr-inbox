@@ -320,7 +320,7 @@ const RELEASES = {
   'acme-oss/fast-json-stable': [{ tag_name: 'v1.4.3', name: 'v1.4.3', published_at: ago(24 * 20), body: '## Fixes\n- Key ordering for objects with numeric keys now matches the spec.' }],
 }
 
-const all = [...REVIEW, ...MINE]
+const all = [...REVIEW, ...MINE, ...APPROVED]
 const byUrl = (url) => all.find((p) => p.url === url)
 const key = (p) => `${p.repository.nameWithOwner.split('/')[1]}/${p.number}`
 
@@ -351,6 +351,11 @@ if (args[0] === 'api' && args[1] === 'graphql') {
     const r = RELEASES[m[1]]
     if (!r) fail('gh: Not Found (HTTP 404)')
     out(r)
+  } else if ((m = path.match(/^repos\/([^/]+\/[^/]+)\/compare\//))) {
+    // What changed since an approval: a made-up two commits, and the PR's own diff
+    const p = APPROVED.find((x) => x.repository.nameWithOwner === m[1])
+    if (args.includes('--jq')) out({ c: 2, a: 12, d: 3, by: [p?.author.login ?? 'someone'] })
+    else out((p && DETAILS[key(p)]?.diff) || 'diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,1 +1,1 @@\n-old\n+new\n')
   } else if (/\/pulls\/\d+\/comments$/.test(path)) {
     out([])
   } else fail(`fake gh: unsupported: gh ${args.join(' ')}`)

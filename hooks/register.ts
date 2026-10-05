@@ -581,9 +581,59 @@ function approvalOutdated(pr: PR): boolean {
   return a !== undefined && a.oid !== '' && a.oid !== pr.headRefOid
 }
 
+// What changed since your approval, from GitHub's compare (fetched once per head, when the PR is selected)
+type SinceStats = { head: string; commits: number; additions: number; deletions: number; by: string[] }
+const sinceStats = new Map<string, SinceStats>()
+const sinceLoading = new Set<string>()
+
+async function loadSinceStats($: EngineInterface, pr: PR): Promise<void> {
+  const oid = myApproval(pr)?.oid ?? ''
+  const key = `${pr.url}@${pr.headRefOid}`
+  if (sinceStats.get(pr.url)?.head === pr.headRefOid || sinceLoading.has(key)) return
+  if (!/^[0-9a-f]{40}$/.test(oid) || !/^[0-9a-f]{40}$/.test(pr.headRefOid) || !REPO_NAME.test(pr.repository.nameWithOwner)) return
+  sinceLoading.add(key)
+  const r = await $.process
+    .run([
+      'gh',
+      'api',
+      `repos/${pr.repository.nameWithOwner}/compare/${oid}...${pr.headRefOid}`,
+      '--jq',
+      '{c: .total_commits, a: ([.files[]?.additions] | add // 0), d: ([.files[]?.deletions] | add // 0), by: ([.commits[]?.author.login // empty] | unique)}',
+    ])
+    .catch(ghMissing)
+  sinceLoading.delete(key)
+  try {
+    const x = JSON.parse(r.stdout) as { c?: unknown; a?: unknown; d?: unknown; by?: unknown }
+    if (r.exitCode !== 0 || typeof x.c !== 'number') return
+    sinceStats.set(pr.url, {
+      head: pr.headRefOid,
+      commits: x.c,
+      additions: Number(x.a) || 0,
+      deletions: Number(x.d) || 0,
+      by: Array.isArray(x.by)
+        ? x.by
+            .filter((b): b is string => typeof b === 'string')
+            .map(clean)
+            .slice(0, 3)
+        : [],
+    })
+    $.ui.invalidate('ui.render')
+  } catch {
+    // The approved commit is gone (a force push): the plain wording stays
+  }
+}
+
+// "2 commits since your approval (+12 -3 by @x)", once it is known
+function sinceText(pr: PR): string {
+  const st = sinceStats.get(pr.url)
+  if (!st || st.head !== pr.headRefOid) return 'new commits since your approval'
+  const by = st.by.length ? ` by ${st.by.map((b) => `@${b}`).join(', ')}` : ''
+  return `${plural(st.commits, 'commit')} since your approval (+${st.additions} -${st.deletions}${by})`
+}
+
 // Why a PR you approved is still open
 function approvedWhy(pr: PR, now: number): string {
-  if (approvalOutdated(pr)) return 're-review: new commits since your approval'
+  if (approvalOutdated(pr)) return `re-review: ${sinceText(pr)}`
   const reasons = classify(pr, now).reasons
   if (reasons.length > 0) return reasons.join(', ')
   const ci = ciState(pr)
@@ -755,9 +805,13 @@ function matchesFilter(pr: PR): boolean {
   return words.every((w) => hay.includes(w))
 }
 
-// If the selection is not visible, select the first PR
+// Where the selection last stood, so a PR that leaves the list (approved, merged, snoozed, gone on a refresh) hands
+// the selection to the one that takes its place, not to the top
+let selectedAt = 0
 function ensureSelection(rows: PR[]): void {
-  if (!rows.some((p) => p.url === selected)) selected = rows[0]?.url ?? ''
+  const i = rows.findIndex((p) => p.url === selected)
+  if (i >= 0) selectedAt = i
+  else selected = rows[Math.min(selectedAt, rows.length - 1)]?.url ?? ''
 }
 
 function moveSelection(rows: PR[], delta: number): void {
@@ -1149,12 +1203,18 @@ async function approve($: EngineInterface, pr: PR): Promise<void> {
     r?.state === 'blocked'
       ? ` ⚠ The AI review blocked it: ${r.problems[0] ?? 'see the details'}.`
       : r && (r.state === 'passed' || r.state === 'approved')
-        ? ' The AI review passed at this commit.'
+        ? passedNote(r)
         : ''
-  const ok = await confirmApproval($, pr, `${ai}${outdated} ${facts.join(' · ')}.`)
+  // A passed review's notes open beside the dialog, with links to the lines
+  if (r?.state === 'passed' && (r.findings.some((f) => f.severity !== 'pre-existing') || r.warnings.length > 0)) {
+    expanded = pr.url
+    $.ui.invalidate('ui.render')
+  }
+  const again = isApproved(pr) && approvalOutdated(pr) ? ` You approved it before; ${sinceText(pr)} · d shows them.` : ''
+  const ok = await confirmApproval($, pr, `${again}${ai}${outdated} ${facts.join(' · ')}.`)
   // The dialog took the keys: give them back to the pane either way
   await focusPane($)
-  if (ok) await postApproval($, pr, 'you chose Approve in the dialog of a')
+  if (ok && (await postApproval($, pr, 'you chose Approve in the dialog of a')) && r?.state === 'passed') r.state = 'approved'
 }
 
 // The finished AI review of the PR's current commit, if there is one
@@ -1182,7 +1242,7 @@ async function confirmApproval($: EngineInterface, pr: PR, note: string): Promis
 
 // The PR head as GitHub reports it now ('' when it cannot be read)
 async function currentHead($: EngineInterface, pr: PR): Promise<{ head: string; error: string }> {
-  const r = await $.process.run(['gh', 'pr', 'view', pr.url, '--json', 'headRefOid'])
+  const r = await $.process.run(['gh', 'pr', 'view', pr.url, '--json', 'headRefOid']).catch(ghMissing)
   try {
     const head = (JSON.parse(r.stdout) as { headRefOid?: string }).headRefOid ?? ''
     if (r.exitCode === 0 && head) return { head, error: '' }
@@ -1194,7 +1254,13 @@ async function currentHead($: EngineInterface, pr: PR): Promise<{ head: string; 
 
 // Post the approval. The head is read again right before, the approval is refused if new commits arrived,
 // and the review is pinned to the commit that was shown. Returns whether it was approved
+// How an approval the AI review made on its own is logged, and what tells it apart everywhere
+const AUTO_HOW = 'automatically (ai_approve auto, the AI review passed)'
+// PRs approved that way in this session, so the pane says who decided
+const autoApproved = new Set<string>()
+
 async function postApproval($: EngineInterface, pr: PR, how: string): Promise<boolean> {
+  const auto = how === AUTO_HOW
   const sha = pr.headRefOid.slice(0, 7)
   const fail = (why: string) => $.ui.toast(`Approve failed: ${fit(clean(why), 80)}`, { timeoutMs: 8000 })
   if (!REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) {
@@ -1211,23 +1277,33 @@ async function postApproval($: EngineInterface, pr: PR, how: string): Promise<bo
     await refresh($)
     return false
   }
-  const r = await $.process.run([
-    'gh',
-    'api',
-    '-X',
-    'POST',
-    `repos/${pr.repository.nameWithOwner}/pulls/${pr.number}/reviews`,
-    '-f',
-    'event=APPROVE',
-    '-f',
-    `commit_id=${pr.headRefOid}`,
-  ])
+  const r = await $.process
+    .run([
+      'gh',
+      'api',
+      '-X',
+      'POST',
+      `repos/${pr.repository.nameWithOwner}/pulls/${pr.number}/reviews`,
+      '-f',
+      'event=APPROVE',
+      '-f',
+      `commit_id=${pr.headRefOid}`,
+      // On GitHub too, an approval no person chose says so
+      ...(auto ? ['-f', `body=Approved by the pr-inbox AI review on its own (ai_approve auto) at ${sha}.`] : []),
+    ])
+    .catch(ghMissing)
   if (r.exitCode !== 0) {
     fail(r.stderr)
     return false
   }
   const repoLabel = `${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number}`
-  $.ui.toast(`✦ approved ${repoLabel} @${sha} · moved to approved by you`, { timeoutMs: 6000 })
+  $.ui.toast(
+    auto
+      ? `✦ the AI review approved ${repoLabel} @${sha} as you (ai_approve auto)`
+      : `✦ approved ${repoLabel} @${sha} · moved to approved by you`,
+    { timeoutMs: 6000 },
+  )
+  if (auto) autoApproved.add(pr.url)
   // Into the approved section now; the next fetch confirms it from GitHub
   const at = new Date(await $.clock.now()).toISOString()
   const others = (pr.latestReviews?.nodes ?? []).filter((r) => r?.author?.login !== viewer)
@@ -1237,8 +1313,13 @@ async function postApproval($: EngineInterface, pr: PR, how: string): Promise<bo
       nodes: [...others, { author: { login: viewer }, state: 'APPROVED', submittedAt: at, commit: { oid: pr.headRefOid } }],
     },
   }
+  const rows = visibleRows(groups(fetchedAt || Date.now()))
+  const i = rows.findIndex((p) => p.url === pr.url)
+  const nextAfterApproval = rows[i + 1]?.url ?? rows[i - 1]?.url ?? ''
   review = review.filter((p) => p.url !== pr.url)
   approved = [nowApproved, ...approved.filter((p) => p.url !== pr.url)]
+  // On to the next review request: the one after it in the list (computed before it moved), else the one before
+  if (selected === pr.url) selected = nextAfterApproval
   // Who decided, and how, stays in the transcript
   $.ui.log(`pr-inbox approved ${pr.repository.nameWithOwner}#${pr.number} at ${sha}: ${how}`)
   await refresh($)
@@ -1605,7 +1686,7 @@ function reviewGates(pr: PR): string[] {
   const out: string[] = []
   if (pr.isDraft) out.push('it is a draft')
   const ci = ciState(pr)
-  if (ci !== 'SUCCESS' && ci !== 'NONE') out.push(`CI is ${ci.toLowerCase()}`)
+  if (ci !== 'SUCCESS' && ci !== 'NONE') out.push(ci === 'PENDING' || ci === 'EXPECTED' ? 'CI is still running' : 'CI is failing')
   if (pr.mergeable === 'CONFLICTING') out.push('it has a merge conflict')
   if (pr.reviewDecision === 'CHANGES_REQUESTED') out.push('a reviewer requested changes')
   if (!REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid))
@@ -2017,23 +2098,26 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
     for (const where of run.injection) run.problems.push(`possible prompt injection in ${where}`)
     if (run.problems.length > 0) {
       run.state = 'blocked'
-      $.ui.toast(`✗ AI review blocked #${pr.number}: ${fit(run.problems[0] ?? '', 80)}`, { timeoutMs: 8000 })
+      // Stopped by a gate before any model ran is not the AI's verdict
+      const gated = run.verdicts.length === 0 && run.injection.length === 0
+      $.ui.toast(
+        gated
+          ? `AI review not run on #${pr.number}: ${fit(run.problems[0] ?? '', 60)}`
+          : `✗ AI review blocked #${pr.number}: ${fit(run.problems[0] ?? '', 80)}`,
+        { timeoutMs: 8000 },
+      )
     } else {
-      const nits = run.findings.filter((f) => f.severity === 'nit').length
-      const auto = approvesWithoutAsking(pr)
-      run.step = 'approving…'
-      redraw()
-      // The notes go to the transcript in full, and the pane opens them beside the dialog, with links to the lines
+      // The notes go to the transcript in full
       for (const line of reviewPreview(run, enabledPerspectives(pr))) $.ui.log(line)
-      if (!auto) {
-        expanded = pr.url
+      if (approvesWithoutAsking(pr)) {
+        run.step = 'approving…'
         redraw()
+        run.state = (await postApproval($, pr, AUTO_HOW)) ? 'approved' : 'passed'
+      } else {
+        // No dialog breaking in on what you do next: the row says it passed, and a approves, its dialog with the notes
+        run.state = 'passed'
+        $.ui.toast(`✓ AI review passed #${pr.number} at ${pr.headRefOid.slice(0, 7)} · a approves it`, { timeoutMs: 8000 })
       }
-      const ok = auto || (await confirmReviewed($, run, enabledPerspectives(pr), nits))
-      // The dialog took the keys: give them back to the pane, so j/k work again
-      if (!auto) await focusPane($)
-      const how = auto ? 'automatically (ai_approve auto, the AI review passed)' : 'you chose Approve in the AI review dialog'
-      run.state = ok && (await postApproval($, pr, how)) ? 'approved' : 'passed'
     }
     await $.store.set(`review:${pr.url}`, {
       head: pr.headRefOid,
@@ -2136,9 +2220,10 @@ function blockedWhy(r: ReviewRun): string {
 
 // The approval dialog after a passed review. A mod's dialog carries only a question and labels, so the question
 // says where the notes are: the pane opens them beside it, and the transcript gets them in full first
-async function confirmReviewed($: EngineInterface, run: ReviewRun, perspectives: { p: Perspective }[], nits: number): Promise<boolean> {
-  const { pr } = run
-  const n = perspectives.length
+// What a passed AI review says in the approve dialog: how many reviewers passed it, what it left, what to check
+function passedNote(run: ReviewRun): string {
+  const n = enabledPerspectives(run.pr).length
+  const nits = run.findings.filter((f) => f.severity === 'nit').length
   // Every note that does not block, by kind
   const count = (what: string, k: number) => (k ? [`${k} ${what}${k === 1 ? '' : 's'}`] : [])
   const kinds = [
@@ -2148,7 +2233,7 @@ async function confirmReviewed($: EngineInterface, run: ReviewRun, perspectives:
   ]
   const notes = kinds.length ? ` It left ${kinds.join(', ')}, listed under the PR in the pane and in the transcript.` : ''
   const warn = run.warnings.length ? ` ⚠ Check before approving: ${run.warnings.join('; ')}.` : ''
-  return confirmApproval($, pr, ` The AI review passed ${n} perspective${n === 1 ? '' : 's'} with no important findings.${notes}${warn}`)
+  return ` All ${n} AI reviewer${n === 1 ? '' : 's'} passed it with no important findings.${notes}${warn}`
 }
 
 // The passed review in full, for the transcript: the PR, each perspective, then every note
@@ -2617,13 +2702,32 @@ async function reviewAllBots($: EngineInterface): Promise<void> {
   for (const pr of targets) {
     if (botBatch.stop) break
     botBatch.current = pr.url
-    selected = pr.url
     await aiReview($, pr)
     botBatch.done += 1
   }
-  const outcome = (state: ReviewRun['state']) => targets.filter((p) => reviews.get(p.url)?.state === state).length
   const stopped = botBatch.stop
   botBatch = undefined
+  // Those that passed and wait for you: one dialog for all, naming each commit; each approval is pinned to it
+  const passed = targets.filter((p) => reviews.get(p.url)?.state === 'passed')
+  if (passed.length > 0) {
+    const list = passed.map((p) => `${p.repository.nameWithOwner.split('/')[1]}#${p.number} @${p.headRefOid.slice(0, 7)}`).join(', ')
+    let answer = ''
+    try {
+      answer = await $.ui.ask(`Approve ${plural(passed.length, 'bot PR')} that passed the AI review? ${list}`, {
+        options: ['Cancel', `Approve all ${passed.length}`],
+        header: 'Approve bots',
+      })
+    } catch {
+      // Dismissed
+    }
+    await focusPane($)
+    if (answer.startsWith('Approve all'))
+      for (const p of passed) {
+        const run = reviews.get(p.url)
+        if (run && (await postApproval($, p, 'you chose Approve all in the dialog after w'))) run.state = 'approved'
+      }
+  }
+  const outcome = (state: ReviewRun['state']) => targets.filter((p) => reviews.get(p.url)?.state === state).length
   $.ui.toast(
     `${stopped ? 'Stopped. ' : ''}Bot PRs: ${outcome('approved')} approved, ${outcome('passed')} passed but not approved, ${outcome('blocked')} blocked`,
     { timeoutMs: 10_000 },
@@ -2642,6 +2746,11 @@ const MERGE_METHODS: Record<string, string> = {
 
 // Merges a ready PR after the person picks a method in a dialog (Cancel selected first). The merge is pinned to the
 // commit on screen: if the head moved, GitHub refuses it
+// A command that could not start (gh not installed) reads as a failed run, so each caller says what went wrong
+function ghMissing(err: unknown): { exitCode: number; stdout: string; stderr: string } {
+  return { exitCode: 127, stdout: '', stderr: friendlyError(messageOf(err)) }
+}
+
 async function mergePr($: EngineInterface, pr: PR): Promise<void> {
   if (stackKey(pr)) return mergeStack($, pr)
   const sha = pr.headRefOid.slice(0, 7)
@@ -2662,9 +2771,14 @@ async function mergePr($: EngineInterface, pr: PR): Promise<void> {
   await focusPane($)
   const flag = MERGE_METHODS[answer]
   if (!flag) return
-  const r = await $.process.run(['gh', 'pr', 'merge', pr.url, flag, '--match-head-commit', pr.headRefOid])
+  const r = await $.process.run(['gh', 'pr', 'merge', pr.url, flag, '--match-head-commit', pr.headRefOid]).catch(ghMissing)
   if (r.exitCode !== 0) {
-    $.ui.toast(`Merge failed: ${fit(clean(r.stderr), 80)}`, { timeoutMs: 8000 })
+    const moved = /head|match|expected/i.test(r.stderr)
+    $.ui.toast(
+      moved ? `Not merged: #${pr.number} has new commits since ${sha} · refreshed` : `Not merged: ${fit(clean(r.stderr), 90)} · refreshed`,
+      { timeoutMs: 10000 },
+    )
+    await refresh($)
     return
   }
   $.ui.toast(`✦ merged ${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number} · ${answer.toLowerCase()}`)
@@ -2722,7 +2836,8 @@ async function mergeStack($: EngineInterface, pr: PR): Promise<void> {
     timeoutMs: 120000,
   })
   if (r.exitCode !== 0) {
-    $.ui.toast(`Stack merge failed: ${fit(clean(r.stderr || r.stdout), 100)}`, { timeoutMs: 10000 })
+    $.ui.toast(`Stack merge failed, nothing merged: ${fit(clean(r.stderr || r.stdout), 90)} · refreshed`, { timeoutMs: 10000 })
+    await refresh($)
     return
   }
   $.ui.toast(`✦ merged stack #${stack.number} up to #${pr.number} (${list}) · ${answer.toLowerCase()}`)
@@ -2747,7 +2862,7 @@ async function rerunFailed($: EngineInterface, pr: PR): Promise<void> {
   }
   const failed: string[] = []
   for (const id of runs) {
-    const r = await $.process.run(['gh', 'run', 'rerun', id, '--failed', '-R', pr.repository.nameWithOwner])
+    const r = await $.process.run(['gh', 'run', 'rerun', id, '--failed', '-R', pr.repository.nameWithOwner]).catch(ghMissing)
     if (r.exitCode !== 0) failed.push(fit(clean(r.stderr), 60))
   }
   $.ui.toast(
@@ -2768,6 +2883,11 @@ let fixJob: FixJob | undefined
 // Fixes that made commits you have not pushed yet (you cancelled, or looked at the diff first), by PR URL: c pushes them
 const fixReady = new Map<string, FixJob>()
 const FIX_MARK = '[pr-inbox fix-ci]'
+// What the fix turn may not run: pushes, and gh writes to the PR or the repository
+const FIX_FORBIDDEN =
+  /\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr\s+(?:merge|review|comment|close|ready|edit)|release|repo\s+(?:delete|edit))\b|\bgh\s+api\b[^\n]*(?:-X\s*|--method[=\s]+)(?:POST|PUT|PATCH|DELETE)/i
+const FIX_DENY =
+  'pr-inbox: while fixing CI, pushing, merging, approving and commenting are left to the user. Commit your fix in the worktree and stop: pr-inbox shows the commits and asks before it pushes.'
 // A branch name safe to hand to git as one argument
 const BRANCH_NAME = /^(?!-)(?!.*\.\.)[\w./-]{1,200}$/
 
@@ -2851,8 +2971,33 @@ async function fixCi($: EngineInterface, pr: PR): Promise<void> {
       $.ui.toast(`Could not make a worktree: ${fit(clean(added.stderr), 80)}`, { timeoutMs: 8000 })
       return
     }
+  } else {
+    // The worktree is there from before: commits of an earlier fix not on the branch would go out with this one, so
+    // say so and let you choose
+    const left = await commitsAhead($, dir, branch)
+    if (left.length > 0) {
+      let answer = ''
+      try {
+        answer = await $.ui.ask(
+          `The worktree of #${pr.number} has ${plural(left.length, 'commit')} not on ${branch}: ${left.slice(0, 3).join('; ')}. Go on from them, or start again from the PR head?`,
+          { options: ['Cancel', 'Go on from them', 'Start again from the PR head'], header: 'Worktree' },
+        )
+      } catch {
+        // Dismissed
+      }
+      await focusPane($)
+      if (answer === 'Start again from the PR head') {
+        const dirty = (await $.process.run(['git', '-C', dir, 'status', '--porcelain'])).stdout.trim()
+        if (dirty) {
+          $.ui.toast(`The worktree has uncommitted changes; clean ${dir} first`, { timeoutMs: 10000 })
+          return
+        }
+        await $.process.run(['git', '-C', dir, 'checkout', '--detach', `origin/${branch}`])
+      } else if (answer !== 'Go on from them') return
+    }
   }
-  const base = (await $.process.run(['git', '-C', dir, 'rev-parse', 'HEAD'])).stdout.trim()
+  // Commits are counted from the branch as GitHub had it at the fetch: exactly what a push would send
+  const base = `origin/${branch}`
   const job: FixJob = { pr, repo, branch, dir, base, startedAt: await $.clock.now() }
   fixJob = job
   fixReady.delete(pr.url)
@@ -2891,11 +3036,18 @@ function fixRequest(job: FixJob): string {
   ].join(' ')
 }
 
-// The turn ended (or you asked early): what it committed waits for your word to push
-async function afterFix($: EngineInterface, job: FixJob): Promise<void> {
-  if (fixJob === job) fixJob = undefined
-  const log = await $.process.run(['git', '-C', job.dir, 'log', '--format=%h %s', `${job.base}..HEAD`])
-  const commits = log.exitCode === 0 ? log.stdout.split('\n').map(clean).filter(Boolean) : []
+// The worktree's commits a push would send: those not on the branch as last fetched
+async function commitsAhead($: EngineInterface, dir: string, branch: string): Promise<string[]> {
+  const log = await $.process.run(['git', '-C', dir, 'log', '--format=%h %s', `origin/${branch}..HEAD`])
+  return log.exitCode === 0 ? log.stdout.split('\n').map(clean).filter(Boolean) : []
+}
+
+// The turn ended, was cut short, or you asked early: what it committed waits for your word to push
+type FixEnd = 'done' | 'interrupted' | 'early'
+async function afterFix($: EngineInterface, job: FixJob, end: FixEnd = 'done'): Promise<void> {
+  // Asked early, Claude goes on: keep following it, so what it commits later is offered too
+  if (fixJob === job && end !== 'early') fixJob = undefined
+  const commits = await commitsAhead($, job.dir, job.branch)
   $.ui.invalidate('ui.render')
   if (commits.length === 0) {
     fixReady.delete(job.pr.url)
@@ -2903,19 +3055,25 @@ async function afterFix($: EngineInterface, job: FixJob): Promise<void> {
     return
   }
   const ready = { ...job, commits }
-  fixReady.set(job.pr.url, ready)
-  await askPush($, ready)
+  if (end !== 'early') fixReady.set(job.pr.url, ready)
+  await askPush($, ready, end)
 }
 
 // The push dialog: the commits, then Push, or a look at the diff first (Cancel first). Never a force push
-async function askPush($: EngineInterface, job: FixJob): Promise<void> {
+async function askPush($: EngineInterface, job: FixJob, end: FixEnd = 'done'): Promise<void> {
   const commits = job.commits ?? []
+  const how =
+    end === 'interrupted'
+      ? 'The fix turn stopped before it finished. '
+      : end === 'early'
+        ? 'Claude is still working: these are the commits so far, and later ones are offered when it ends. '
+        : ''
   const dirty = (await $.process.run(['git', '-C', job.dir, 'status', '--porcelain'])).stdout.trim()
   const shown = commits.slice(0, 5).join('; ') + (commits.length > 5 ? `; and ${commits.length - 5} more` : '')
   let answer = ''
   try {
     answer = await $.ui.ask(
-      `Push ${plural(commits.length, 'commit')} to ${job.branch} of ${job.repo} (#${job.pr.number})? ${shown}${dirty ? ' (uncommitted changes stay in the worktree)' : ''}`,
+      `${how}Push ${plural(commits.length, 'commit')} to ${job.branch} of ${job.repo} (#${job.pr.number})? ${shown}${dirty ? ' (uncommitted changes stay in the worktree)' : ''}`,
       { options: ['Cancel', 'Push', 'Show the diff first'], header: 'Push' },
     )
   } catch {
@@ -2929,7 +3087,14 @@ async function askPush($: EngineInterface, job: FixJob): Promise<void> {
   }
   const r = await $.process.run(['git', '-C', job.dir, 'push', 'origin', `HEAD:refs/heads/${job.branch}`], { timeoutMs: 120000 })
   if (r.exitCode !== 0) {
-    $.ui.toast(`Push failed: ${fit(clean(r.stderr), 100)}`, { timeoutMs: 10000 })
+    const moved = /non-fast-forward|fetch first|rejected/i.test(r.stderr)
+    $.ui.toast(
+      moved
+        ? `Not pushed: ${job.branch} has new commits on GitHub. Your ${plural(commits.length, 'commit')} stay in ${job.dir} · c shows them`
+        : `Push failed: ${fit(clean(r.stderr), 100)} · your commits stay in ${job.dir}`,
+      { timeoutMs: 10000 },
+    )
+    fixReady.set(job.pr.url, job)
     return
   }
   fixReady.delete(job.pr.url)
@@ -2975,11 +3140,11 @@ async function ciMenu($: EngineInterface, pr: PR): Promise<void> {
     const job = fixJob
     const answer = await ask(
       `Claude is fixing #${pr.number} in ${job.dir} (${elapsed(new Date(job.startedAt).toISOString(), Date.now())}).`,
-      ['Ask to push what it has now', 'Stop following the fix'],
+      ['Ask to push what it has now', 'Stop watching (Claude keeps working; Esc in the prompt stops it)'],
       'Fixing',
     )
-    if (answer === 'Ask to push what it has now') await afterFix($, job)
-    else if (answer === 'Stop following the fix') {
+    if (answer === 'Ask to push what it has now') await afterFix($, job, 'early')
+    else if (answer.startsWith('Stop watching')) {
       fixJob = undefined
       $.ui.toast(`Stopped following the fix of #${pr.number}; the worktree stays in ${job.dir}`, { timeoutMs: 8000 })
       $.ui.invalidate('ui.render')
@@ -3100,13 +3265,16 @@ export function register(on: On, options: PluginOptions) {
 
   on('turn.complete', async ($, e, next) => {
     if (e.turnId === guardedTurn) guardedTurn = undefined
-    if (fixJob?.turnId === e.turnId) void afterFix($, fixJob)
+    if (fixJob?.turnId === e.turnId) void afterFix($, fixJob, e.isAborted || e.reason !== 'answer' ? 'interrupted' : 'done')
     // A reviewer subagent finished: hand its answer to the review waiting for it
     return next(e)
   })
 
   on('tool.call', async (_, e, next) => {
-    if (!guardedTurn || allowedWhileGuarded(e.tool, (e as { command?: unknown }).command)) return next(e)
+    const command = (e as { command?: unknown }).command
+    // While Claude fixes CI, pushing, merging, approving and commenting stay with you: pr-inbox asks before it pushes
+    if (fixJob?.turnId && e.tool === 'Bash' && typeof command === 'string' && FIX_FORBIDDEN.test(command)) return { deny: FIX_DENY }
+    if (!guardedTurn || allowedWhileGuarded(e.tool, command)) return next(e)
     return { deny: GUARD_DENY }
   })
 
@@ -3163,11 +3331,35 @@ export function register(on: On, options: PluginOptions) {
     ]
     const rule = Text({ color: focused ? NEON.violet : NEON.rule, children: ['━'.repeat(columns)] })
     const toast = (text: string) => $.ui.toast(text, { timeoutMs: 4000 })
+    // n: the next PR in the list, read the same way
+    const nextPr = () => {
+      const rows = visibleRows(groups(fetchedAt || Date.now()))
+      const i = rows.findIndex((p) => p.url === pr.url)
+      const following = rows[i + 1] ?? (i < 0 ? rows[0] : undefined)
+      if (!following) return toast('This is the last PR in the list · q goes back')
+      selected = following.url
+      void openDiff($, following)
+    }
+    const nextKey = key('diff-next-pr', 'next PR', 'n', nextPr, true)
     if (v.loading || v.error) {
       const what = v.loading
         ? `${SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]} fetching the PR…`
         : `✗ ${fit(v.error, columns - 4)}`
-      const tree = [...head, rule, Text({ color: v.error ? NEON.red : NEON.muted, children: [what] }), Box({ children: [close] })]
+      // A failed read still offers the way on: the whole PR (when this was the change since your approval), GitHub,
+      // the next PR, back
+      const ways = v.error
+        ? [
+            ...(isApproved(pr) && approvalOutdated(pr) ? [key('diff-since', 'all changes', 't', () => void openDiff($, pr, 'all'))] : []),
+            key('diff-open', 'open on GitHub', 'o', async () => void (await $.process.run(['gh', 'pr', 'view', pr.url, '--web']))),
+            nextKey,
+          ]
+        : []
+      const tree = [
+        ...head,
+        rule,
+        Text({ color: v.error ? NEON.red : NEON.muted, children: [what] }),
+        Box({ flexDirection: 'row', columnGap: 2, children: [...ways, close] }),
+      ]
       return Box({ flexDirection: 'column', children: [...tree, keyCatcher(kit, tree, () => 'Still fetching · q goes back', toast)] })
     }
     const files = v.files
@@ -3245,8 +3437,14 @@ export function register(on: On, options: PluginOptions) {
             close,
           ]
         : [
-            key('diff-prev', '◂', 'h', () => go(at - 1), at === 0),
-            key('diff-next', '▸', 'l', () => go(at + 1), at === pages - 1),
+            key('diff-prev', '◂', 'h', () => (at === 0 ? toast('This is the description · l: the first file') : go(at - 1)), at === 0),
+            key(
+              'diff-next',
+              '▸',
+              'l',
+              () => (at === pages - 1 ? toast('End of this PR · n: the next PR · q: back') : go(at + 1)),
+              at === pages - 1,
+            ),
             key('diff-down', '↓', 'j', () => scrollTo(v.block + 1), blocks === 0),
             key('diff-up', '↑', 'k', () => scrollTo(v.block - 1), blocks === 0),
             key('diff-list', 'files', 'f', () => {
@@ -3266,6 +3464,7 @@ export function register(on: On, options: PluginOptions) {
             ...toggleSince,
             ...actOnPr,
             key('diff-open', 'open', 'o', async () => void (await $.process.run(['gh', 'pr', 'view', pr.url, '--web'])), true),
+            nextKey,
             close,
           ],
     })
@@ -3376,6 +3575,14 @@ export function register(on: On, options: PluginOptions) {
         : file.pieces.map((source, i) => Box({ key: `block-${i}`, children: [Code({ source, path: file.path, format: 'diff' })] }))
     if (!folded && file.cut)
       body.push(Text({ color: NEON.muted, children: ['The rest of this file is too long to draw here · o: open on GitHub'] }))
+    // The last page says what comes next
+    if (at === pages - 1)
+      body.push(
+        Text({
+          color: NEON.violet,
+          children: [`── end of ${label} · ${isReview ? 'a approve · v review · ' : ''}n next PR · q back ──`],
+        }),
+      )
     return done([...head, keys, rule, ...sinceNote, title, ...findings, ...body], notHere)
   })
 
@@ -3560,6 +3767,7 @@ export function register(on: On, options: PluginOptions) {
         redraw()
       })
     if (pr) void markSeen($, pr)
+    if (pr && isApproved(pr) && approvalOutdated(pr)) void loadSinceStats($, pr)
     if (pr) {
       const isReview = review.some((p) => p.url === pr.url)
       const isMine = mine.some((p) => p.url === pr.url)
@@ -3693,9 +3901,11 @@ export function register(on: On, options: PluginOptions) {
           if (isApproved(pr)) return `You approved ${n} at its current commit already`
           return `Wait for the AI review of ${n} to end (v cancels it)`
         case 'v':
-          return pr && isApproved(pr)
-            ? `You approved ${n} already · d reads it`
-            : 'v runs an AI review of a review request (1 or h: To review)'
+          if (pr && isApproved(pr))
+            return approvalOutdated(pr)
+              ? `${n} changed since your approval: d shows what changed, a approves it again`
+              : `You approved ${n} at its current commit · d reads it`
+          return 'v runs an AI review of a review request (1 or h: To review)'
         case 'c':
           return pr && mine.some((p) => p.url === pr.url) ? `CI has not failed on ${n}` : `c fixes failed CI ${ownTab}`
         case 'm':
@@ -3755,7 +3965,8 @@ export function register(on: On, options: PluginOptions) {
     const metaOf = (p: PR): string => {
       if (isApproved(p)) {
         const a = myApproval(p)
-        const when = a ? `approved by you ${elapsed(a.at, now)} ago${a.oid ? ` at ${a.oid.slice(0, 7)}` : ''}` : 'approved by you'
+        const who = autoApproved.has(p.url) ? 'approved automatically by the AI review' : 'approved by you'
+        const when = a ? `${who} ${elapsed(a.at, now)} ago${a.oid ? ` at ${a.oid.slice(0, 7)}` : ''}` : who
         return `@${p.author?.login ?? '?'}  ${when}  ${approvedWhy(p, now)}  ${ciMark(p)}  +${p.additions} -${p.deletions}`
       }
       if (tab === 'review') {

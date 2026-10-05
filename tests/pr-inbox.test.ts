@@ -132,6 +132,8 @@ type StubOptions = {
   body?: string
   // What git and ghq answer, by argv (stdout and exit code); unanswered, they print nothing and succeed
   git?: (argv: readonly string[]) => { stdout?: string; exitCode?: number } | undefined
+  // The same for particular gh calls
+  gh?: (argv: readonly string[]) => { stdout?: string; exitCode?: number } | undefined
   // Commands (argv[0]) that exit with an error
   fail?: string[]
   // stderr of a failing command
@@ -201,7 +203,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
       })
     const content = e.argv.find((a) => a.includes('/contents/'))?.match(/\/contents\/([^?]+)/)?.[1]
     if (content !== undefined) stdout = opts.files?.[decodeURIComponent(content)] ?? ''
-    const answered = e.argv[0] === 'git' || e.argv[0] === 'ghq' ? opts.git?.(e.argv) : undefined
+    const answered = e.argv[0] === 'git' || e.argv[0] === 'ghq' ? opts.git?.(e.argv) : e.argv[0] === 'gh' ? opts.gh?.(e.argv) : undefined
     if (answered?.stdout !== undefined) stdout = answered.stdout
     const exitCode =
       answered?.exitCode ?? (opts.fail?.includes(e.argv[0] ?? '') || opts.fail?.includes(e.argv.slice(0, 2).join(' ')) ? 1 : 0)
@@ -368,6 +370,12 @@ test('bot and stale PRs are listed, each group under its heading, with nothing t
 
 // The approve call, pinned to the commit that was on screen
 const APPROVE_11 = ['gh', 'api', '-X', 'POST', 'repos/acme/app/pulls/11/reviews', '-f', 'event=APPROVE', '-f', `commit_id=${HEAD}`]
+// An approval the AI review made on its own says so on GitHub
+const AUTO_APPROVE_11 = [
+  ...APPROVE_11,
+  '-f',
+  `body=Approved by the pr-inbox AI review on its own (ai_approve auto) at ${HEAD.slice(0, 7)}.`,
+]
 const approved = (calls: string[][]) => calls.some((c) => c.includes('event=APPROVE') || c.includes('--approve'))
 
 test('approves only when Approve is chosen in the confirmation', async ($, on) => {
@@ -1059,11 +1067,19 @@ const approvedAt = (s: Stubs) => s.calls.filter((c) => c.includes('event=APPROVE
 const reviewsOf = (s: Stubs) => s.reviewCalls.filter((c) => c.kind === 'review')
 const perspectiveOf = (prompt: string) => prompt.match(/Perspective: ([^.]+)\./)?.[1]
 
+// v, then, when it passed and waits for you, a: a passed review no longer opens a dialog by itself
 async function pressReview($: TestEngine, s: Stubs) {
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-ai-review' })
   await settleReview(s)
+  await approveIfPassed(ui, s)
   return ui
+}
+
+async function approveIfPassed(ui: Finder & { press: (q: { key: string }) => Promise<unknown> }, s: Stubs) {
+  if (!(await ui.find({ type: 'Text', text: /^AI review ✓ passed/ } as never))) return
+  await ui.press({ key: 'act-approve' })
+  await settleReview(s)
 }
 
 test('v reviews from each perspective on the review model, then approves after confirmation', async ($, on) => {
@@ -1080,8 +1096,10 @@ test('v reviews from each perspective on the review model, then approves after c
   expect(s.reviewCalls.every((c) => c.model === 'sonnet')).toBe(true)
   expect(reviewsOf(s)[0]?.prompt).toContain(`acme/app#11 at commit ${HEAD}`)
   expect(s.questions.at(-1)).toContain(`Approve acme/app#11 at ${HEAD.slice(0, 7)}`)
-  expect(s.questions.at(-1)).toContain('The AI review passed 5 perspectives with no important findings.')
+  expect(s.questions.at(-1)).toContain('All 5 AI reviewers passed it with no important findings.')
   expect(approvedAt(s)).toEqual([APPROVE_11])
+  // The selection moved on to the next request; back on #11, its review says approved
+  await ui.press({ key: 'nav-up' })
   expect(await ui.find({ type: 'Text', text: /^AI review ✓ approved at aaaaaaa: no blocking issues/ })).toBeDefined()
   await ui.unmount()
 })
@@ -1128,7 +1146,7 @@ test("ai_approve auto approves a member's PR without asking", { options: { ai_ap
   await start($, s.clock)
   const ui = await pressReview($, s)
   expect(s.questions).toEqual([])
-  expect(approvedAt(s)).toEqual([APPROVE_11])
+  expect(approvedAt(s)).toEqual([AUTO_APPROVE_11])
   await ui.unmount()
 })
 
@@ -1140,7 +1158,7 @@ for (const [who, over] of [
     const s = stubs(on, { answer: 'Cancel', graphql: only(member(over)) })
     await start($, s.clock)
     const ui = await pressReview($, s)
-    expect(s.questions.at(-1)).toContain('The AI review passed')
+    expect(s.questions.at(-1)).toContain('AI reviewers passed it')
     expect(approvedAt(s)).toEqual([])
     await ui.unmount()
   })
@@ -1213,7 +1231,7 @@ test('an important finding the verifier refutes does not block', { options: { ai
   })
   await start($, s.clock)
   const ui = await pressReview($, s)
-  expect(approvedAt(s)).toEqual([APPROVE_11])
+  expect(approvedAt(s)).toEqual([AUTO_APPROVE_11])
   await ui.unmount()
 })
 
@@ -1354,6 +1372,7 @@ async function pressBotReview($: TestEngine, s: Stubs) {
   for (let i = 0; i < 5 && !(await isSelectedUrl(ui, BOT.url)); i++) await ui.press({ key: 'nav-down' })
   await ui.press({ key: 'act-ai-review' })
   await settleReview(s)
+  await approveIfPassed(ui, s)
   return ui
 }
 
@@ -1368,7 +1387,19 @@ test(
     expect(reviewsOf(s)[0]?.prompt).toContain('release notes')
     expect(s.questions).toEqual([])
     expect(approvedAt(s)).toEqual([
-      ['gh', 'api', '-X', 'POST', 'repos/acme/app/pulls/12/reviews', '-f', 'event=APPROVE', '-f', `commit_id=${HEAD}`],
+      [
+        'gh',
+        'api',
+        '-X',
+        'POST',
+        'repos/acme/app/pulls/12/reviews',
+        '-f',
+        'event=APPROVE',
+        '-f',
+        `commit_id=${HEAD}`,
+        '-f',
+        `body=Approved by the pr-inbox AI review on its own (ai_approve auto) at ${HEAD.slice(0, 7)}.`,
+      ],
     ])
     await ui.unmount()
   },
@@ -1382,7 +1413,7 @@ test(
     await start($, s.clock)
     const ui = await pressBotReview($, s)
     expect(reviewsOf(s).length).toBe(5)
-    expect(s.questions.at(-1)).toContain('The AI review passed')
+    expect(s.questions.at(-1)).toContain('AI reviewers passed it')
     expect(approvedAt(s)).toEqual([])
     await ui.unmount()
   },
@@ -1583,7 +1614,7 @@ test("a CLAUDE.md that talks to Claude is the repository's guide, not an injecti
     expect.objectContaining({ source: 'repository guide CLAUDE.md on the base branch main', content: guide }),
   )
   expect(s.calls.some((c) => c.join(' ').includes(`CLAUDE.md?ref=${HEAD}`))).toBe(false)
-  expect(approvedAt(s)).toEqual([APPROVE_11])
+  expect(approvedAt(s)).toEqual([AUTO_APPROVE_11])
   await ui.unmount()
 })
 
@@ -1623,7 +1654,7 @@ test(
     expect((JSON.parse(guides) as { source: string }[]).map((g) => g.source)).toContain(
       'repository guide .claude/rules/testing.md on the base branch main',
     )
-    expect(approvedAt(s)).toEqual([APPROVE_11])
+    expect(approvedAt(s)).toEqual([AUTO_APPROVE_11])
     await ui.unmount()
   },
 )
@@ -1726,7 +1757,7 @@ test('after a passed AI review, a says so in its label and its dialog', async ($
   const ui = await pressReview($, s)
   expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('approve')
   await ui.press({ key: 'act-approve' })
-  expect(s.questions.at(-1)).toContain('The AI review passed at this commit.')
+  expect(s.questions.at(-1)).toContain('All 5 AI reviewers passed it')
   await ui.unmount()
 })
 
@@ -2627,7 +2658,7 @@ test('after the fix, you can look at its diff first; c then pushes it', async ($
   await $.turn.complete({ turnId: 'fix3', answer: '' } as never)
   for (let i = 0; i < 10; i++) await s.clock.settle()
   expect(s.choices.at(-1)).toEqual(['Cancel', 'Push', 'Show the diff first'])
-  expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'diff', `${HEAD}..HEAD`])
+  expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'diff', 'origin/fix-21..HEAD'])
   expect(await ui.find({ type: 'Text', text: /^⇡ the fix, not pushed yet/ })).toBeDefined()
   expect(s.calls.some((c) => c.includes('push'))).toBe(false)
   // Back in the list it waits as ⇡ PUSH; c offers the push
@@ -2636,5 +2667,162 @@ test('after the fix, you can look at its diff first; c then pushes it', async ($
   s.setAnswer('Push 1 commit')
   await ui.press({ key: 'act-ci' })
   expect(s.questions.at(-2)).toContain('A fix of #21 waits')
+  await ui.unmount()
+})
+
+// ---- Trust, recovery and the daily flow ----
+
+test('while Claude fixes CI, it cannot push, merge, approve or post through gh; committing is fine', async ($, on) => {
+  const s = stubs(on, { answer: 'Fix with Claude (asks before push)', git: fixGit(), locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-ci' })
+  await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'fixg' })
+  for (const command of [
+    'git push origin HEAD:fix-21',
+    'git -C /tmp/x push --force',
+    'gh pr merge 21 --squash',
+    'gh pr review 21 --approve',
+    'gh api -X POST repos/acme/app/issues/21/comments -f body=hi',
+  ]) {
+    expect(await $.tool.call({ tool: 'Bash', command } as never)).toHaveProperty('deny')
+  }
+  expect(await $.tool.call({ tool: 'Bash', command: 'git commit -am "Fix the spec"' } as never)).toMatchObject({ result: 'ok' })
+  expect(await $.tool.call({ tool: 'Bash', command: 'gh run view 1 --log-failed -R acme/app' } as never)).toMatchObject({ result: 'ok' })
+  await ui.unmount()
+})
+
+test('a worktree with commits left from before asks before going on; a turn cut short says so at the push', async ($, on) => {
+  const left = (argv: readonly string[]) => {
+    const a = argv.join(' ')
+    if (a === `git -C ${WORKTREE} rev-parse --is-inside-work-tree`) return { stdout: 'true' }
+    return fixGit('old1111 An earlier try')(argv)
+  }
+  const s = stubs(on, { answer: 'Fix with Claude (asks before push)', git: left, locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  s.setAnswer('Fix with Claude (asks before push)')
+  await ui.press({ key: 'act-ci' })
+  expect(s.questions.at(-1)).toContain('The worktree of #21 has 1 commit not on fix-21: old1111 An earlier try')
+  expect(s.choices.at(-1)).toEqual(['Cancel', 'Go on from them', 'Start again from the PR head'])
+  await ui.unmount()
+})
+
+test('a fix turn that was interrupted says so in the push dialog', async ($, on) => {
+  const s = stubs(on, { answer: 'Fix with Claude (asks before push)', git: fixGit(), locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-ci' })
+  await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'fixi' })
+  s.setAnswer('Cancel')
+  await $.turn.complete({ turnId: 'fixi', answer: '', reason: 'aborted', isAborted: true } as never)
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.questions.at(-1)).toStartWith('The fix turn stopped before it finished. Push 1 commit')
+  await ui.unmount()
+})
+
+test('a passed AI review does not open a dialog by itself: the row says so, and a approves', async ($, on) => {
+  const s = stubs(on, { answer: 'Approve' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-ai-review' })
+  await settleReview(s)
+  expect(s.questions).toEqual([])
+  expect(approvedAt(s)).toEqual([])
+  expect(s.toasts.some((t) => t.includes('✓ AI review passed #11') && t.includes('a approves it'))).toBe(true)
+  await ui.press({ key: 'act-approve' })
+  expect(s.questions.at(-1)).toContain('All 5 AI reviewers passed it with no important findings.')
+  expect(approvedAt(s)).toEqual([APPROVE_11])
+  await ui.unmount()
+})
+
+test('after an approval the selection goes to the next review request, not to where the PR moved', async ($, on) => {
+  const s = stubs(on, { answer: 'Approve' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect(await isSelected(ui, 11)).toBe(true)
+  await ui.press({ key: 'act-approve' })
+  expect(await isSelected(ui, 13)).toBe(true)
+  await ui.unmount()
+})
+
+test('w reviews the bot PRs without moving the selection, then asks once to approve those that passed', async ($, on) => {
+  const s = stubs(on, { graphql: twoBots, answer: 'Approve all 2' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  const before = JSON.stringify(await ui.find({ key: 'line-https://github.com/acme/app/pull/12' }))
+  await ui.press({ key: 'review-bots' })
+  await settleReview(s)
+  await settleReview(s)
+  expect(s.questions.length).toBe(1)
+  expect(s.questions[0]).toContain('Approve 2 bot PRs that passed the AI review?')
+  expect(s.questions[0]).toContain(`#12 @${HEAD.slice(0, 7)}`)
+  expect(approvedAt(s).map((c) => c[4])).toEqual(['repos/acme/app/pulls/12/reviews', 'repos/acme/app/pulls/14/reviews'])
+  expect(before.includes('"▸')).toBe(true)
+  await ui.unmount()
+})
+
+test('a review stopped by a gate says it did not run, in plain words', async ($, on) => {
+  const red = member({ ...failing([{ __typename: 'CheckRun', name: 'rspec', conclusion: 'FAILURE', detailsUrl: null }]) })
+  const s = stubs(on, { graphql: only(red) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-ai-review' })
+  await settleReview(s)
+  expect(s.toasts.at(-1)).toBe('AI review not run on #11: CI is failing')
+  await ui.unmount()
+})
+
+test('a merge refused because the PR moved says so and fetches again', async ($, on) => {
+  const s = stubs(on, {
+    answer: 'Squash and merge',
+    fail: ['gh pr'],
+    stderr: 'Head branch was modified. Review and try the merge again (expected head sha)',
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'nav-down' })
+  const fetches = s.calls.filter((c) => c.includes('graphql')).length
+  await ui.press({ key: 'act-merge' })
+  expect(s.toasts.at(-1)).toContain('Not merged: #22 has new commits since')
+  expect(s.calls.filter((c) => c.includes('graphql')).length).toBe(fetches + 1)
+  await ui.unmount()
+})
+
+test('the last page of the reader says what comes next, and n reads the next PR', async ($, on) => {
+  const s = stubs(on, { diff: SAMPLE_DIFF })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-diff' })
+  await ui.press({ key: 'diff-next' })
+  await ui.press({ key: 'diff-next' })
+  expect(await ui.find({ type: 'Text', text: /^── end of app#11 · a approve · v review · n next PR · q back ──$/ })).toBeDefined()
+  await ui.press({ key: 'diff-next' })
+  expect(s.toasts.at(-1)).toContain('End of this PR · n: the next PR')
+  await ui.press({ key: 'diff-next-pr' })
+  expect(await ui.find({ type: 'Text', text: /^app#13$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a PR you approved that changed says how much changed, and by whom', async ($, on) => {
+  const moved = pr({ number: 62, url: 'https://github.com/acme/app/pull/62', ...mineApproved('c'.repeat(40)) })
+  const s = stubs(on, {
+    graphql: JSON.stringify({
+      data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [] }, approved: { nodes: [moved] } },
+    }),
+    gh: (argv) =>
+      argv.some((a) => a.includes('/compare/')) && argv.includes('--jq') ? { stdout: '{"c":2,"a":12,"d":3,"by":["alice"]}' } : undefined,
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(await lineOf(ui, 62)).toContain('re-review: 2 commits since your approval (+12 -3 by @alice)')
   await ui.unmount()
 })
