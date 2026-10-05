@@ -84,6 +84,16 @@ const APPROVED = [
   }),
 ]
 
+const stacked = (at) => ({
+  stack: {
+    number: 94,
+    size: 3,
+    baseRefName: 'main',
+    entries: { nodes: [95, 96, 97].map((n, i) => ({ position: i + 1, pullRequest: { number: n, state: 'OPEN', isDraft: false } })) },
+  },
+  stackEntry: { position: at },
+})
+
 const MINE = [
   pr('storefront', 475, 'Move session storage to Redis', 'you', {
     additions: 188,
@@ -102,6 +112,10 @@ const MINE = [
     ...ci('PENDING'),
   }),
   pr('infra', 88, 'Tune autoscaling thresholds for queue workers', 'you', { additions: 14, deletions: 8 }),
+  // A stack made with gh stack: metrics, then autoscaling on them, then a dashboard
+  pr('infra', 95, 'Export queue depth metrics', 'you', { additions: 64, deletions: 3, reviewDecision: 'APPROVED', ...stacked(1) }),
+  pr('infra', 96, 'Autoscale workers on queue depth', 'you', { additions: 41, deletions: 12, ...stacked(2) }),
+  pr('infra', 97, 'Queue dashboard', 'you', { additions: 120, deletions: 0, ...ci('PENDING'), ...stacked(3) }),
   pr('docs', 61, 'API versioning guide', 'you', { isDraft: true, updatedAt: ago(24 * 45), additions: 240, deletions: 0 }),
 ]
 
@@ -340,6 +354,10 @@ if (args[0] === 'api' && args[1] === 'graphql') {
     out([])
   } else fail(`fake gh: unsupported: gh ${args.join(' ')}`)
 } else if (args[0] === 'pr' && args[1] === 'merge') {
+  out('')
+} else if (args[0] === 'stack' && args[1] === '--version') {
+  out('gh stack version 0.2.0 (demo)')
+} else if (args[0] === 'stack' && args[1] === 'merge') {
   out('')
 } else if (args[0] === 'run' && args[1] === 'rerun') {
   out('')

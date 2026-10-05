@@ -148,6 +148,8 @@ type StubOptions = {
 
 function stubs(on: TestOn, opts: StubOptions = {}) {
   const calls: string[][] = []
+  // The environment each command got, beside its argv
+  const envs: (Record<string, string> | undefined)[] = []
   const prompts: string[] = []
   const systems: string[] = []
   const submitted: string[] = []
@@ -175,6 +177,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('process.run', (_, e) => {
     calls.push([...e.argv])
+    envs.push(e.init?.env)
     let stdout = ''
     if (e.argv[1] === 'api' && e.argv[2] === 'graphql') stdout = opts.graphql ?? GRAPHQL
     if (e.argv[2] === 'view' && e.argv.includes('headRefOid')) stdout = JSON.stringify({ headRefOid: opts.head ?? HEAD })
@@ -192,7 +195,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
       })
     const content = e.argv.find((a) => a.includes('/contents/'))?.match(/\/contents\/([^?]+)/)?.[1]
     if (content !== undefined) stdout = opts.files?.[decodeURIComponent(content)] ?? ''
-    const exitCode = opts.fail?.includes(e.argv[0] ?? '') ? 1 : 0
+    const exitCode = opts.fail?.includes(e.argv[0] ?? '') || opts.fail?.includes(e.argv.slice(0, 2).join(' ')) ? 1 : 0
     return { value: { exitCode, stdout, stderr: exitCode ? (opts.stderr ?? '') : '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('model.complete', async (_, e) => {
@@ -261,7 +264,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
     if (opts.dismiss) return { deny: 'dismissed' }
     return { result: { answers: { [question]: opts.answer ?? 'Cancel' } } }
   })
-  return { calls, prompts, systems, submitted, statuses, toasts, questions, choices, logs, screened, reviewCalls, store, clock }
+  return { calls, envs, prompts, systems, submitted, statuses, toasts, questions, choices, logs, screened, reviewCalls, store, clock }
 }
 
 // Start the session and run until the fetch and background analyses finish
@@ -2266,5 +2269,92 @@ test('the description shown loses escape sequences, and local file links do not 
   expect(text).not.toContain('\u202e')
   expect(text).not.toContain('](file:')
   expect(text).toContain('cleared')
+  await ui.unmount()
+})
+
+// ---- Stacked PRs (gh stack) ----
+
+const stackOf = (at: number, members: number[]) => ({
+  stack: {
+    number: 70,
+    size: members.length,
+    baseRefName: 'main',
+    entries: { nodes: members.map((n, i) => ({ position: i + 1, pullRequest: { number: n, state: 'OPEN', isDraft: false } })) },
+  },
+  stackEntry: { position: at },
+})
+const BOTTOM = pr({
+  number: 71,
+  title: 'Auth layer',
+  url: 'https://github.com/acme/app/pull/71',
+  reviewDecision: 'APPROVED',
+  ...stackOf(1, [71, 72, 73]),
+})
+const MIDDLE = pr({
+  number: 72,
+  title: 'API endpoints',
+  url: 'https://github.com/acme/app/pull/72',
+  reviewDecision: 'APPROVED',
+  ...stackOf(2, [71, 72, 73]),
+})
+const TOP = pr({
+  number: 73,
+  title: 'Frontend',
+  url: 'https://github.com/acme/app/pull/73',
+  reviewDecision: 'CHANGES_REQUESTED',
+  ...stackOf(3, [71, 72, 73]),
+})
+const LONE = pr({ number: 74, title: 'Unrelated', url: 'https://github.com/acme/app/pull/74', reviewDecision: 'APPROVED' })
+const stackGraphql = JSON.stringify({
+  data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [LONE, MIDDLE, TOP, BOTTOM] } },
+})
+
+test('a stack is listed together, bottom first, where its most urgent member stands, with its rail', async ($, on) => {
+  const s = stubs(on, { graphql: stackGraphql })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  // #73 needs action, so the whole stack comes first: 71, 72, 73, then the lone ready PR
+  expect(await isSelected(ui, 71)).toBe(true)
+  for (const [n, rail] of [
+    [72, '├'],
+    [73, '└'],
+    [74, ' '],
+  ] as const) {
+    await ui.press({ key: 'nav-down' })
+    expect(await isSelected(ui, n)).toBe(true)
+    expect(await lineOf(ui, n)).toContain(`"${rail}"`)
+  }
+  await ui.press({ key: 'nav-up' })
+  expect(await lineOf(ui, 73)).toContain('stack #70 · 3/3 on #72')
+  await ui.unmount()
+})
+
+test('m on a stacked PR merges the stack up to it with gh stack, naming every PR that goes', async ($, on) => {
+  const s = stubs(on, { graphql: stackGraphql, answer: 'Squash and merge' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'nav-down' })
+  expect(await isSelected(ui, 72)).toBe(true)
+  await ui.press({ key: 'act-merge' })
+  expect(s.questions.at(-1)).toContain('Merge stack #70 of acme/app up to #72 into main: 2 PRs (#71, #72), all or nothing?')
+  expect(s.choices.at(-1)?.[0]).toBe('Cancel')
+  const i = s.calls.findIndex((c) => c[1] === 'stack' && c[2] === 'merge')
+  expect(s.calls[i]).toEqual(['gh', 'stack', 'merge', '72', '--yes', '--squash'])
+  expect(s.envs[i]?.GH_REPO).toBe('acme/app')
+  // Never a plain merge, which would land it in the branch below
+  expect(s.calls.some((c) => c[1] === 'pr' && c[2] === 'merge')).toBe(false)
+  await ui.unmount()
+})
+
+test('without gh stack, m on a stacked PR says how to install it and merges nothing', async ($, on) => {
+  const s = stubs(on, { graphql: stackGraphql, answer: 'Squash and merge', fail: ['gh stack'] })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-merge' })
+  expect(s.toasts.at(-1)).toContain('gh extension install github/gh-stack')
+  expect(s.calls.some((c) => c.includes('merge'))).toBe(false)
   await ui.unmount()
 })

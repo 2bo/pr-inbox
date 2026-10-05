@@ -27,6 +27,14 @@ type PR = {
   reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN'
   commits: { nodes: { commit: { statusCheckRollup: { state: string; contexts?: { nodes: (CheckContext | null)[] } } | null } }[] }
+  // A GitHub stack of PRs (gh stack): its number and members, and where this PR sits (1 is on the base branch)
+  stack?: {
+    number: number
+    size: number
+    baseRefName: string
+    entries?: { nodes: ({ position: number; pullRequest: { number: number; state: string; isDraft: boolean } | null } | null)[] }
+  } | null
+  stackEntry?: { position: number } | null
   // Only on PRs you reviewed: each reviewer's latest review
   latestReviews?: {
     nodes: ({ author: { login: string } | null; state: string; submittedAt: string | null; commit: { oid: string } | null } | null)[]
@@ -178,6 +186,8 @@ fragment pr on PullRequest {
   author { login __typename }
   reviewDecision mergeable
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+  stack { number size baseRefName entries(first: 20) { nodes { position pullRequest { number state isDraft } } } }
+  stackEntry { position }
 }
 fragment checks on PullRequest {
   commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
@@ -510,6 +520,53 @@ function groups(now: number): Record<Group, PR[]> {
   return g
 }
 
+// Stacks: which stack a PR is in (per repository), and where
+function stackKey(pr: PR): string {
+  return pr.stack && pr.stack.size > 1 ? `${pr.repository.nameWithOwner}#${pr.stack.number}` : ''
+}
+
+function stackPosition(pr: PR): number {
+  return pr.stackEntry?.position ?? 0
+}
+
+// The rail drawn left of a stacked PR: ┌ at the bottom of the stack (on the base branch), ├ in between, └ on top
+function stackRail(pr: PR): string {
+  if (!stackKey(pr)) return ' '
+  const at = stackPosition(pr)
+  return at <= 1 ? '┌' : at >= (pr.stack?.size ?? 0) ? '└' : '├'
+}
+
+// "stack #18 · 2/3 on #101": where the PR sits and what it is stacked on
+function stackNote(pr: PR): string {
+  if (!stackKey(pr) || !pr.stack) return ''
+  const at = stackPosition(pr)
+  const below = pr.stack.entries?.nodes?.find((n) => n?.position === at - 1)?.pullRequest
+  const on = below ? ` on #${below.number}${below.state === 'OPEN' ? '' : ` (${below.state.toLowerCase()})`}` : ''
+  return `stack #${pr.stack.number} · ${at}/${pr.stack.size}${on}`
+}
+
+// Each stack's PRs together, bottom first, where its first member stood (the most urgent one, as rows come sorted)
+// The heading a stacked PR goes under is its stack's: stackLead maps each member to the first one
+let stackLead = new Map<string, string>()
+function groupStacks(rows: PR[]): PR[] {
+  const out: PR[] = []
+  const placed = new Set<string>()
+  stackLead = new Map()
+  for (const p of rows) {
+    const key = stackKey(p)
+    if (!key) {
+      out.push(p)
+      continue
+    }
+    if (placed.has(key)) continue
+    placed.add(key)
+    const members = rows.filter((x) => stackKey(x) === key).sort((a, b) => stackPosition(a) - stackPosition(b))
+    for (const m of members) stackLead.set(m.url, p.url)
+    out.push(...members)
+  }
+  return out
+}
+
 // Your latest approval of a PR, when your latest review of it is one
 function myApproval(pr: PR): { oid: string; at: string } | undefined {
   const mineReview = (pr.latestReviews?.nodes ?? []).find((r) => r?.author?.login === viewer)
@@ -673,7 +730,7 @@ function visibleRows(g: Record<Group, PR[]>): PR[] {
     tab === 'review'
       ? [...g.humans, ...g.bots, ...g.approved, ...(showSnoozed ? g.snoozedReview : [])]
       : [...g.action, ...g.ready, ...g.waiting, ...g.stale, ...(showSnoozed ? g.snoozedMine : [])]
-  return rows.filter(matchesFilter)
+  return groupStacks(rows.filter(matchesFilter))
 }
 
 // Every word of the filter must appear in the PR's repository, number, title or author
@@ -2498,6 +2555,7 @@ const MERGE_METHODS: Record<string, string> = {
 // Merges a ready PR after the person picks a method in a dialog (Cancel selected first). The merge is pinned to the
 // commit on screen: if the head moved, GitHub refuses it
 async function mergePr($: EngineInterface, pr: PR): Promise<void> {
+  if (stackKey(pr)) return mergeStack($, pr)
   const sha = pr.headRefOid.slice(0, 7)
   if (!REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) {
     $.ui.toast('Merge failed: unexpected repository name or commit id', { timeoutMs: 8000 })
@@ -2524,6 +2582,64 @@ async function mergePr($: EngineInterface, pr: PR): Promise<void> {
   $.ui.toast(`✦ merged ${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number} · ${answer.toLowerCase()}`)
   $.ui.log(
     `pr-inbox merged ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${answer.toLowerCase()}): you chose it in the dialog of m`,
+  )
+  await refresh($)
+}
+
+// A stacked PR merges with gh stack: the stack from its bottom up to this PR, all or nothing, into the stack's base.
+// A plain merge would land it in the branch below instead. The dialog names every PR that goes (Cancel first)
+async function mergeStack($: EngineInterface, pr: PR): Promise<void> {
+  const stack = pr.stack
+  if (!stack || !REPO_NAME.test(pr.repository.nameWithOwner)) return
+  const version = await $.process.run(['gh', 'stack', '--version']).catch(() => ({ exitCode: 1 }))
+  if (version.exitCode !== 0) {
+    $.ui.toast('This PR is in a stack: merging it needs gh stack. Install it: gh extension install github/gh-stack', {
+      timeoutMs: 10000,
+    })
+    return
+  }
+  const at = stackPosition(pr)
+  const goes = (stack.entries?.nodes ?? [])
+    .filter((n): n is { position: number; pullRequest: { number: number; state: string; isDraft: boolean } } =>
+      Boolean(n?.pullRequest && n.position <= at && n.pullRequest.state === 'OPEN'),
+    )
+    .sort((a, b) => a.position - b.position)
+  // What may stop it: PRs below that are drafts, or that you can see are not ready
+  const notReady = goes
+    .map((n) => {
+      const below = mine.find((m) => m.repository.nameWithOwner === pr.repository.nameWithOwner && m.number === n.pullRequest.number)
+      if (n.pullRequest.isDraft) return `#${n.pullRequest.number} is a draft`
+      if (below && below.url !== pr.url && classify(below, fetchedAt || Date.now()).group !== 'ready')
+        return `#${n.pullRequest.number} is not ready (${badgeOf(below).text.trim().toLowerCase()})`
+      return ''
+    })
+    .filter(Boolean)
+  const list = goes.map((n) => `#${n.pullRequest.number}`).join(', ')
+  const warn = notReady.length ? ` GitHub may refuse it: ${notReady.join('; ')}.` : ''
+  let answer = ''
+  try {
+    answer = await $.ui.ask(
+      `Merge stack #${stack.number} of ${pr.repository.nameWithOwner} up to #${pr.number} into ${clean(stack.baseRefName)}: ${plural(goes.length, 'PR')} (${list}), all or nothing?${warn}`,
+      { options: ['Cancel', ...Object.keys(MERGE_METHODS)], header: 'Stack merge' },
+    )
+  } catch {
+    // The dialog was dismissed
+  }
+  await focusPane($)
+  const flag = MERGE_METHODS[answer]
+  if (!flag) return
+  // gh stack has no -R: GH_REPO names the repository, so it works from any directory
+  const r = await $.process.run(['gh', 'stack', 'merge', String(pr.number), '--yes', flag], {
+    env: { GH_REPO: pr.repository.nameWithOwner, GH_STACK_NO_UPDATE_NOTIFIER: '1' },
+    timeoutMs: 120000,
+  })
+  if (r.exitCode !== 0) {
+    $.ui.toast(`Stack merge failed: ${fit(clean(r.stderr || r.stdout), 100)}`, { timeoutMs: 10000 })
+    return
+  }
+  $.ui.toast(`✦ merged stack #${stack.number} up to #${pr.number} (${list}) · ${answer.toLowerCase()}`)
+  $.ui.log(
+    `pr-inbox merged stack #${stack.number} of ${pr.repository.nameWithOwner} up to #${pr.number} (${list}, ${answer.toLowerCase()}): you chose it in the dialog of m`,
   )
   await refresh($)
 }
@@ -3149,6 +3265,10 @@ export function register(on: On, options: PluginOptions) {
     }
 
     const metaLine = (p: PR): string => {
+      const stacked = stackNote(p)
+      return stacked ? `${stacked}  ${metaOf(p)}` : metaOf(p)
+    }
+    const metaOf = (p: PR): string => {
       if (isApproved(p)) {
         const a = myApproval(p)
         const when = a ? `approved by you ${elapsed(a.at, now)} ago${a.oid ? ` at ${a.oid.slice(0, 7)}` : ''}` : 'approved by you'
@@ -3433,7 +3553,7 @@ export function register(on: On, options: PluginOptions) {
         flexDirection: 'row',
         children: [
           Text({ color: focused ? NEON.pink : NEON.muted, bold: true, children: [lead] }),
-          Text({ children: [' '] }),
+          Text({ color: NEON.violet, bold: true, children: [stackRail(p)] }),
           Text({ ...(b.color ? { color: b.color } : { dimColor: true }), bold: b.bold === true, children: [b.text] }),
           Text({ children: [' '] }),
           prLink ? (isSelected ? link(prLink, label, true) : quietLink(prLink, label)) : Text({ children: [label] }),
@@ -3494,7 +3614,9 @@ export function register(on: On, options: PluginOptions) {
     // around the selection when it does not fit
     const selectedPr = rows.find((p) => p.url === selected)
     // Each group after the first opens with a heading row: bots, approved by you, stale, snoozed
-    const sectionOf = (p: PR): string => {
+    const sectionOf = (q: PR): string => {
+      // A stacked PR goes under its stack's heading
+      const p = findPr(stackLead.get(q.url) ?? q.url) ?? q
       if (isSnoozed(p)) return `⏸ snoozed ${(tab === 'review' ? g.snoozedReview : g.snoozedMine).length}`
       if (tab === 'review') {
         if (isApproved(p)) return `✓ approved by you, not merged ${g.approved.length}`
