@@ -2136,3 +2136,19 @@ test('in a repository that requires no review, a clean PR with passing CI is rea
   expect(await ui.find({ key: 'act-merge' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('h and l move to the tab on the left and right', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  const label = async () => String((await ui.find({ key: 'tab-mine' }))?.props.label)
+  expect(await label()).not.toContain('◆')
+  await ui.press({ key: 'tab-next' })
+  expect(await label()).toContain('◆')
+  // Past the last tab it stays
+  await ui.press({ key: 'tab-next' })
+  expect(await label()).toContain('◆')
+  await ui.press({ key: 'tab-prev' })
+  expect(String((await ui.find({ key: 'tab-review' }))?.props.label)).toContain('◆')
+  await ui.unmount()
+})

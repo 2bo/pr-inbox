@@ -40,7 +40,8 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 | `m` | Merge one of your PRs that is ready, after picking a method (pinned to the commit on screen) |
 | `c` | Re-run the failed GitHub Actions jobs of one of your PRs |
 | `f` | Filter by repository, number, title or @author (Enter keeps it; an empty one clears it) |
-| `h` | Show the keys |
+| `h` / `l` | The tab to the left / right (`1` / `2` pick one) |
+| `u` | Show the keys |
 | `Ctrl+X` `Tab` | From the prompt back to the pane (or click it). Keys reach the pane only while it has the focus. The hint line under the prompt says which way to go |
 | `o` | Open in the browser |
 | `b` / `s` / `z` | Show or hide bot PRs / stale PRs / snoozed PRs |

@@ -2758,15 +2758,26 @@ export function register(on: On, options: PluginOptions) {
           redraw()
         },
       })
+    const TABS: (typeof tab)[] = ['review', 'mine']
+    const switchTab = (by: number) => {
+      const i = TABS.indexOf(tab)
+      const to = TABS[Math.min(TABS.length - 1, Math.max(0, i + by))] ?? tab
+      if (to === tab) return
+      tab = to
+      selected = ''
+      redraw()
+    }
     // Widths of the top rows' items, to know how many lines they take once wrapped
     const row1 = [
       LOGO,
+      'h: ◂',
       `1: ◆ review ${g.humans.length} ⚙${g.bots.length}`,
       `2: ◆ mine ${mine.length}`,
+      'l: ▸',
       `r: ${refreshLabel}`,
-      `f: ${filterText ? `/${filterText}` : 'filter'}`,
-      `h: ${showHelp ? 'close help' : '?'}`,
-      'q: close',
+      `f: ${filterText ? `/${filterText}` : '/'}`,
+      `u: ${showHelp ? 'close help' : '?'}`,
+      'q: ✕',
     ]
     let topLines = wrappedRowLines(row1.map(textWidth), 2, columns)
     const top: El[] = [
@@ -2787,18 +2798,21 @@ export function register(on: On, options: PluginOptions) {
               Text({ color: NEON.cyan, bold: true, dimColor: !focused, children: ['inbox'] }),
             ],
           }),
+          // h / l move between the tabs as 1 / 2 pick one
+          small('tab-prev', '◂', 'h', () => switchTab(-1)),
           tabButton('review', `${tab === 'review' ? '◆ ' : ''}review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`, '1'),
           tabButton('mine', `${tab === 'mine' ? '◆ ' : ''}mine ${mine.length}`, '2'),
+          small('tab-next', '▸', 'l', () => switchTab(1)),
           small('refresh', refreshLabel, 'r', () => refresh($)),
-          small('filter', filterText ? `/${filterText}` : 'filter', 'f', () => {
+          small('filter', filterText ? `/${filterText}` : '/', 'f', () => {
             filtering = !filtering
             redraw()
           }),
-          small('help', showHelp ? 'close help' : '?', 'h', () => {
+          small('help', showHelp ? 'close help' : '?', 'u', () => {
             showHelp = !showHelp
             redraw()
           }),
-          small('close', 'close', 'q', () => {
+          small('close', '✕', 'q', () => {
             void $.ui.close({ id: PANE })
           }),
         ],
@@ -3363,6 +3377,7 @@ export function register(on: On, options: PluginOptions) {
     if (showHelp) {
       const help: [string, string][] = [
         ['1 / 2', 'To review / My PRs'],
+        ['h / l', 'the tab to the left / right'],
         ['j / k', 'next / previous PR'],
         ['e', 'ask Claude to explain the PR (read-only), or diagnose your own'],
         ['a', 'approve, after a confirmation'],
@@ -3381,7 +3396,7 @@ export function register(on: On, options: PluginOptions) {
         ['Esc', 'back to the prompt; the pane stays open (ctrl+x tab comes back)'],
         ['Ctrl+X Tab', 'move between the prompt and this pane (keys reach the pane only while it has the focus)'],
         ['q', 'close the pane (/pr-inbox opens it again)'],
-        ['h', 'close this help'],
+        ['u', 'close this help'],
       ]
       // Keys in cyan, what they do beside them, wrapped lines hanging under the text rather than under the key
       const KEY_WIDTH = 12
