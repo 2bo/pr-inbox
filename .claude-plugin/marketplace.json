@@ -8,7 +8,7 @@
     {
       "name": "pr-inbox",
       "source": "./",
-      "description": "An inbox for review requests and your own PRs, with AI summary, risk and release impact"
+      "description": "An inbox for review requests and your own PRs: AI summary and risk, an AI review that can approve, a diff reader, merging (gh stack too) and CI fixes with Claude"
     }
   ]
 }

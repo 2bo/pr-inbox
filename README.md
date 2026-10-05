@@ -1,17 +1,19 @@
 # pr-inbox
 
-A Claude Code mod that turns your review requests and your own pull requests into an inbox, ordered by what needs you next.
+A Claude Code mod that turns your review requests and your own pull requests into an inbox, ordered by what needs you next: AI summary and risk, an AI review that can approve, a reader for the description and the diff, merging (stacks included), and CI fixes with Claude.
 
-- A status line under the prompt keeps the counts in view (`review 3 ⚙2 · ▲1 high │ mine ✗1 fix · ✓1 ready · …2 in review`)
-- `/pr-inbox` opens a pane in the spirit of lazygit and gh-dash: one line per PR (risk or state, how long it has waited as a heat bar, CI, AI review), the selected PR's details under the list, and the keys on the bottom line. Two tabs
-  - **To review**: review requests, the longest-waiting first, then those from bots under their own heading. Each PR gets an AI summary, a risk level (low / medium / high) and its impact on release (visible to users / not visible / cannot tell), taking feature flags into account. Below them, **approved by you, not merged**: PRs whose latest review from you is an approval, with why they are still open as their badge (`… REVW` waiting on other reviews, `◌ CI`, `✗ CI`, `✗ CONF`, `✓ RDY` ready to merge); those that got commits after your approval come first as `↻ RE` (re-review): `d` shows only what changed since your approval (`t` switches to the whole PR), and `a` approves the new commit
-  - Stacked PRs (GitHub stacks, as `gh stack` makes them) are listed together, bottom first, with a rail (┌ ├ └) and their place (`stack #18 · 2/3 on #101`), where the stack's most urgent PR would stand
-  - **My PRs**: needs action (changes requested, CI failed, conflict) → ready to merge → waiting for review → stale (under its heading). Failed CI checks are listed with links to their runs. CI is judged from the latest run of each check, so a job that failed and passed on a re-run counts as passed
-- A toast tells you about new review requests, and when your PRs are approved, get changes requested or fail CI. New review requests also raise an OS notification (macOS and Linux), so you see them outside Claude Code too
+![The To review tab: review requests with their risk, how long they have waited, CI and AI review; the bots under their heading; the PRs you approved with why they are still open; and the selected PR's summary and release impact below](docs/screenshot.png)
 
-![The To review tab: one line per review request with its risk, wait and CI, and the selected PR's summary and release impact below](docs/screenshot.png)
+- **To review**: review requests, the longest-waiting first, then bots' under their own heading, then the PRs you approved that are not merged yet. Each request gets an AI summary, a risk level and its impact on release
+- **My PRs**: what needs you (changes requested, CI failed, conflict), then what is ready to merge, what is in review, and what has gone quiet
+- A status line under the prompt keeps the counts in view, and new review requests come as a toast and an OS notification
 
-Tested with Claude Code v2.1.288. Mods need v2.1.287 or later.
+Tested with Claude Code v2.1.289. Mods need v2.1.287 or later.
+
+## Requirements
+
+- [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`. The mod reads, approves and merges through `gh`, as the account it is signed in to
+- Optional: [gh stack](https://github.com/github/gh-stack) (`gh extension install github/gh-stack`) to merge stacked PRs, and [ghq](https://github.com/x-motemen/ghq) so `c` can find (or fetch) your clone of a repository
 
 ## Install
 
@@ -24,37 +26,89 @@ In Claude Code:
 
 Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin install pr-inbox@pr-inbox`.
 
-## Usage
+## First run
+
+1. **Before anything else**: by default each review request is analyzed as soon as Claude Code starts, which sends its title, description and diff to the model you use (see [What is sent](#security)). For work code, set `analysis` to `when opened` or `off`, or narrow it with `org_filter`, first (`/config`)
+2. The status line appears under the prompt: `review 3 ⚙2 · ▲1 high │ mine ✗1 fix · ✓1 ready · …2 in review`
+3. `/pr-inbox` opens the pane. Keys reach it while it has the focus: `ctrl+x tab` moves between the prompt and the pane, `Esc` goes back to the prompt
+4. `u` shows every key and what each mark means. A key that does nothing for the selected PR says why
+
+## Reading the list
+
+One line per PR. From left to right:
+
+| Column | Marks |
+| :- | :- |
+| Marks | `▸` selected · `●` updated since you last selected it · `⚙` a bot · `┌ ├ └` a stack, bottom (on the base branch) to top |
+| RISK (To review) | `▲ HIGH` · `◆ MED` · `○ LOW` from the analysis · `…` analyzing · `·` not analyzed |
+| STATE (My PRs) | `✗ FIX` needs you · `✓ RDY` ready to merge · `… REVW` in review · `◇ OLD` no update for `stale_days` · `⏸ SNZ` snoozed · `⟳ WIP` Claude is fixing its CI · `⇡ PUSH` a fix waits for your push |
+| Approved by you | `↻ RE` changed since you approved (re-review) · `… REVW` waits on other reviews · `◌ CI` running · `✗ CI` / `✗ CONF` / `✗ CHG` what blocks it · `✓ RDY` ready to merge |
+| PR, TITLE | Links to GitHub (Cmd+click in a terminal that supports hyperlinks) |
+| AGE | `▰▱▱` how long it has waited: one cell at 4 hours, two at a day, three at three days |
+| CI | `✓` passed · `✗` failed · `◌` running · `·` none. Judged from the latest run of each check, so a job that failed and then passed on a re-run counts as passed |
+| AI | `✓` passed or approved · `✗` blocked · `?` passed, waits for you · `·` no AI review |
+
+Under the list, the selected PR's details: the summary, the release impact, the reason, the AI review and, for your PRs, the failed checks. Nothing is folded: bots, the PRs you approved and old PRs each have a heading; only snoozed PRs wait behind `z`.
+
+## Keys
+
+**Anywhere**
 
 | Key | Action |
 | :- | :- |
-| `1` / `2` | To review / My PRs |
-| `j` / `k` | Select the next / previous PR |
-| `e` | Ask Claude to explain the PR (for your own PR, to diagnose what blocks it). Claude reads the description, comments, reviews and linked issues and PRs, not only the diff |
-| `a` | Approve (runs only after you choose **Approve** in the confirmation dialog, where **Cancel** is selected first) |
-| `v` | AI review, then approve if it passes (see below). `v` again cancels a running review |
-| `d` | Read the PR: its description first, then the diff one file at a time, drawn like Claude Code's own diffs. `h` / `l` previous and next page, `j` / `k` scroll by a block of lines (↑↓ and PgUp/PgDn scroll too), `f` the list of pages (`j` / `k` move, `l` or `1`-`9` open), `a` / `v` / `e` act on the PR without leaving, `q` back to the PRs. Lockfiles and generated files are folded (`g` shows them); the AI review's findings in a file are listed above it, and after a review `d` opens at the first such file |
-| `i` | Info: every finding of the AI review, with links to the lines |
-| `n` | Next page of the info when it does not fit the pane (at the end, back to the top) |
-| `x` | Snooze the PR until it is updated (`z` shows snoozed PRs) |
-| `w` | AI review every bot PR not reviewed yet, one at a time (`w` again stops) |
-| `m` | Merge one of your PRs that is ready, after picking a method (pinned to the commit on screen). A PR in a stack (made with [gh stack](https://github.com/github/gh-stack)) merges with `gh stack merge`: the stack from its bottom up to that PR, all or nothing, into the stack's base; the dialog names every PR that goes |
-| `c` | CI failed on one of your PRs: **fix it with Claude in a worktree**, or re-run the failed GitHub Actions jobs. The fix runs in a git worktree of its own (`~/.cache/pr-inbox/worktrees/<owner>/<repo>/pr-<n>`, from your clone: the session's directory, or the one `ghq` knows, or `ghq get` after you agree), at the PR's head. The dialog names the failed checks and what will happen before anything starts. While Claude works the row shows `⟳ WIP`; when the turn ends, pr-inbox lists the commits and pushes only if you choose Push (Cancel first), or shows the diff first. A fix not pushed yet waits as `⇡ PUSH`, and `c` pushes it, shows it, or forgets it; `c` during the fix asks for the push early or stops following it. `/pr-inbox fix <repo#number>` does the same from the prompt |
-| `f` | Filter by repository, number, title or @author (Enter keeps it; an empty one clears it) |
-| `h` / `l` | The tab to the left / right (`1` / `2` pick one) |
-| `u` | Show the keys and what the symbols mean. A key that does nothing for the selected PR says why, instead of reaching the prompt |
-| `Ctrl+X` `Tab` | From the prompt back to the pane (or click it). Keys reach the pane only while it has the focus. The hint line under the prompt says which way to go |
+| `j` / `k` | Next / previous PR |
+| `1` / `2`, `h` / `l` | To review / My PRs, or the tab to the left / right |
+| `d` | Read the PR (below) |
+| `e` | Ask Claude to explain the PR, or for your own, to diagnose what blocks it. Claude reads the description, comments, reviews and linked issues, not only the diff, in a read-only turn |
 | `o` | Open in the browser |
-| `z` | Show or hide snoozed PRs |
+| `x` / `z` | Snooze the PR until it is updated / show snoozed PRs |
+| `f` | Filter by repository, number, title or @author (Enter keeps it; an empty one clears it) |
 | `r` | Fetch again |
-| `Esc` | Back to the prompt; the pane stays open |
+| `u` | Every key and mark |
+| `Esc` / `ctrl+x tab` | Back to the prompt (the pane stays open) / back to the pane |
 | `q` | Close the pane (`/pr-inbox` opens it again) |
 
-● marks PRs updated since you last selected them. Nothing is folded: every group is listed under its heading, and only snoozed PRs wait behind `z`.
+**On a review request**
 
-PR numbers and failed checks are hyperlinks: Cmd+click them in a terminal that supports hyperlinks.
+| Key | Action |
+| :- | :- |
+| `a` | Approve, after you choose **Approve** in the dialog (Cancel is selected first). On a `↻ RE` PR, approves its new commit |
+| `v` | AI review ([below](#ai-review-and-approve)). `v` again cancels it |
+| `i` | Every finding of the AI review, with links to the lines; `n` pages them when they do not fit |
+| `w` | AI review every bot PR not reviewed yet, then approve those that passed in one dialog (on the bots heading) |
+
+**On your PR**
+
+| Key | Action |
+| :- | :- |
+| `m` | Merge a PR that is ready, after picking a method. Pinned to the commit on screen. A PR in a stack merges with `gh stack merge`: the stack from its bottom up to that PR, all or nothing; the dialog names every PR that goes |
+| `c` | CI failed: fix it with Claude in a worktree ([below](#fixing-ci)), or re-run the failed jobs |
+
+**In the reader (`d`)**
+
+The description comes first, then the diff one file at a time, drawn like Claude Code's own diffs. On a `↻ RE` PR, it opens at what changed since your approval.
+
+| Key | Action |
+| :- | :- |
+| `h` / `l` | Previous / next page |
+| `j` / `k` | Scroll by a block of lines (↑↓ and PgUp/PgDn scroll too) |
+| `f` | The list of pages: `j` / `k` move, `l` or `1`-`9` open |
+| `t` | On a `↻ RE` PR: the whole PR, or only what changed since your approval |
+| `g` | Show a folded lockfile or generated file |
+| `a` / `v` / `e` | Approve, review or explain without leaving |
+| `n` | The next PR in the list |
+| `q` | Back to the list |
 
 `/pr-inbox refresh` fetches again and prints the counts without opening the pane.
+
+## Fixing CI
+
+`c` on your PR with a failed CI (or `/pr-inbox fix <repo#number>` from the prompt) lets Claude fix it:
+
+1. The dialog names the failed checks and what will happen. Nothing starts until you choose **Fix with Claude**
+2. pr-inbox finds your clone (the session's directory, or the one `ghq` knows, or `ghq get` after you agree) and makes a git worktree of its own at the PR's head: `~/.cache/pr-inbox/worktrees/<owner>/<repo>/pr-<n>`. Your checkout is not touched
+3. Claude reads the failed logs, fixes, runs the tests and commits. The row shows `⟳ WIP`. It cannot push, merge, approve or comment: pr-inbox refuses those
+4. When the turn ends, the dialog lists exactly the commits a push would send: **Push**, **Show the diff first**, or Cancel. A fix not pushed yet waits as `⇡ PUSH`, and `c` pushes it, shows it or forgets it
 
 ## AI review and approve
 
@@ -80,10 +134,6 @@ When it passes, `ai_approve` decides: with `confirm` (default) nothing breaks in
 
 A review makes about two Sonnet calls per perspective plus the verifier and several small screening calls, on your plan. It usually takes under a minute.
 
-## Requirements
-
-- [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`. The mod fetches, diffs and approves PRs through `gh`, as the account `gh` is signed in to
-
 ## Settings
 
 Change them with `/config` or `/plugin configure`.
@@ -91,7 +141,7 @@ Change them with `/config` or `/plugin configure`.
 | Setting | Default | What it does |
 | :- | :- | :- |
 | `org_filter` | (empty) | Only show PRs in this GitHub organization |
-| `stale_days` | 30 | List your PRs not updated for this many days under Stale |
+| `stale_days` | 30 | List your PRs not updated for this many days under Old |
 | `refresh_minutes` | 5 | How often to fetch from GitHub |
 | `summary_model` | sonnet | The model that writes the summary, risk and release impact |
 | `desktop_notify` | review requests | OS notifications for `review requests`, `all` (also approvals, changes requested and CI failures on your PRs) or `off`. Uses `osascript` on macOS and `notify-send` on Linux. On macOS, allow notifications for Script Editor in System Settings if none appear |
