@@ -39,7 +39,7 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 | `x` | Snooze the PR until it is updated (`z` shows snoozed PRs) |
 | `w` | AI review every bot PR not reviewed yet, one at a time (`w` again stops) |
 | `m` | Merge one of your PRs that is ready, after picking a method (pinned to the commit on screen). A PR in a stack (made with [gh stack](https://github.com/github/gh-stack)) merges with `gh stack merge`: the stack from its bottom up to that PR, all or nothing, into the stack's base; the dialog names every PR that goes |
-| `c` | Re-run the failed GitHub Actions jobs of one of your PRs |
+| `c` | CI failed on one of your PRs: **fix it with Claude in a worktree**, or re-run the failed GitHub Actions jobs. The fix runs in a git worktree of its own (`~/.cache/pr-inbox/worktrees/<owner>/<repo>/pr-<n>`, from your clone: the session's directory, or the one `ghq` knows, or `ghq get` after you agree), at the PR's head. Claude reads the failed logs, fixes, runs tests and commits; when the turn ends, pr-inbox lists the commits and pushes only if you choose Push (Cancel first). `/pr-inbox fix <repo#number>` does the same from the prompt |
 | `f` | Filter by repository, number, title or @author (Enter keeps it; an empty one clears it) |
 | `h` / `l` | The tab to the left / right (`1` / `2` pick one) |
 | `u` | Show the keys |
@@ -131,6 +131,7 @@ When a PR is too large to read whole (more than 30,000 characters of diff, 4,000
 - **Displayed text is sanitized.** Terminal escape sequences, control characters, bidirectional override characters and invisible characters are stripped from PR titles, author names, check names and model output before they are drawn. The diff (`d`) is drawn by Claude Code's own highlighter, line by line with the same characters stripped (tabs kept), and is never sent to a model. Links open only canonical `https://` URLs. Failed-check links point wherever the CI system says, which may be a third-party site
 - **What is sent, and when.** With `analysis` on `auto`, as soon as Claude Code starts (including `claude -p` runs and sessions in other projects) and on every refresh, each review request that has not been analyzed yet is sent to the model Claude Code is configured with (Anthropic, or your Bedrock, Vertex or gateway setup), under your account: its repository and number, author, title, list of changed files, description (first 4,000 characters) and diff (first 30,000 characters). You do not have to open the pane. Follow your organization's rules for work code: narrow it with `org_filter`, or set `analysis` to `when opened` or `off`
 - **What is stored locally.** In Claude Code's plugin store (`~/.claude/plugins/store/`): the URLs of your review requests and the state of your own PRs (to notice changes), each analysis (summary, risk, release impact), each AI review's findings, snoozed PRs and which updates you have seen. Analyses of PRs that are no longer open are deleted on the next refresh
+- **Fixing CI (`c`).** The fix is an ordinary Claude turn with your session's permissions (your permission mode and allow rules apply), working in a separate worktree, never in your checkout. CI logs are written by tools and other people, so the request tells Claude to treat them as data. pr-inbox pushes only after you choose Push in its dialog, to the PR's own branch, never with force; your PRs from forks are left out
 - **Access.** All GitHub access goes through `gh`; the mod holds no token. OS notifications go through `osascript` or `notify-send`, with the text passed as arguments, never as script. Commands run as argument lists, without a shell
 
 ## Development
@@ -141,7 +142,7 @@ claude --plugin-dir .   # run the working copy; loading once also writes the typ
 pnpm run check          # validate (--strict) → tsc → Biome → claude plugin test
 ```
 
-`pnpm run demo` starts Claude Code with the mod against made-up PRs: a fake `gh` (`scripts/demo/gh`) answers every GitHub call, so nothing real is read or written, and approvals and merges go nowhere. The mod's real state is set aside and put back when you `/exit`. It is also how the screenshot is taken.
+`pnpm run demo` starts Claude Code with the mod against made-up PRs: a fake `gh` (`scripts/demo/gh`) answers every GitHub call, and a fake `ghq` knows no clone, so nothing real is read or written, and approvals and merges go nowhere. The mod's real state is set aside and put back when you `/exit`. It is also how the screenshot is taken.
 
 Tests live in `tests/*.test.ts`. GitHub, the model, the store and the environment are all stubbed, so tests make no network calls.
 

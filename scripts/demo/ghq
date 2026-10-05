@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+// A fake ghq for the demo: it knows no clone and has no root, so "fix CI" stops at asking you to clone, and nothing
+// is fetched from anywhere
+process.exit(process.argv[2] === 'list' ? 0 : 1)

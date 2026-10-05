@@ -60,6 +60,8 @@ const CHANGES = pr({
   title: '変更依頼あり',
   url: 'https://github.com/acme/app/pull/21',
   reviewDecision: 'CHANGES_REQUESTED',
+  headRefName: 'fix-21',
+  isCrossRepository: false,
   ...failing([
     { __typename: 'CheckRun', name: 'rspec', conclusion: 'FAILURE', detailsUrl: 'https://github.com/acme/app/actions/runs/1' },
     { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS', detailsUrl: 'https://github.com/acme/app/actions/runs/2' },
@@ -128,6 +130,8 @@ type StubOptions = {
   diff?: string
   // The PR description `d` shows
   body?: string
+  // What git and ghq answer, by argv (stdout and exit code); unanswered, they print nothing and succeed
+  git?: (argv: readonly string[]) => { stdout?: string; exitCode?: number } | undefined
   // Commands (argv[0]) that exit with an error
   fail?: string[]
   // stderr of a failing command
@@ -148,6 +152,8 @@ type StubOptions = {
 
 function stubs(on: TestOn, opts: StubOptions = {}) {
   const calls: string[][] = []
+  // What the dialogs answer; a test can change it between dialogs
+  let answer = opts.answer
   // The environment each command got, beside its argv
   const envs: (Record<string, string> | undefined)[] = []
   const prompts: string[] = []
@@ -195,7 +201,10 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
       })
     const content = e.argv.find((a) => a.includes('/contents/'))?.match(/\/contents\/([^?]+)/)?.[1]
     if (content !== undefined) stdout = opts.files?.[decodeURIComponent(content)] ?? ''
-    const exitCode = opts.fail?.includes(e.argv[0] ?? '') || opts.fail?.includes(e.argv.slice(0, 2).join(' ')) ? 1 : 0
+    const answered = e.argv[0] === 'git' || e.argv[0] === 'ghq' ? opts.git?.(e.argv) : undefined
+    if (answered?.stdout !== undefined) stdout = answered.stdout
+    const exitCode =
+      answered?.exitCode ?? (opts.fail?.includes(e.argv[0] ?? '') || opts.fail?.includes(e.argv.slice(0, 2).join(' ')) ? 1 : 0)
     return { value: { exitCode, stdout, stderr: exitCode ? (opts.stderr ?? '') : '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('model.complete', async (_, e) => {
@@ -262,9 +271,28 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
     questions.push(question)
     choices.push((e.questions[0]?.options ?? []).map((o) => (typeof o === 'string' ? o : o.label)))
     if (opts.dismiss) return { deny: 'dismissed' }
-    return { result: { answers: { [question]: opts.answer ?? 'Cancel' } } }
+    return { result: { answers: { [question]: answer ?? 'Cancel' } } }
   })
-  return { calls, envs, prompts, systems, submitted, statuses, toasts, questions, choices, logs, screened, reviewCalls, store, clock }
+  const setAnswer = (next: string) => {
+    answer = next
+  }
+  return {
+    setAnswer,
+    calls,
+    envs,
+    prompts,
+    systems,
+    submitted,
+    statuses,
+    toasts,
+    questions,
+    choices,
+    logs,
+    screened,
+    reviewCalls,
+    store,
+    clock,
+  }
 }
 
 // Start the session and run until the fetch and background analyses finish
@@ -1890,18 +1918,19 @@ test('m does nothing when the dialog is cancelled', async ($, on) => {
   await ui.unmount()
 })
 
-test('c re-runs only the failed GitHub Actions runs', async ($, on) => {
-  const s = stubs(on)
+test('c, then re-run, re-runs only the failed GitHub Actions runs', async ($, on) => {
+  const s = stubs(on, { answer: 'Re-run the failed jobs' })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   expect(await isSelected(ui, 21)).toBe(true)
-  await ui.press({ key: 'act-rerun' })
+  await ui.press({ key: 'act-ci' })
+  expect(s.choices.at(-1)).toEqual(['Cancel', 'Fix it with Claude in a worktree', 'Re-run the failed jobs'])
   const reruns = s.calls.filter((c) => c[1] === 'run')
   expect(reruns).toEqual([['gh', 'run', 'rerun', '1', '--failed', '-R', 'acme/app']])
-  // A ready PR has no failed CI: no re-run
+  // A ready PR has no failed CI: no c
   await ui.press({ key: 'nav-down' })
-  expect(await ui.find({ key: 'act-rerun' })).toBeUndefined()
+  expect(await ui.find({ key: 'act-ci' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -2357,4 +2386,86 @@ test('without gh stack, m on a stacked PR says how to install it and merges noth
   expect(s.toasts.at(-1)).toContain('gh extension install github/gh-stack')
   expect(s.calls.some((c) => c.includes('merge'))).toBe(false)
   await ui.unmount()
+})
+
+// ---- Fixing CI in a worktree (c) ----
+
+const WORKTREE = '/home/me/.cache/pr-inbox/worktrees/acme/app/pr-21'
+// The session runs in a clone of acme/app; the worktree does not exist yet; Claude makes one commit
+const fixGit =
+  (commits = 'abc1234 Fix the flaky login spec') =>
+  (argv: readonly string[]): { stdout?: string; exitCode?: number } | undefined => {
+    const a = argv.join(' ')
+    if (a === 'git rev-parse --show-toplevel') return { stdout: '/work\n' }
+    if (a.endsWith('remote get-url origin')) return { stdout: 'git@github.com:acme/app.git\n' }
+    if (a === `git -C ${WORKTREE} rev-parse --is-inside-work-tree`) return { exitCode: 128 }
+    if (a === `git -C ${WORKTREE} rev-parse HEAD`) return { stdout: `${HEAD}\n` }
+    if (a.startsWith(`git -C ${WORKTREE} log`)) return { stdout: commits }
+    return undefined
+  }
+
+test('c, then fix: a worktree at the PR head, a request to fix and commit, and a push only after you say so', async ($, on) => {
+  const s = stubs(on, { answer: 'Fix it with Claude in a worktree', git: fixGit(), locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-ci' })
+  expect(s.calls).toContainEqual(['git', '-C', '/work', 'fetch', 'origin', 'refs/heads/fix-21:refs/remotes/origin/fix-21'])
+  expect(s.calls).toContainEqual(['git', '-C', '/work', 'worktree', 'add', '--detach', WORKTREE, 'origin/fix-21'])
+  const text = s.submitted.at(-1) ?? ''
+  expect(text).toContain(`Work only in the git worktree ${WORKTREE}`)
+  expect(text).toContain('gh run view 1 --log-failed -R acme/app')
+  expect(text).toContain('Do not push')
+  // Not the read-only turn of e: Claude has to edit and commit
+  expect(text).not.toContain('Only use read-only commands')
+
+  // The turn ends: the push waits for the dialog, which starts at Cancel
+  await $.turn.start({ text, turnId: 'fix1' })
+  s.setAnswer('Push')
+  await $.turn.complete({ turnId: 'fix1', answer: '' } as never)
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.questions.at(-1)).toContain('Push 1 commit to fix-21 of acme/app (#21)? abc1234 Fix the flaky login spec')
+  expect(s.choices.at(-1)?.[0]).toBe('Cancel')
+  expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'push', 'origin', 'HEAD:refs/heads/fix-21'])
+  expect(s.calls.filter((c) => c.includes('push')).some((c) => c.includes('--force') || c.includes('-f'))).toBe(false)
+  await ui.unmount()
+})
+
+test('after the fix turn, Cancel pushes nothing, and no commit means nothing to ask', async ($, on) => {
+  const s = stubs(on, { answer: 'Fix it with Claude in a worktree', git: fixGit(''), locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-ci' })
+  const asked = s.questions.length
+  await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'fix2' })
+  await $.turn.complete({ turnId: 'fix2', answer: '' } as never)
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.questions.length).toBe(asked)
+  expect(s.toasts.at(-1)).toContain('No new commit for #21')
+  expect(s.calls.some((c) => c.includes('push'))).toBe(false)
+  await ui.unmount()
+})
+
+test('/pr-inbox fix takes one of your PRs by repo#number', async ($, on) => {
+  const s = stubs(on, { git: fixGit(), locale: { HOME: '/home/me' } })
+  await start($, s.clock)
+  const out = await $.command.run({
+    command: 'pr-inbox',
+    args: 'fix app#21',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: true, columns: 120 },
+  })
+  expect(out.text).toContain('Fixing the CI of https://github.com/acme/app/pull/21')
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.submitted.at(-1)).toContain(WORKTREE)
+  const none = await $.command.run({
+    command: 'pr-inbox',
+    args: 'fix app#999',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: true, columns: 120 },
+  })
+  expect(none.text).toContain('is not one of your open PRs')
 })

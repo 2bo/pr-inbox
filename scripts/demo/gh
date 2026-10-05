@@ -30,6 +30,7 @@ const pr = (repo, number, title, author, extra) => ({
   createdAt: ago(24 * 7),
   updatedAt: ago(2),
   headRefOid: oid(number),
+  headRefName: `feature/${repo}-${number}`,
   authorAssociation: author.endsWith('[bot]') ? 'NONE' : 'MEMBER',
   isCrossRepository: false,
   additions: 10,
