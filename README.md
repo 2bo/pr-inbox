@@ -31,7 +31,7 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 1. **Before anything else**: by default each review request is analyzed as soon as Claude Code starts, which sends its title, description and diff to the model you use (see [What is sent](#security)). For work code, set `analysis` to `when opened` or `off`, or narrow it with `org_filter`, first (`/config`)
 2. The status line appears under the prompt: `review 3 ⚙2 · ▲1 high │ mine ✗1 fix · ✓1 ready · …2 in review`
 3. `/pr-inbox` opens the pane. Keys reach it while it has the focus: `ctrl+x tab` moves between the prompt and the pane, `Esc` goes back to the prompt
-4. `u` shows every key and what each mark means. A key that does nothing for the selected PR says why
+4. The bottom line lists the keys for the selected PR, each labeled with what it does, the most used first (`d` read, `a` approve, `v` AI review, `e` explain). `u` shows every key and what each mark means, and a key that does nothing for the selected PR says why
 
 ## Reading the list
 
@@ -64,8 +64,8 @@ Under the list, the selected PR's details: the summary, the release impact, the 
 | `o` | Open in the browser |
 | `x` / `z` | Snooze the PR until it is updated / show snoozed PRs |
 | `f` | Filter by repository, number, title or @author (Enter keeps it; an empty one clears it) |
-| `r` | Fetch again |
-| `u` | Every key and mark |
+| `r` | Refresh: fetch again |
+| `u` | Help: every key and mark |
 | `Esc` / `ctrl+x tab` | Back to the prompt (the pane stays open) / back to the pane |
 | `q` | Close the pane (`/pr-inbox` opens it again) |
 
@@ -94,7 +94,7 @@ Three tabs, `1` description, `2` conversation (comments and reviews, oldest firs
 | :- | :- |
 | `h` / `l` | Previous / next page |
 | `j` / `k` | Scroll by a block of lines (↑↓ and PgUp/PgDn scroll too) |
-| `f` | The description, the conversation and the changed files as a tree (with each file's +/-, AI findings and comments): `j` / `k` move, `l` or `1`-`9` open |
+| `f` | File tree: the description, the conversation and the changed files (with each file's +/-, AI findings and comments): `j` / `k` move, `l` or `1`-`9` open |
 | `t` | On a `↻ RE` PR: the whole PR, or only what changed since your approval |
 | `g` | Show a folded lockfile or generated file |
 | `a` / `v` / `e` / `p` | Approve, review, explain or ask without leaving |

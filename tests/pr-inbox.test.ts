@@ -387,7 +387,7 @@ test('bot and stale PRs are listed, each group under its heading, with nothing t
   const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
-  expect((await ui.find({ key: 'tab-review' }))?.props.label).toBe('◉ review 2 ⚙1')
+  expect((await ui.find({ key: 'tab-review' }))?.props.label).toBe('◉ to review 2 ⚙1')
   expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
   expect(await ui.find({ key: `line-${BOT.url}` })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^⚙ bots 1 $/ })).toBeDefined()
@@ -1522,7 +1522,7 @@ test('v again while the review runs cancels it', { options: { ai_approve: 'auto'
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-ai-review' })
   await settleReview(s)
-  expect((await ui.find({ key: 'act-ai-review' }))?.props.label).toBe('cancel review')
+  expect((await ui.find({ key: 'act-ai-review' }))?.props.label).toBe('cancel AI review')
   await ui.press({ key: 'act-ai-review' })
   await s.clock.advance(60_000)
   await settleReview(s)
@@ -1853,7 +1853,7 @@ test('PRs you approved that are not merged are listed with why, newer commits fi
   expect((await ui.find({ key: 'act-approve' }))?.props.label).toBe('approve again')
   expect(await ui.find({ key: 'act-ai-review' })).toBeUndefined()
   await ui.press({ key: 'nav-down' })
-  expect(await lineOf(ui, 61)).toContain('waiting other reviews')
+  expect(await lineOf(ui, 61)).toContain('waiting for other reviews')
   expect(await ui.find({ key: 'act-approve' })).toBeUndefined()
   await ui.press({ key: 'nav-down' })
   expect(await lineOf(ui, 63)).toContain('ready to merge')
@@ -1884,7 +1884,7 @@ test('f filters the list as you type; Enter keeps it, an empty one clears it', a
   expect(await ui.find({ key: `line-${HUMAN2.url}` })).toBeUndefined()
   await ui.input({ key: 'filter-input', text: 'ログイン' })
   expect(await ui.find({ key: 'filter-input' })).toBeUndefined()
-  expect((await ui.find({ key: 'filter' }))?.props.label).toBe('/ログイン')
+  expect((await ui.find({ key: 'filter' }))?.props.label).toBe('filter /ログイン')
   // By author and number too
   await ui.press({ key: 'filter' })
   await ui.input({ key: 'filter-input', text: 'app#13', kind: 'change' })
@@ -2093,7 +2093,7 @@ test('no inbox zero when the fetch failed: the error says how to retry', async (
   const ui = await $.ui.mount(PANE)
   expect(await ui.find({ type: 'Text', text: /zero ✦/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^✗ GitHub CLI is not signed in/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /r: ⟳ retry/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /r: retry/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -2109,7 +2109,7 @@ test('a blocked review says why in its headline, worst perspective first', async
   const s = stubs(on, { answer: 'Cancel', review: (p) => (perspectiveOf(p) === 'Tests' ? 'not json' : PASS) })
   await start($, s.clock)
   const ui = await pressReview($, s)
-  expect(await ui.find({ type: 'Text', text: /^AI review ✗ blocked · Tests reviewer could not answer · v to retry/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^AI review ✗ blocked · Tests reviewer could not answer · v: retry/ })).toBeDefined()
   const line = await lineOf(ui, 11)
   expect(line.indexOf('? Tests')).toBeLessThan(line.indexOf('✓ Purpose & scope'))
   await ui.unmount()
@@ -2586,10 +2586,69 @@ test('a key the list does not use says why, instead of falling through to the pr
   await ui.press({ key: 'unbound-m' })
   expect(s.toasts.at(-1)).toContain('m merges on your PRs')
   await ui.press({ key: 'unbound-y' })
-  expect(s.toasts.at(-1)).toContain('y: no such key · u shows the keys')
+  expect(s.toasts.at(-1)).toContain('y: no such key · u: help')
   // Keys in use are not caught
   expect(await ui.find({ key: 'unbound-a' })).toBeUndefined()
   expect(await ui.find({ key: 'unbound-j' })).toBeUndefined()
+  await ui.unmount()
+})
+
+// The hotkeys of the visible buttons under a key, in screen order
+const hotkeysOf = async (ui: Finder, key: string) => {
+  const out: string[] = []
+  const walk = (n: unknown): void => {
+    if (Array.isArray(n)) {
+      for (const x of n) walk(x)
+      return
+    }
+    if (!n || typeof n !== 'object') return
+    const el = n as Node
+    if (el.props?.display === 'none') return
+    if (el.type === 'Button' && typeof el.props?.hotkey === 'string') out.push(el.props.hotkey)
+    for (const c of el.children ?? []) walk(c)
+  }
+  walk(await ui.find({ key }))
+  return out
+}
+
+test('every key says what pressing it does, the most used first', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect((await ui.find({ key: 'refresh' }))?.props.label).toBe('refresh')
+  expect((await ui.find({ key: 'filter' }))?.props.label).toBe('filter')
+  expect((await ui.find({ key: 'help' }))?.props.label).toBe('help')
+  expect((await ui.find({ key: 'tab-mine' }))?.props.label).toBe('my PRs 4')
+  // A review request: read, decide, ask, then the quieter keys
+  expect(await hotkeysOf(ui, 'footer')).toEqual(['d', 'a', 'v', 'e', 'p', 'o', 'i', 'x'])
+  expect((await ui.find({ key: 'act-ai-review' }))?.props.label).toBe('AI review')
+  expect((await ui.find({ key: 'act-details' }))?.props.label).toBe('findings')
+  expect((await ui.find({ key: 'act-open' }))?.props.label).toBe('open on GitHub')
+  await ui.press({ key: 'act-details' })
+  expect((await ui.find({ key: 'act-details' }))?.props.label).toBe('hide findings')
+  // Your PR with failed CI: read, then fixing it comes before asking
+  await ui.press({ key: 'tab-mine' })
+  expect(await hotkeysOf(ui, 'footer')).toEqual(['d', 'c', 'v', 'e', 'p', 'o', 'x'])
+  expect((await ui.find({ key: 'act-ci' }))?.props.label).toBe('fix CI')
+  // e says what it asked, and where the answer comes
+  await ui.press({ key: 'act-explain' })
+  expect(s.toasts.at(-1)).toContain('Asked Claude to diagnose app#21 (read-only) · the answer comes in the conversation')
+  await ui.unmount()
+})
+
+test('a key with nothing to act on says why: no PR, nothing to send, nothing snoozed, bots elsewhere', async ($, on) => {
+  const s = stubs(on, { graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [HUMAN] }, mine: { nodes: [] } } }) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'unbound-s' })
+  expect(s.toasts.at(-1)).toContain('No AI review findings to send for app#11 · v: AI review')
+  await ui.press({ key: 'unbound-z' })
+  expect(s.toasts.at(-1)).toContain('No snoozed PRs on this tab')
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'unbound-d' })
+  expect(s.toasts.at(-1)).toContain('d: no PR is selected on this tab')
+  await ui.press({ key: 'unbound-w' })
+  expect(s.toasts.at(-1)).toContain('w reviews the bot PRs on To review (1)')
   await ui.unmount()
 })
 
@@ -2617,7 +2676,7 @@ ${SAMPLE_DIFF}`
   // j on a page without lines is caught, not sent to the prompt
   await ui.press({ key: 'diff-tab-2' })
   await ui.press({ key: 'diff-down' })
-  expect(s.toasts.at(-1)).toContain('l: the next page')
+  expect(s.toasts.at(-1)).toContain('l: next page')
   // f: the files as a tree; j/k move the cursor, l opens it; a digit opens a file straight away
   await ui.press({ key: 'diff-list' })
   expect(await ui.find({ type: 'Text', text: /^ +app\/$/ })).toBeDefined()
@@ -2776,7 +2835,7 @@ test('a passed AI review does not open a dialog by itself: the row says so, and 
   await settleReview(s)
   expect(s.questions).toEqual([])
   expect(approvedAt(s)).toEqual([])
-  expect(s.toasts.some((t) => t.includes('✓ AI review passed #11') && t.includes('a approves it'))).toBe(true)
+  expect(s.toasts.some((t) => t.includes('✓ AI review passed app#11') && t.includes('a: approve'))).toBe(true)
   await ui.press({ key: 'act-approve' })
   expect(s.questions.at(-1)).toContain('All 5 AI reviewers passed it with no important findings.')
   expect(approvedAt(s)).toEqual([APPROVE_11])
@@ -2831,7 +2890,7 @@ test(
     await settleReview(s)
     expect(reviewsOf(s).length).toBe(5)
     expect(approvedAt(s)).toEqual([])
-    expect(s.toasts.some((t) => t.includes('✓ AI review passed #11'))).toBe(true)
+    expect(s.toasts.some((t) => t.includes('✓ AI review passed app#11'))).toBe(true)
     await ui.press({ key: 'act-approve' })
     expect(s.questions.at(-1)).toContain("CI is failing (rspec): approve only if that is not this change's fault")
     await ui.unmount()
@@ -2863,9 +2922,11 @@ test('the last page of the reader says what comes next, and n reads the next PR'
   await ui.press({ key: 'diff-next' })
   await ui.press({ key: 'diff-next' })
   await ui.press({ key: 'diff-next' })
-  expect(await ui.find({ type: 'Text', text: /^── end of app#11 · a approve · v review · n next PR · q back ──$/ })).toBeDefined()
+  expect(
+    await ui.find({ type: 'Text', text: /^── end of app#11 · a: approve · v: AI review · n: next PR · q: back to list ──$/ }),
+  ).toBeDefined()
   await ui.press({ key: 'diff-next' })
-  expect(s.toasts.at(-1)).toContain('End of this PR · n: the next PR')
+  expect(s.toasts.at(-1)).toContain('End of this PR · n: next PR')
   await ui.press({ key: 'diff-next-pr' })
   expect(await ui.find({ type: 'Text', text: /^app#13$/ })).toBeDefined()
   await ui.unmount()
@@ -2905,7 +2966,7 @@ test('glyphs ascii draws every mark as one plain character', { options: { glyphs
   expect(await ui.find({ type: 'Text', text: /^! HIGH$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /━/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^=+$/ })).toBeDefined()
-  expect((await ui.find({ key: 'tab-review' }))?.props.label).toBe('* review 2 b1')
+  expect((await ui.find({ key: 'tab-review' }))?.props.label).toBe('* to review 2 b1')
   await ui.unmount()
 })
 
@@ -3010,7 +3071,7 @@ test('v reviews your own PR too, even with changes requested, and never approves
   expect(reviewsOf(s).length).toBe(5)
   expect(approvedAt(s)).toEqual([])
   expect(s.questions).toEqual([])
-  expect(s.toasts.some((t) => t.includes('AI review of your #21 passed'))).toBe(true)
+  expect(s.toasts.some((t) => t.includes('AI review passed your app#21'))).toBe(true)
   expect(await ui.find({ type: 'Text', text: /^AI review ✓ passed: no blocking issues/ })).toBeDefined()
   await ui.unmount()
 })

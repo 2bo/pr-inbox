@@ -1,6 +1,6 @@
 {
   "name": "pr-inbox",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "An inbox for review requests and your own PRs: AI summary and risk, an AI review that can approve, a reader for the description and diff, merging (gh stack too) and CI fixes with Claude",
   "author": {
     "name": "2bo"
@@ -15,8 +15,8 @@
     },
     "stale_days": {
       "type": "number",
-      "title": "Stale after (days)",
-      "description": "Your PRs not updated for this many days are listed under Stale",
+      "title": "Old after (days)",
+      "description": "Your PRs not updated for this many days are listed under Old",
       "default": 30,
       "min": 1,
       "max": 365

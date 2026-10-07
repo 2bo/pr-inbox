@@ -647,8 +647,19 @@ function approvedWhy(pr: PR, now: number): string {
   if (reasons.length > 0) return reasons.join(', ')
   const ci = ciState(pr)
   if (ci === 'PENDING' || ci === 'EXPECTED') return 'CI running'
-  if (pr.reviewDecision === 'REVIEW_REQUIRED') return 'waiting other reviews'
+  if (pr.reviewDecision === 'REVIEW_REQUIRED') return 'waiting for other reviews'
   return 'ready to merge'
+}
+
+// Why one of your PRs cannot merge yet, in a few words
+function notReadyWhy(pr: PR, now: number): string {
+  const reasons = classify(pr, now).reasons
+  if (reasons.length > 0) return reasons.join(', ')
+  if (pr.isDraft) return 'it is a draft'
+  const ci = ciState(pr)
+  if (ci === 'PENDING' || ci === 'EXPECTED') return 'CI running'
+  if (now - Date.parse(pr.updatedAt) > cfg.stale_days * DAY) return `no update for ${cfg.stale_days}+ days · o: open on GitHub`
+  return 'waiting for reviews'
 }
 
 // Why a PR you approved is still open, as its badge: changed since (re-review), then what blocks it, or ready
@@ -945,10 +956,10 @@ async function toggleSnooze($: EngineInterface, pr: PR): Promise<void> {
   if (isSnoozed(pr)) {
     const { [pr.url]: _, ...rest } = snoozed
     snoozed = rest
-    $.ui.toast(`Unsnoozed #${pr.number}`)
+    $.ui.toast(`Unsnoozed ${askLabel(pr)}`)
   } else {
     snoozed = { ...snoozed, [pr.url]: pr.updatedAt }
-    $.ui.toast(`Snoozed #${pr.number} until it is updated (z shows snoozed PRs)`)
+    $.ui.toast(`Snoozed ${askLabel(pr)} until it is updated · z: show snoozed`)
   }
   await $.store.set('snoozed', snoozed)
 }
@@ -1369,6 +1380,11 @@ function explainRequest(pr: PR): string {
     ask = template.includes('{url}') ? template.replaceAll('{url}', pr.url) : `${pr.url}: ${template}`
   }
   return `${ask} ${contextNote(pr)} ${UNTRUSTED_NOTE}`
+}
+
+// What e says once it has asked: what Claude does, and where the answer comes
+function explainedToast(pr: PR, own: boolean): string {
+  return `Asked Claude to ${own ? 'diagnose' : 'explain'} ${askLabel(pr)} (read-only) · the answer comes in the conversation`
 }
 
 // ---- p: your own prompt, about the selected PR ----
@@ -2205,7 +2221,7 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
       for (const line of reviewPreview(run, enabledPerspectives(pr))) $.ui.log(line)
       if (own) {
         run.state = 'passed'
-        $.ui.toast(`✓ AI review of your #${pr.number} passed · i shows the notes`, { timeoutMs: 8000 })
+        $.ui.toast(`✓ AI review passed your ${askLabel(pr)} · i: findings`, { timeoutMs: 8000 })
       } else if (approvesWithoutAsking(pr)) {
         run.step = 'approving…'
         redraw()
@@ -2213,7 +2229,7 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
       } else {
         // No dialog breaking in on what you do next: the row says it passed, and a approves, its dialog with the notes
         run.state = 'passed'
-        $.ui.toast(`✓ AI review passed #${pr.number} at ${pr.headRefOid.slice(0, 7)} · a approves it`, { timeoutMs: 8000 })
+        $.ui.toast(`✓ AI review passed ${askLabel(pr)} at ${pr.headRefOid.slice(0, 7)} · a: approve`, { timeoutMs: 8000 })
       }
     }
     await $.store.set(`review:${pr.url}`, {
@@ -2314,7 +2330,8 @@ async function focusPane($: EngineInterface): Promise<void> {
 // Why a review was blocked, in a few words: a reviewer that failed (retry with v), or how many problems
 function blockedWhy(r: ReviewRun): string {
   const failed = r.verdicts.filter((v) => v.verdict === 'none' || v.verdict === 'unknown').map((v) => v.perspective)
-  if (failed.length > 0 && failed.length === r.problems.length) return `${failed.join(', ')} reviewer could not answer · v to retry`
+  if (failed.length > 0 && failed.length === r.problems.length)
+    return `${failed.join(', ')} ${failed.length === 1 ? 'reviewer' : 'reviewers'} could not answer · v: retry`
   if (r.injection.length > 0 && r.problems.length === r.injection.length) return 'possible prompt injection'
   return plural(r.problems.length, 'problem')
 }
@@ -3147,7 +3164,7 @@ async function postFindings($: EngineInterface, pr: PR): Promise<void> {
   // Pinned to the reviewed commit: if new commits came, the lines may have moved
   const { head } = await currentHead($, pr)
   if (head && head !== pr.headRefOid) {
-    $.ui.toast(`Not posted: #${pr.number} has new commits since ${sha} · v to review them`, { timeoutMs: 10000 })
+    $.ui.toast(`Not posted: #${pr.number} has new commits since ${sha} · v: review them`, { timeoutMs: 10000 })
     await refresh($)
     return
   }
@@ -3458,7 +3475,7 @@ async function fixCi($: EngineInterface, pr: PR): Promise<void> {
   $.clock.after(2 * MINUTE, () => {
     if (fixJob === job && !job.turnId) {
       fixJob = undefined
-      $.ui.toast(`The fix of #${pr.number} did not start · c tries again`, { timeoutMs: 8000 })
+      $.ui.toast(`The fix of #${pr.number} did not start · c: try again`, { timeoutMs: 8000 })
       $.ui.invalidate('ui.render')
     }
   })
@@ -3531,7 +3548,7 @@ async function askPush($: EngineInterface, job: FixJob, end: FixEnd = 'done'): P
   await focusPane($)
   if (answer === 'Show the diff first') return openFixDiff($, job)
   if (answer !== 'Push') {
-    $.ui.toast(`Not pushed · c pushes it or shows the diff (${job.dir})`, { timeoutMs: 8000 })
+    $.ui.toast(`Not pushed · c: push it or show the diff (${job.dir})`, { timeoutMs: 8000 })
     return
   }
   const r = await $.process.run(['git', '-C', job.dir, 'push', 'origin', `HEAD:refs/heads/${job.branch}`], { timeoutMs: 120000 })
@@ -3539,7 +3556,7 @@ async function askPush($: EngineInterface, job: FixJob, end: FixEnd = 'done'): P
     const moved = /non-fast-forward|fetch first|rejected/i.test(r.stderr)
     $.ui.toast(
       moved
-        ? `Not pushed: ${job.branch} has new commits on GitHub. Your ${plural(commits.length, 'commit')} stay in ${job.dir} · c shows them`
+        ? `Not pushed: ${job.branch} has new commits on GitHub. Your ${plural(commits.length, 'commit')} stay in ${job.dir} · c: show them`
         : `Push failed: ${fit(clean(r.stderr), 100)} · your commits stay in ${job.dir}`,
       { timeoutMs: 10000 },
     )
@@ -3787,7 +3804,7 @@ export function register(on: On, options: PluginOptions) {
     const v = diffView
     const key = (k: string, label: string, hotkey: string, onPress: () => void, dim = false) =>
       Button({ key: k, label, hotkey, plain: true, dimColor: dim, onPress })
-    const close = key('diff-close', 'back', 'q', () => {
+    const close = key('diff-close', 'back to list', 'q', () => {
       diffView = undefined
       redraw()
     })
@@ -3815,7 +3832,7 @@ export function register(on: On, options: PluginOptions) {
       const rows = visibleRows(groups(fetchedAt || Date.now()))
       const i = rows.findIndex((p) => p.url === pr.url)
       const following = rows[i + 1] ?? (i < 0 ? rows[0] : undefined)
-      if (!following) return toast('This is the last PR in the list · q goes back')
+      if (!following) return toast('This is the last PR in the list · q: back to list')
       selected = following.url
       void openDiff($, following)
     }
@@ -3839,7 +3856,18 @@ export function register(on: On, options: PluginOptions) {
         Text({ color: v.error ? NEON.red : NEON.muted, children: [what] }),
         Box({ flexDirection: 'row', columnGap: 2, children: [...ways, close] }),
       ]
-      return Box({ flexDirection: 'column', children: [...tree, keyCatcher(kit, tree, () => 'Still fetching · q goes back', toast)] })
+      return Box({
+        flexDirection: 'column',
+        children: [
+          ...tree,
+          keyCatcher(
+            kit,
+            tree,
+            () => (v.error ? 'Could not read this PR · o: open on GitHub · q: back to list' : 'Still fetching · q: back to list'),
+            toast,
+          ),
+        ],
+      })
     }
     const files = v.files
     // Pages: the description, then each file
@@ -3863,7 +3891,7 @@ export function register(on: On, options: PluginOptions) {
     // j/k: the next or previous block of lines, scrolled to the top of the pane
     const blocks = file && !(isGenerated(file.path) && !v.showGenerated.has(file.path)) ? file.pieces.length : 0
     const scrollTo = (block: number) => {
-      if (blocks === 0) return toast(file ? 'Nothing to scroll here · l: next file' : 'j/k scroll a file · l: the next page')
+      if (blocks === 0) return toast(file ? 'Nothing to scroll here · l: next file' : 'j/k scroll a file · l: next page')
       v.block = Math.min(Math.max(0, block), blocks - 1)
       $.ui.scroll(v.block === 0 ? { to: 'start', in: PANE } : { to: { key: `block-${v.block}` }, in: PANE, block: 'start' }).catch(() => {
         // A surface that does not scroll: the arrow keys still do
@@ -3874,14 +3902,19 @@ export function register(on: On, options: PluginOptions) {
     const actOnPr: El[] = []
     if (isReview && reviews.get(pr.url)?.state !== 'running') actOnPr.push(key('diff-approve', 'approve', 'a', () => void approve($, pr)))
     if (isApproved(pr) && approvalOutdated(pr)) actOnPr.push(key('diff-approve', 'approve again', 'a', () => void approve($, pr)))
-    if (isReview)
+    if (isReview || mine.some((p) => p.url === pr.url))
       actOnPr.push(
-        key('diff-review', reviews.get(pr.url)?.state === 'running' ? 'cancel review' : 'review', 'v', () => void aiReview($, pr)),
+        key('diff-review', reviews.get(pr.url)?.state === 'running' ? 'cancel AI review' : 'AI review', 'v', () => void aiReview($, pr)),
       )
     actOnPr.push(
       key('diff-explain', mine.some((p) => p.url === pr.url) ? 'diagnose' : 'explain', 'e', () => {
         void $.prompt.submit({ text: explainRequest(pr), asUser: true })
-        toast(`Asked Claude about #${pr.number}`)
+        toast(
+          explainedToast(
+            pr,
+            mine.some((p) => p.url === pr.url),
+          ),
+        )
       }),
     )
     // Since your approval, or the whole PR
@@ -3910,7 +3943,7 @@ export function register(on: On, options: PluginOptions) {
               redraw()
             }),
             key('diff-pick', 'open', 'l', () => go(v.cursor)),
-            key('diff-list', 'close', 'f', () => {
+            key('diff-list', 'close tree', 'f', () => {
               v.list = false
               redraw()
             }),
@@ -3932,21 +3965,21 @@ export function register(on: On, options: PluginOptions) {
                   'diff-next',
                   '▸',
                   'l',
-                  () => (at === pages - 1 ? toast('End of this PR · n: the next PR · q: back') : go(at + 1)),
+                  () => (at === pages - 1 ? toast('End of this PR · n: next PR · q: back to list') : go(at + 1)),
                   at === pages - 1,
                 ),
                 key('diff-down', '↓', 'j', () => scrollTo(v.block + 1), blocks === 0),
                 key('diff-up', '↑', 'k', () => scrollTo(v.block - 1), blocks === 0),
               ],
             }),
-            key('diff-list', 'files', 'f', () => {
+            key('diff-list', 'file tree', 'f', () => {
               v.list = true
               v.cursor = at
               redraw()
             }),
             ...(file && isGenerated(file.path)
               ? [
-                  key('diff-generated', v.showGenerated.has(file.path) ? 'fold' : 'show', 'g', () => {
+                  key('diff-generated', v.showGenerated.has(file.path) ? 'fold generated' : 'show generated', 'g', () => {
                     if (v.showGenerated.has(file.path)) v.showGenerated.delete(file.path)
                     else v.showGenerated.add(file.path)
                     redraw()
@@ -3956,7 +3989,7 @@ export function register(on: On, options: PluginOptions) {
             ...toggleSince,
             ...actOnPr,
             key('diff-ask', askKeyLabel(pr), 'p', () => void toggleAsk($, pr)),
-            key('diff-open', 'open', 'o', async () => void (await $.process.run(['gh', 'pr', 'view', pr.url, '--web'])), true),
+            key('diff-open', 'open on GitHub', 'o', async () => void (await $.process.run(['gh', 'pr', 'view', pr.url, '--web'])), true),
             nextKey,
             close,
           ],
@@ -4004,7 +4037,7 @@ export function register(on: On, options: PluginOptions) {
         flexDirection: 'column',
         children: [...tree.slice(0, head.length), tabs, ...tree.slice(head.length), keyCatcher(kit, [...tree, tabs], why, toast)],
       })
-    const notHere = (k: string) => `${k}: no such key in the reader · h/l pages · j/k scroll · f files · q back`
+    const notHere = (k: string) => `${k}: no such key in the reader · h/l: page · j/k: scroll · f: file tree · q: back to list`
 
     // f: the description, the conversation, and the files as a tree. j/k move between them, l opens, 1-9 open a file
     if (v.list) {
@@ -4058,7 +4091,7 @@ export function register(on: On, options: PluginOptions) {
         }),
         ...rows,
       ]
-      return done(tree, (k) => `${k}: no such key in the list · j/k move · l or 1-9 open · f closes`)
+      return done(tree, (k) => `${k}: no such key in the file tree · j/k: move · l or 1-9: open · f: close tree`)
     }
 
     // Page 0: the description, as GitHub would show it
@@ -4188,7 +4221,7 @@ export function register(on: On, options: PluginOptions) {
       body.push(
         Text({
           color: NEON.violet,
-          children: [`── end of ${label} · ${isReview ? 'a approve · v review · ' : ''}n next PR · q back ──`],
+          children: [`── end of ${label} · ${isReview ? 'a: approve · v: AI review · ' : ''}n: next PR · q: back to list ──`],
         }),
       )
     return done([...head, keys, rule, ...sinceNote, title, ...findings, ...body], notHere)
@@ -4254,8 +4287,13 @@ export function register(on: On, options: PluginOptions) {
     }
 
     // Row 1: tabs and refresh
-    // The refresh key says when it is fetching (the list refreshes itself, so the time of the last fetch is left out)
-    const refreshLabel = loading ? '⟳ updating…' : '⟳'
+    // Every key says what pressing it does; refresh says so while it fetches (the list refreshes itself, so the time of
+    // the last fetch is left out)
+    const refreshLabel = loading ? '⟳ refreshing…' : 'refresh'
+    const filterLabel = filterText ? `filter /${filterText}` : 'filter'
+    const helpLabel = showHelp ? 'close help' : 'help'
+    const reviewTabLabel = `${tab === 'review' ? '◉ ' : ''}to review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`
+    const mineTabLabel = `${tab === 'mine' ? '◉ ' : ''}my PRs ${mine.length}`
     const tabButton = (name: typeof tab, label: string, hotkey: string) =>
       Button({
         key: `tab-${name}`,
@@ -4279,14 +4317,7 @@ export function register(on: On, options: PluginOptions) {
       redraw()
     }
     // Widths of the top rows' items, to know how many lines they take once wrapped
-    const row1 = [
-      LOGO,
-      `1: ◉ review ${g.humans.length} ⚙${g.bots.length}`,
-      `2: ◉ mine ${mine.length}`,
-      `r: ${refreshLabel}`,
-      `f: ${filterText ? `/${filterText}` : '/'}`,
-      `u: ${showHelp ? 'close help' : '?'}`,
-    ]
+    const row1 = [LOGO, `1: ${reviewTabLabel}`, `2: ${mineTabLabel}`, `r: ${refreshLabel}`, `f: ${filterLabel}`, `u: ${helpLabel}`]
     let topLines = wrappedRowLines(row1.map(textWidth), 2, columns)
     const top: El[] = [
       // Rows wrap as whole buttons on a narrow pane instead of breaking words
@@ -4306,14 +4337,14 @@ export function register(on: On, options: PluginOptions) {
               Text({ color: NEON.cyan, bold: true, dimColor: !focused, children: ['inbox'] }),
             ],
           }),
-          tabButton('review', `${tab === 'review' ? '◉ ' : ''}review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`, '1'),
-          tabButton('mine', `${tab === 'mine' ? '◉ ' : ''}mine ${mine.length}`, '2'),
+          tabButton('review', reviewTabLabel, '1'),
+          tabButton('mine', mineTabLabel, '2'),
           small('refresh', refreshLabel, 'r', () => refresh($)),
-          small('filter', filterText ? `/${filterText}` : '/', 'f', () => {
+          small('filter', filterLabel, 'f', () => {
             filtering = !filtering
             redraw()
           }),
-          small('help', showHelp ? 'close help' : '?', 'u', () => {
+          small('help', helpLabel, 'u', () => {
             showHelp = !showHelp
             redraw()
           }),
@@ -4337,7 +4368,7 @@ export function register(on: On, options: PluginOptions) {
           flexDirection: 'row',
           children: [
             Text({ color: NEON.red, bold: true, children: [`✗ ${fit(error, Math.max(10, columns - 18))}`] }),
-            Text({ color: NEON.muted, children: ['  r: ⟳ retry'] }),
+            Text({ color: NEON.muted, children: ['  r: retry'] }),
           ],
         }),
       )
@@ -4378,132 +4409,55 @@ export function register(on: On, options: PluginOptions) {
         moveSelection(rows, delta)
         redraw()
       })
+    const toggleDetails = (url: string) => {
+      expanded = expanded === url ? '' : url
+      redraw()
+    }
     if (pr) void markSeen($, pr)
     if (pr && isApproved(pr) && approvalOutdated(pr)) void loadSinceStats($, pr)
     if (pr) {
       const isReview = review.some((p) => p.url === pr.url)
       const isMine = mine.some((p) => p.url === pr.url)
-      const actions: El[] = [
-        Button({
-          key: 'act-explain',
-          label: isMine ? 'diagnose' : 'explain',
-          hotkey: 'e',
-          plain: true,
-          onPress: () => {
-            // Not awaited: the call waits until the turn starts
-            void $.prompt.submit({ text: explainRequest(pr), asUser: true })
-            $.ui.toast(`Asked Claude about #${pr.number}`)
-          },
-        }),
-      ]
-      if (isReview) {
-        // No approving while the AI review of it still runs
-        if (reviews.get(pr.url)?.state !== 'running')
-          actions.push(Button({ key: 'act-approve', label: 'approve', hotkey: 'a', plain: true, onPress: () => approve($, pr) }))
-        actions.push(
-          Button({
-            key: 'act-ai-review',
-            label: reviews.get(pr.url)?.state === 'running' ? 'cancel review' : cfg.ai_approve === 'auto' ? 'review+approve' : 'review',
-            hotkey: 'v',
-            plain: true,
-            onPress: () => {
-              void aiReview($, pr)
-            },
-          }),
-        )
-      }
+      // Each key says what pressing it does, the most used first: read, decide, ask, then the quieter ones (dimmed)
+      const act = (key: string, label: string, hotkey: string, onPress: () => unknown, dim = false) =>
+        Button({ key, label, hotkey, plain: true, ...(dim ? { dimColor: true } : {}), onPress: () => void onPress() })
+      const running = reviews.get(pr.url)?.state === 'running'
+      const reviewLabel = running ? 'cancel AI review' : isReview && cfg.ai_approve === 'auto' ? 'AI review+approve' : 'AI review'
+      const actions: El[] = [act('act-diff', 'read', 'd', () => openDiff($, pr))]
+      // No approving while the AI review of it still runs
+      if (isReview && !running) actions.push(act('act-approve', 'approve', 'a', () => approve($, pr)))
       // Approved before and changed since: approve again
-      if (isApproved(pr) && approvalOutdated(pr))
-        actions.push(Button({ key: 'act-approve', label: 'approve again', hotkey: 'a', plain: true, onPress: () => approve($, pr) }))
+      if (isApproved(pr) && approvalOutdated(pr)) actions.push(act('act-approve', 'approve again', 'a', () => approve($, pr)))
       if (isMine) {
-        // An AI review of your own PR, to fix before others read it; it never approves
-        actions.push(
-          Button({
-            key: 'act-ai-review',
-            label: reviews.get(pr.url)?.state === 'running' ? 'cancel review' : 'review',
-            hotkey: 'v',
-            plain: true,
-            onPress: () => {
-              void aiReview($, pr)
-            },
-          }),
-        )
-        const group = classify(pr, now).group
-        if (group === 'ready')
-          actions.push(Button({ key: 'act-merge', label: 'merge', hotkey: 'm', plain: true, onPress: () => mergePr($, pr) }))
+        if (classify(pr, now).group === 'ready') actions.push(act('act-merge', 'merge', 'm', () => mergePr($, pr)))
         const fixing = fixJob?.pr.url === pr.url
         const ready = fixReady.has(pr.url)
         if (fixing || ready || ciState(pr) === 'FAILURE' || ciState(pr) === 'ERROR')
-          actions.push(
-            Button({
-              key: 'act-ci',
-              label: fixing ? 'fixing…' : ready ? 'push fix' : 'fix ci',
-              hotkey: 'c',
-              plain: true,
-              onPress: () => ciMenu($, pr),
-            }),
-          )
+          actions.push(act('act-ci', fixing ? 'fixing CI…' : ready ? 'push fix' : 'fix CI', 'c', () => ciMenu($, pr)))
       }
+      // An AI review of your own PR is one to fix before others read it; it never approves
+      if (isReview || isMine) actions.push(act('act-ai-review', reviewLabel, 'v', () => aiReview($, pr)))
       actions.push(
-        Button({
-          key: 'act-open',
-          label: 'open',
-          hotkey: 'o',
-          plain: true,
-          onPress: async () => {
-            await $.process.run(['gh', 'pr', 'view', pr.url, '--web'])
-          },
+        act('act-explain', isMine ? 'diagnose' : 'explain', 'e', () => {
+          // Not awaited: the call waits until the turn starts
+          void $.prompt.submit({ text: explainRequest(pr), asUser: true })
+          $.ui.toast(explainedToast(pr, isMine))
         }),
-        Button({
-          key: 'act-ask',
-          label: askKeyLabel(pr),
-          hotkey: 'p',
-          plain: true,
-          onPress: () => void toggleAsk($, pr),
-        }),
-        Button({
-          key: 'act-diff',
-          label: 'read',
-          hotkey: 'd',
-          plain: true,
-          onPress: () => openDiff($, pr),
-        }),
-        // The AI review's findings: for review requests, and for approved PRs that had a review
+        act('act-ask', askKeyLabel(pr), 'p', () => toggleAsk($, pr)),
+        act('act-open', 'open on GitHub', 'o', () => $.process.run(['gh', 'pr', 'view', pr.url, '--web'])),
+        // The AI review's findings, with links to the lines: for review requests, and any PR that had a review
+        ...(isReview || reviews.has(pr.url)
+          ? [act('act-details', expanded === pr.url ? 'hide findings' : 'findings', 'i', () => toggleDetails(pr.url), true)]
+          : []),
         // The AI review's findings, to the author as comments on their lines
         ...(reviewOfHead(pr)?.findings.some((f) => f.severity !== 'pre-existing' && f.confirmed !== false)
-          ? [
-              Button({
-                key: 'act-send',
-                label: 'send findings',
-                hotkey: 's',
-                plain: true,
-                dimColor: true,
-                onPress: () => postFindings($, pr),
-              }),
-            ]
+          ? [act('act-send', 'send findings', 's', () => postFindings($, pr), true)]
           : []),
-        ...(isReview || reviews.has(pr.url)
-          ? [
-              Button({
-                key: 'act-details',
-                label: expanded === pr.url ? 'less' : 'info',
-                dimColor: true,
-                hotkey: 'i',
-                plain: true,
-                onPress: () => {
-                  expanded = expanded === pr.url ? '' : pr.url
-                  redraw()
-                },
-              }),
-            ]
-          : []),
-        Button({
-          key: 'act-snooze',
-          label: isSnoozed(pr) ? 'unsnooze' : 'snooze',
-          dimColor: true,
-          hotkey: 'x',
-          plain: true,
-          onPress: async () => {
+        act(
+          'act-snooze',
+          isSnoozed(pr) ? 'unsnooze' : 'snooze',
+          'x',
+          async () => {
             // Snoozing hides the PR: select the next one (or the previous at the end) rather than the first
             if (!isSnoozed(pr) && !showSnoozed) {
               const i = rows.findIndex((p) => p.url === pr.url)
@@ -4513,7 +4467,8 @@ export function register(on: On, options: PluginOptions) {
             showStatus($)
             redraw()
           },
-        }),
+          true,
+        ),
         // j / k move: hidden keys, so the actions stand out
         Box({ display: 'none', children: [nav('nav-down', '↓', 'j', 1), nav('nav-up', '↑', 'k', -1)] }),
       )
@@ -4536,33 +4491,42 @@ export function register(on: On, options: PluginOptions) {
 
     // Keys that do nothing for this PR or tab say why, instead of falling through to the prompt
     const whyNot = (k: string): string => {
-      const n = pr ? `#${pr.number}` : 'this PR'
-      const ownTab = 'on your PRs (2 or l: My PRs)'
+      const n = pr ? askLabel(pr) : 'this PR'
+      const ownTab = 'on your PRs (2: My PRs)'
+      // Keys that act on the selected PR, with none selected
+      if (!pr && 'adeimopsvcx'.includes(k))
+        return filterText ? `${k}: no PR matches the filter · f: change it` : `${k}: no PR is selected on this tab`
       switch (k) {
         case 'a':
           if (!pr) return 'a approves the selected review request'
-          if (mine.some((p) => p.url === pr.url)) return 'a approves review requests (1 or h: To review), not your own PRs'
+          if (mine.some((p) => p.url === pr.url)) return 'a approves review requests (1: To review), not your own PRs'
           if (isApproved(pr)) return `You approved ${n} at its current commit already`
-          return `Wait for the AI review of ${n} to end (v cancels it)`
+          return `Wait for the AI review of ${n} to end · v: cancel it`
         case 'v':
           if (pr && isApproved(pr))
             return approvalOutdated(pr)
-              ? `${n} changed since your approval: d shows what changed, a approves it again`
-              : `You approved ${n} at its current commit · d reads it`
-          return 'v runs an AI review of a review request (1 or h: To review)'
+              ? `${n} changed since your approval · d: read what changed · a: approve again`
+              : `You approved ${n} at its current commit · d: read it`
+          return 'v runs an AI review of a review request (1: To review) or of your PR (2: My PRs)'
         case 'c':
           return pr && mine.some((p) => p.url === pr.url) ? `CI has not failed on ${n}` : `c fixes failed CI ${ownTab}`
         case 'm':
           if (!pr || !mine.some((p) => p.url === pr.url)) return `m merges ${ownTab}`
-          return `${n} is not ready to merge: ${classify(pr, now).reasons.join(', ') || approvedWhy(pr, now)}`
+          return `${n} is not ready to merge: ${notReadyWhy(pr, now)}`
         case 'i':
-          return `No AI review of ${n} yet${pr && review.some((p) => p.url === pr.url) ? ' · v runs one' : ''}`
+          return `No AI review of ${n} yet · v: AI review`
+        case 's':
+          return reviewOfHead(pr as PR)
+            ? `The AI review of ${n} left nothing to send`
+            : `No AI review findings to send for ${n} · v: AI review`
         case 'w':
-          return 'Every bot PR has an AI review of its current commit'
+          return tab === 'review' ? 'Every bot PR has an AI review of its current commit' : 'w reviews the bot PRs on To review (1)'
+        case 'z':
+          return 'No snoozed PRs on this tab · x: snooze the selected PR'
         case 'n':
           return 'n pages long details · these fit already'
         default:
-          return `${k}: no such key · u shows the keys`
+          return `${k}: no such key · u: help`
       }
     }
     const catcher = (tree: El[]) => (filtering ? [] : [keyCatcher(kit, tree, whyNot, (t) => $.ui.toast(t, { timeoutMs: 4000 }))])
@@ -4635,7 +4599,7 @@ export function register(on: On, options: PluginOptions) {
       if (r.state === 'running' && r.step !== 'approving…')
         return [
           {
-            text: `AI review ${aiGlyph(p).text} ${r.step} ${Math.floor((Date.now() - r.startedAt) / 1000)}s  (v to cancel)`,
+            text: `AI review ${aiGlyph(p).text} ${r.step} ${Math.floor((Date.now() - r.startedAt) / 1000)}s · v: cancel`,
             color: NEON.cyan,
           },
         ]
@@ -4643,7 +4607,7 @@ export function register(on: On, options: PluginOptions) {
         return [{ text: `AI review of an older commit (${r.pr.headRefOid.slice(0, 7)}): v to review the new one`, dim: true }]
       // The decision first, then each perspective's conclusion; findings and evidence wait behind d
       const notes = r.findings.filter((f) => f.severity !== 'pre-existing').length
-      const hint = expanded === p.url ? '' : notes > 0 || r.problems.length > 0 ? '  (i: details)' : ''
+      const hint = expanded === p.url ? '' : notes > 0 || r.problems.length > 0 ? ' · i: findings' : ''
       const head =
         r.state === 'blocked'
           ? { text: `AI review ✗ blocked · ${blockedWhy(r)}${hint}`, color: NEON.red }
@@ -5097,7 +5061,7 @@ export function register(on: On, options: PluginOptions) {
           Text({
             color: NEON.cyan,
             children: [
-              loading ? `  ${SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]} fetching your PRs…` : '  not fetched yet · r: ⟳',
+              loading ? `  ${SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]} fetching your PRs…` : '  not fetched yet · r: refresh',
             ],
           }),
         )
