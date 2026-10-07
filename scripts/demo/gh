@@ -121,6 +121,22 @@ const MINE = [
 ]
 
 // Bodies, files and diffs the analysis reads
+// The conversation on a PR: comments, reviews and comments on lines (all made up)
+const TALK = {
+  'storefront/482': {
+    comments: [
+      { author: { login: 'mtanaka' }, createdAt: ago(50), body: 'Do we need the lockout at all? Rate limiting alone might be enough for now.' },
+      { author: { login: 'lena-park' }, createdAt: ago(46), body: 'Security asked for both. The lockout resets after **30 minutes**.' },
+    ],
+    reviews: [{ author: { login: 'rkumar' }, submittedAt: ago(20), state: 'CHANGES_REQUESTED', body: 'Please add a spec for the 429 page.' }],
+  },
+}
+const LINE_TALK = {
+  'storefront/482': [
+    { user: { login: 'rkumar' }, created_at: ago(20), path: 'app/controllers/sessions_controller.rb', line: 18, body: 'This increments on every failure, even for unknown emails.' },
+  ],
+}
+
 const DETAILS = {
   'storefront/482': {
     body: 'Adds Rack::Attack throttles on POST /login: 5 attempts per account per minute and 20 per IP. Blocked requests get 429 and the login form shows "Too many attempts, try again in a minute".',
@@ -356,8 +372,8 @@ if (args[0] === 'api' && args[1] === 'graphql') {
     const p = APPROVED.find((x) => x.repository.nameWithOwner === m[1])
     if (args.includes('--jq')) out({ c: 2, a: 12, d: 3, by: [p?.author.login ?? 'someone'] })
     else out((p && DETAILS[key(p)]?.diff) || 'diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,1 +1,1 @@\n-old\n+new\n')
-  } else if (/\/pulls\/\d+\/comments$/.test(path)) {
-    out([])
+  } else if ((m = path.match(/^repos\/[^/]+\/([^/]+)\/pulls\/(\d+)\/comments$/))) {
+    out(LINE_TALK[`${m[1]}/${m[2]}`] ?? [])
   } else fail(`fake gh: unsupported: gh ${args.join(' ')}`)
 } else if (args[0] === 'pr' && args[1] === 'merge') {
   out('')
@@ -384,7 +400,7 @@ if (args[0] === 'api' && args[1] === 'graphql') {
   if (args[1] === 'diff') out(d.diff)
   else if (args.includes('--web')) out('')
   else if (fields === 'headRefOid') out({ headRefOid: p.headRefOid })
-  else if (fields.startsWith('comments')) out({ comments: [], reviews: [] })
+  else if (fields.startsWith('comments')) out(TALK[key(p)] ?? { comments: [], reviews: [] })
   else
     out({
       title: p.title,

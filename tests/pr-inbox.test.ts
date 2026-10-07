@@ -161,6 +161,8 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
   const prompts: string[] = []
   const systems: string[] = []
   const submitted: string[] = []
+  // What each submitted prompt carried beside it, unseen
+  const contexts: string[][] = []
   const statuses: (string | undefined)[] = []
   const toasts: string[] = []
   const questions: string[] = []
@@ -246,6 +248,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
   })
   on('prompt.submit', (_, e) => {
     submitted.push(e.text)
+    contexts.push([...(e.context ?? [])])
     return { text: e.text }
   })
   on('store.get', (_, e) => ({ value: store.get(e.key) }))
@@ -280,6 +283,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
   }
   return {
     setAnswer,
+    contexts,
     calls,
     envs,
     prompts,
@@ -2128,6 +2132,9 @@ test('d shows the description, then the diff one file at a time, drawn as a diff
   const md = (await diff.find({ type: 'Markdown' }))?.props as { text: string } | undefined
   expect(md?.text).toBe('## Why\n\nLogins were slow')
   expect(await codes(diff)).toEqual([])
+  // Page 1: the conversation, then the first file
+  await diff.press({ key: 'diff-next' })
+  expect(await diff.find({ type: 'Text', text: 'Conversation' })).toBeDefined()
   await diff.press({ key: 'diff-next' })
   const [code] = await codes(diff)
   expect(code?.format).toBe('diff')
@@ -2150,6 +2157,7 @@ test('d shows the description, then the diff one file at a time, drawn as a diff
   await diff.press({ key: 'diff-file-1' })
   expect((await codes(diff))[0]?.path).toBe('app/login.rb')
   await diff.press({ key: 'diff-prev' })
+  await diff.press({ key: 'diff-prev' })
   expect(await diff.find({ type: 'Markdown' })).toBeDefined()
   // q: back to the list of PRs
   await diff.press({ key: 'diff-close' })
@@ -2164,6 +2172,7 @@ test('the diff drawn keeps tabs but loses escape sequences and bidi overrides', 
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-diff' })
   const diff = ui
+  await diff.press({ key: 'diff-next' })
   await diff.press({ key: 'diff-next' })
   const source = (await codes(diff))[0]?.source ?? ''
   expect(source).toContain('+    \tuser&.name')
@@ -2187,6 +2196,7 @@ ${lines.join('\n')}
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-diff' })
   const diff = ui
+  await diff.press({ key: 'diff-next' })
   await diff.press({ key: 'diff-next' })
   const pieces = await codes(diff)
   expect(pieces.length).toBeGreaterThan(1)
@@ -2568,6 +2578,7 @@ ${SAMPLE_DIFF}`
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-diff' })
   await ui.press({ key: 'diff-next' })
+  await ui.press({ key: 'diff-next' })
   // 30 lines in blocks of 12: three blocks, keyed for scrolling
   expect(await ui.find({ key: 'block-2' })).toBeDefined()
   const before = s.toasts.length
@@ -2577,7 +2588,7 @@ ${SAMPLE_DIFF}`
   // j on a page without lines is caught, not sent to the prompt
   await ui.press({ key: 'diff-prev' })
   await ui.press({ key: 'diff-down' })
-  expect(s.toasts.at(-1)).toContain('l: the first file')
+  expect(s.toasts.at(-1)).toContain('l: the next page')
   // f: j/k move the cursor, l opens it; a digit opens a file straight away
   await ui.press({ key: 'diff-list' })
   await ui.press({ key: 'diff-cursor-down' })
@@ -2769,15 +2780,33 @@ test('w reviews the bot PRs without moving the selection, then asks once to appr
 })
 
 test('a review stopped by a gate says it did not run, in plain words', async ($, on) => {
-  const red = member({ ...failing([{ __typename: 'CheckRun', name: 'rspec', conclusion: 'FAILURE', detailsUrl: null }]) })
-  const s = stubs(on, { graphql: only(red) })
+  const s = stubs(on, { graphql: only(member({ isDraft: true })) })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-ai-review' })
   await settleReview(s)
-  expect(s.toasts.at(-1)).toBe('AI review not run on #11: CI is failing')
+  expect(s.toasts.at(-1)).toBe('AI review not run on #11: it is a draft')
   await ui.unmount()
 })
+
+test(
+  'with CI failing the AI review still runs, warns, and never approves on its own',
+  { options: { ai_approve: 'auto' } },
+  async ($, on) => {
+    const red = member({ ...failing([{ __typename: 'CheckRun', name: 'rspec', conclusion: 'FAILURE', detailsUrl: null }]) })
+    const s = stubs(on, { graphql: only(red), answer: 'Cancel' })
+    await start($, s.clock)
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'act-ai-review' })
+    await settleReview(s)
+    expect(reviewsOf(s).length).toBe(5)
+    expect(approvedAt(s)).toEqual([])
+    expect(s.toasts.some((t) => t.includes('✓ AI review passed #11'))).toBe(true)
+    await ui.press({ key: 'act-approve' })
+    expect(s.questions.at(-1)).toContain("CI is failing (rspec): approve only if that is not this change's fault")
+    await ui.unmount()
+  },
+)
 
 test('a merge refused because the PR moved says so and fetches again', async ($, on) => {
   const s = stubs(on, {
@@ -2801,6 +2830,7 @@ test('the last page of the reader says what comes next, and n reads the next PR'
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-diff' })
+  await ui.press({ key: 'diff-next' })
   await ui.press({ key: 'diff-next' })
   await ui.press({ key: 'diff-next' })
   expect(await ui.find({ type: 'Text', text: /^── end of app#11 · a approve · v review · n next PR · q back ──$/ })).toBeDefined()
@@ -2861,5 +2891,43 @@ test('the header and the footer keep to the actions: h, l, j, k and q work, hidd
   await ui.press({ key: 'tab-next' })
   expect(String((await ui.find({ key: 'tab-mine' }))?.props.label)).toContain('◉')
   expect((await ui.find({ key: 'act-diff' }))?.props.label).toBe('read')
+  await ui.unmount()
+})
+
+// ---- p: your own prompt about the selected PR ----
+
+test('p makes your next prompt carry the PR, read-only; p twice lets it change files', async ($, on) => {
+  const s = stubs(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-ask' })
+  expect((await ui.find({ key: 'act-ask' }))?.props.label).toBe('ask: read-only')
+  expect(s.toasts.at(-1)).toContain('Esc, then type your question')
+  // You type it in the prompt
+  await $.prompt.submit({ text: 'what could break here?', origin: { kind: 'composer' } } as never)
+  expect(s.submitted.at(-1)).toBe('what could break here?')
+  expect(s.contexts.at(-1)?.join(' ')).toContain(`This prompt is about the pull request ${HUMAN.url}`)
+  expect(s.contexts.at(-1)?.join(' ')).toContain('pr-inbox enforces read-only tools for this turn.')
+  // That turn is read-only
+  await $.turn.start({ text: 'what could break here?', turnId: 'ask1' })
+  expect(await $.tool.call({ tool: 'Bash', command: 'git push' } as never)).toHaveProperty('deny')
+  // Used once: the next prompt is yours alone
+  await $.prompt.submit({ text: 'thanks', origin: { kind: 'composer' } } as never)
+  expect(s.contexts.at(-1)).toEqual([])
+
+  // p twice: it may change files
+  await ui.press({ key: 'act-ask' })
+  await ui.press({ key: 'act-ask' })
+  expect((await ui.find({ key: 'act-ask' }))?.props.label).toBe('ask: may change files')
+  await $.prompt.submit({ text: 'fix the typo', origin: { kind: 'composer' } } as never)
+  expect(s.contexts.at(-1)?.join(' ')).not.toContain('read-only')
+  await $.turn.start({ text: 'fix the typo', turnId: 'ask2' })
+  expect(await $.tool.call({ tool: 'Bash', command: 'git commit -am x' } as never)).toMatchObject({ result: 'ok' })
+  // A third p cancels
+  await ui.press({ key: 'act-ask' })
+  await ui.press({ key: 'act-ask' })
+  await ui.press({ key: 'act-ask' })
+  expect((await ui.find({ key: 'act-ask' }))?.props.label).toBe('ask')
   await ui.unmount()
 })

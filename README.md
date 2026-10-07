@@ -60,6 +60,7 @@ Under the list, the selected PR's details: the summary, the release impact, the 
 | `1` / `2`, `h` / `l` | To review / My PRs, or the tab to the left / right |
 | `d` | Read the PR (below) |
 | `e` | Ask Claude to explain the PR, or for your own, to diagnose what blocks it. Claude reads the description, comments, reviews and linked issues, not only the diff, in a read-only turn |
+| `p` | Your own question, instruction or `/skill` about the PR, in the main prompt: press `p`, then `Esc`, and type it as usual. It goes with the PR's link and title, unseen; the hint under the prompt says which PR. Read-only like `e`; press `p` twice to let Claude change files, three times to cancel. A skill or command you run gets the PR's URL as its argument |
 | `o` | Open in the browser |
 | `x` / `z` | Snooze the PR until it is updated / show snoozed PRs |
 | `f` | Filter by repository, number, title or @author (Enter keeps it; an empty one clears it) |
@@ -86,7 +87,7 @@ Under the list, the selected PR's details: the summary, the release impact, the 
 
 **In the reader (`d`)**
 
-The description comes first, then the diff one file at a time, drawn like Claude Code's own diffs. On a `↻ RE` PR, it opens at what changed since your approval.
+The description comes first, then the conversation (comments and reviews, oldest first, each with its verdict), then the diff one file at a time. Comments on lines show above the file they are on, drawn like Claude Code's own diffs. On a `↻ RE` PR, it opens at what changed since your approval.
 
 | Key | Action |
 | :- | :- |
@@ -95,7 +96,7 @@ The description comes first, then the diff one file at a time, drawn like Claude
 | `f` | The list of pages: `j` / `k` move, `l` or `1`-`9` open |
 | `t` | On a `↻ RE` PR: the whole PR, or only what changed since your approval |
 | `g` | Show a folded lockfile or generated file |
-| `a` / `v` / `e` | Approve, review or explain without leaving |
+| `a` / `v` / `e` / `p` | Approve, review, explain or ask without leaving |
 | `n` | The next PR in the list |
 | `q` | Back to the list |
 
@@ -114,7 +115,7 @@ The description comes first, then the diff one file at a time, drawn like Claude
 
 `v` on a review request runs a review from several perspectives, each an independent model call, and approves the PR when it passes:
 
-1. **Gates, checked in code**: not a draft, CI passed (or there is none), no merge conflict, no reviewer requested changes
+1. **Gates, checked in code**: not a draft, no merge conflict, no reviewer requested changes. A failing or running CI does not stop the review: it is a ⚠ warning, and such a PR is never approved without you
 2. **Screening**: the description, diff and comments are checked for instructions aimed at an AI (prompt injection) by a small model, and the PR is checked for changes to AI instructions (CLAUDE.md, `.claude/` rules, skills, subagents and the like). What happens next depends on who decides: when the approval would go through without you (`ai_approve` `auto` for an author it applies to), any of these stops the review; when you approve in the dialog, the review goes on and they are shown as ⚠ warnings in the pane, the dialog and the transcript
 3. **Reviewers**, in parallel on `review_model` (Sonnet by default). Each first says what else it needs to read (files at the PR head, code searches, upstream release notes); the mod checks the request, fetches and screens it, then the reviewer reviews:
    - Purpose & scope: does it do what the description and linked issues ask, without needless complexity or unrelated changes
@@ -182,6 +183,7 @@ When a PR is too large to read whole (more than 30,000 characters of diff, 4,000
 - **Merging.** `m` merges only after you pick a method in its dialog, where Cancel is selected first. A single PR's merge is pinned to the commit on screen. A stack merge goes through `gh stack merge`, which cannot be pinned to commits: its dialog lists every PR that goes, and GitHub still applies your branch rules to each
 - **Displayed text is sanitized.** Terminal escape sequences, control characters, bidirectional override characters and invisible characters are stripped from PR titles, author names, check names and model output before they are drawn. The diff (`d`) is drawn by Claude Code's own highlighter, line by line with the same characters stripped (tabs kept), and is never sent to a model. Links open only canonical `https://` URLs. Failed-check links point wherever the CI system says, which may be a third-party site
 - **What is sent, and when.** With `analysis` on `auto`, as soon as Claude Code starts (including `claude -p` runs and sessions in other projects) and on every refresh, each review request that has not been analyzed yet is sent to the model Claude Code is configured with (Anthropic, or your Bedrock, Vertex or gateway setup), under your account: its repository and number, author, title, list of changed files, description (first 4,000 characters) and diff (first 30,000 characters). You do not have to open the pane. Follow your organization's rules for work code: narrow it with `org_filter`, or set `analysis` to `when opened` or `off`
+- **`p`.** Your prompt, with the PR's link and title beside it. Its turn runs under the same read-only guard as `e` unless you pressed `p` twice; the note it carries tells Claude to treat the PR's text as data either way
 - **What is stored locally.** In Claude Code's plugin store (`~/.claude/plugins/store/`): the URLs of your review requests and the state of your own PRs (to notice changes), each analysis (summary, risk, release impact), each AI review's findings, snoozed PRs and which updates you have seen. Analyses of PRs that are no longer open are deleted on the next refresh
 - **Fixing CI (`c`).** The fix is an ordinary Claude turn with your session's permissions (your permission mode and allow rules apply), working in a separate worktree, never in your checkout. While it runs, pr-inbox refuses its `git push`, and `gh` merges, reviews, comments and other writes (`gh api` POST/PUT/PATCH/DELETE): those stay with you. The push dialog lists exactly the commits a push would send (those not on the branch as fetched), says when the turn was cut short, and a worktree with commits left from an earlier fix asks before going on. CI logs are written by tools and other people, so the request tells Claude to treat them as data. pr-inbox pushes only after you choose Push in its dialog, to the PR's own branch, never with force; your PRs from forks are left out
 - **Access.** All GitHub access goes through `gh`; the mod holds no token. OS notifications go through `osascript` or `notify-send`, with the text passed as arguments, never as script. Commands run as argument lists, without a shell
