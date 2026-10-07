@@ -246,6 +246,15 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
       },
     }
   })
+  // The prompt box: what p puts in it, and what it holds
+  let box = ''
+  on('prompt.read', () => ({ value: { text: box, cursor: box.length } }) as never)
+  on('prompt.fill', (_, e) => {
+    const fill = e as unknown as { text: string; mode?: string }
+    box = fill.mode === 'append' ? box + fill.text : fill.text
+    return { isFilled: true } as never
+  })
+  const promptBox = () => box
   on('prompt.submit', (_, e) => {
     submitted.push(e.text)
     contexts.push([...(e.context ?? [])])
@@ -283,6 +292,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
   }
   return {
     setAnswer,
+    promptBox,
     contexts,
     calls,
     envs,
@@ -2896,38 +2906,31 @@ test('the header and the footer keep to the actions: h, l, j, k and q work, hidd
 
 // ---- p: your own prompt about the selected PR ----
 
-test('p makes your next prompt carry the PR, read-only; p twice lets it change files', async ($, on) => {
+test('p puts the PR link in the prompt; a prompt sent with it runs read-only, p twice lets it change files', async ($, on) => {
   const s = stubs(on)
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-ask' })
+  // Where you see it, and type around it
+  expect(s.promptBox()).toBe(`${HUMAN.url} `)
   expect((await ui.find({ key: 'act-ask' }))?.props.label).toBe('ask: read-only')
-  expect(s.toasts.at(-1)).toContain('Esc, then type your question')
-  // You type it in the prompt
-  await $.prompt.submit({ text: 'what could break here?', origin: { kind: 'composer' } } as never)
-  expect(s.submitted.at(-1)).toBe('what could break here?')
-  expect(s.contexts.at(-1)?.join(' ')).toContain(`This prompt is about the pull request ${HUMAN.url}`)
+  await $.prompt.submit({ text: `${HUMAN.url} what could break here?`, origin: { kind: 'composer' } } as never)
   expect(s.contexts.at(-1)?.join(' ')).toContain('pr-inbox enforces read-only tools for this turn.')
-  // That turn is read-only
   await $.turn.start({ text: 'what could break here?', turnId: 'ask1' })
   expect(await $.tool.call({ tool: 'Bash', command: 'git push' } as never)).toHaveProperty('deny')
-  // Used once: the next prompt is yours alone
-  await $.prompt.submit({ text: 'thanks', origin: { kind: 'composer' } } as never)
+
+  // With the link taken out before sending, it is your own prompt
+  await ui.press({ key: 'act-ask' })
+  await $.prompt.submit({ text: 'something else', origin: { kind: 'composer' } } as never)
   expect(s.contexts.at(-1)).toEqual([])
 
-  // p twice: it may change files
+  // p twice: it may change files; a third p takes the link out
   await ui.press({ key: 'act-ask' })
   await ui.press({ key: 'act-ask' })
   expect((await ui.find({ key: 'act-ask' }))?.props.label).toBe('ask: may change files')
-  await $.prompt.submit({ text: 'fix the typo', origin: { kind: 'composer' } } as never)
-  expect(s.contexts.at(-1)?.join(' ')).not.toContain('read-only')
-  await $.turn.start({ text: 'fix the typo', turnId: 'ask2' })
-  expect(await $.tool.call({ tool: 'Bash', command: 'git commit -am x' } as never)).toMatchObject({ result: 'ok' })
-  // A third p cancels
-  await ui.press({ key: 'act-ask' })
-  await ui.press({ key: 'act-ask' })
   await ui.press({ key: 'act-ask' })
   expect((await ui.find({ key: 'act-ask' }))?.props.label).toBe('ask')
+  expect(s.promptBox()).not.toContain(HUMAN.url)
   await ui.unmount()
 })
