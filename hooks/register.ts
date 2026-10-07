@@ -2389,6 +2389,8 @@ type DiffView = {
   at: number
   // The block of lines j/k last scrolled to, and the row picked in the list of files (f)
   block: number
+  // The file page last shown, where the files tab (3) comes back to
+  lastFile?: number
   cursor: number
   // A line above the pages (the fix not pushed yet)
   note?: string
@@ -3626,6 +3628,7 @@ export function register(on: On, options: PluginOptions) {
     const file = at >= FIRST_FILE ? (files[at - FIRST_FILE] as DiffFile) : undefined
     const go = (to: number) => {
       v.at = Math.min(Math.max(0, to), pages - 1)
+      if (v.at >= FIRST_FILE) v.lastFile = v.at
       v.block = 0
       v.list = false
       redraw()
@@ -3694,16 +3697,28 @@ export function register(on: On, options: PluginOptions) {
             close,
           ]
         : [
-            key('diff-prev', '◂', 'h', () => (at === 0 ? toast('This is the description · l: the conversation') : go(at - 1)), at === 0),
-            key(
-              'diff-next',
-              '▸',
-              'l',
-              () => (at === pages - 1 ? toast('End of this PR · n: the next PR · q: back') : go(at + 1)),
-              at === pages - 1,
-            ),
-            key('diff-down', '↓', 'j', () => scrollTo(v.block + 1), blocks === 0),
-            key('diff-up', '↑', 'k', () => scrollTo(v.block - 1), blocks === 0),
+            // h / l pages, j / k scroll: hidden keys (in the help and the tabs), so the actions fit one line
+            Box({
+              display: 'none',
+              children: [
+                key(
+                  'diff-prev',
+                  '◂',
+                  'h',
+                  () => (at === 0 ? toast('This is the description · l: the conversation') : go(at - 1)),
+                  at === 0,
+                ),
+                key(
+                  'diff-next',
+                  '▸',
+                  'l',
+                  () => (at === pages - 1 ? toast('End of this PR · n: the next PR · q: back') : go(at + 1)),
+                  at === pages - 1,
+                ),
+                key('diff-down', '↓', 'j', () => scrollTo(v.block + 1), blocks === 0),
+                key('diff-up', '↑', 'k', () => scrollTo(v.block - 1), blocks === 0),
+              ],
+            }),
             key('diff-list', 'files', 'f', () => {
               v.list = true
               v.cursor = at
@@ -3743,8 +3758,37 @@ export function register(on: On, options: PluginOptions) {
             }),
           ]
         : []
+    // The three parts of the PR as tabs, the one shown lit, each a digit away (in the list of files the digits open
+    // files instead); h/l still walk page by page through all of them
+    const part = at === 0 ? 0 : at === 1 ? 1 : 2
+    const tab = (n: number, name: string, page: number) =>
+      Button({
+        key: `diff-tab-${n}`,
+        label: `${part === n - 1 ? '◉ ' : ''}${name}`,
+        ...(v.list ? {} : { hotkey: String(n) }),
+        plain: true,
+        dimColor: part !== n - 1,
+        onPress: () => go(page),
+      })
+    const tabs = Box({
+      key: 'diff-tabs',
+      flexDirection: 'row',
+      columnGap: 2,
+      children: [
+        tab(1, 'description', 0),
+        tab(2, `conversation ${v.talk.length}`, 1),
+        tab(
+          3,
+          files.length === 0 ? 'files 0' : part === 2 ? `files ${at - FIRST_FILE + 1}/${files.length}` : `files ${files.length}`,
+          v.lastFile ?? FIRST_FILE,
+        ),
+      ],
+    })
     const done = (tree: El[], why: (k: string) => string) =>
-      Box({ flexDirection: 'column', children: [...tree, keyCatcher(kit, tree, why, toast)] })
+      Box({
+        flexDirection: 'column',
+        children: [...tree.slice(0, head.length), tabs, ...tree.slice(head.length), keyCatcher(kit, [...tree, tabs], why, toast)],
+      })
     const notHere = (k: string) => `${k}: no such key in the reader · h/l pages · j/k scroll · f files · q back`
 
     // f: the description and every file. j/k move, l opens, 1-9 open a file straight away

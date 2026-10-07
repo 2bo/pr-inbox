@@ -87,7 +87,7 @@ Under the list, the selected PR's details: the summary, the release impact, the 
 
 **In the reader (`d`)**
 
-The description comes first, then the conversation (comments and reviews, oldest first, each with its verdict), then the diff one file at a time. Comments on lines show above the file they are on, drawn like Claude Code's own diffs. On a `↻ RE` PR, it opens at what changed since your approval.
+Three tabs, `1` description, `2` conversation (comments and reviews, oldest first, each with its verdict), `3` files (the diff one file at a time); `h` / `l` walk through them page by page. Comments on lines show above the file they are on, drawn like Claude Code's own diffs. On a `↻ RE` PR, it opens at what changed since your approval.
 
 | Key | Action |
 | :- | :- |
