@@ -1411,6 +1411,13 @@ async function toggleAsk($: EngineInterface, pr: PR): Promise<void> {
   $.ui.invalidate('ui.render')
 }
 
+// What p does next, as every key says what it does: put the link in, let Claude change files, take the link out.
+// Whether the prompt is read-only is a state, shown in the hint under the prompt
+function askKeyLabel(pr: PR): string {
+  if (asking?.pr.url !== pr.url) return 'link to prompt'
+  return asking.write ? 'take link out' : 'allow edits'
+}
+
 // Beside a prompt with the link in it: how to treat what Claude reads in the PR
 function askNote(write: boolean): string {
   return write
@@ -3790,12 +3797,7 @@ export function register(on: On, options: PluginOptions) {
               : []),
             ...toggleSince,
             ...actOnPr,
-            key(
-              'diff-ask',
-              asking?.pr.url === pr.url ? (asking.write ? 'ask: may change' : 'ask: read-only') : 'ask',
-              'p',
-              () => void toggleAsk($, pr),
-            ),
+            key('diff-ask', askKeyLabel(pr), 'p', () => void toggleAsk($, pr)),
             key('diff-open', 'open', 'o', async () => void (await $.process.run(['gh', 'pr', 'view', pr.url, '--web'])), true),
             nextKey,
             close,
@@ -4284,7 +4286,7 @@ export function register(on: On, options: PluginOptions) {
         }),
         Button({
           key: 'act-ask',
-          label: asking?.pr.url === pr.url ? (asking.write ? 'ask: may change files' : 'ask: read-only') : 'ask',
+          label: askKeyLabel(pr),
           hotkey: 'p',
           plain: true,
           onPress: () => void toggleAsk($, pr),

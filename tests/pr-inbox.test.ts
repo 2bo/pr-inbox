@@ -2916,7 +2916,7 @@ test('p puts the PR link in the prompt; a prompt sent with it runs read-only, p 
   await ui.press({ key: 'act-ask' })
   // Where you see it, and type around it
   expect(s.promptBox()).toBe(`${HUMAN.url} `)
-  expect((await ui.find({ key: 'act-ask' }))?.props.label).toBe('ask: read-only')
+  expect((await ui.find({ key: 'act-ask' }))?.props.label).toBe('allow edits')
   await $.prompt.submit({ text: `${HUMAN.url} what could break here?`, origin: { kind: 'composer' } } as never)
   expect(s.contexts.at(-1)?.join(' ')).toContain('pr-inbox enforces read-only tools for this turn.')
   await $.turn.start({ text: 'what could break here?', turnId: 'ask1' })
@@ -2930,9 +2930,9 @@ test('p puts the PR link in the prompt; a prompt sent with it runs read-only, p 
   // p twice: it may change files; a third p takes the link out
   await ui.press({ key: 'act-ask' })
   await ui.press({ key: 'act-ask' })
-  expect((await ui.find({ key: 'act-ask' }))?.props.label).toBe('ask: may change files')
+  expect((await ui.find({ key: 'act-ask' }))?.props.label).toBe('take link out')
   await ui.press({ key: 'act-ask' })
-  expect((await ui.find({ key: 'act-ask' }))?.props.label).toBe('ask')
+  expect((await ui.find({ key: 'act-ask' }))?.props.label).toBe('link to prompt')
   expect(s.promptBox()).not.toContain(HUMAN.url)
   await ui.unmount()
 })
