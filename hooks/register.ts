@@ -695,7 +695,7 @@ function summary(g: Record<Group, PR[]>): string {
   const passed = review.filter((p) => reviewOfHead(p)?.state === 'passed').length
   const part = (n: number, text: string) => (n > 0 ? [text] : [])
   const left = [
-    `review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`,
+    `to review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`,
     ...part(high, `▲${high} high`),
     ...part(reviewing, `⠿ AI ${reviewing}${botBatch ? ` (bots ${botBatch.done}/${botBatch.total})` : ''}`),
     ...part(passed, `☑${passed} to approve`),
@@ -707,7 +707,7 @@ function summary(g: Record<Group, PR[]>): string {
     ...part(g.ready.length, `✓${g.ready.length} ready`),
     ...part(g.waiting.length, `…${g.waiting.length} in review`),
   ]
-  return `${left.join(' · ')} │ mine ${right.length ? right.join(' · ') : mine.length}`
+  return `${left.join(' · ')} │ my PRs ${right.length ? right.join(' · ') : mine.length}`
 }
 
 // Time since the request
@@ -978,10 +978,12 @@ async function notifyChanges($: EngineInterface): Promise<void> {
     const prev = before.mine[p.url]
     if (prev === undefined || prev === snapshot.mine[p.url]) continue
     const ci = ciState(p)
-    if (p.reviewDecision === 'APPROVED' && !prev.startsWith('APPROVED')) changed.push(`✅ Approved: #${p.number}`)
+    if (p.reviewDecision === 'APPROVED' && !prev.startsWith('APPROVED'))
+      changed.push(`✅ Approved: ${p.repository.nameWithOwner}#${p.number}`)
     if (p.reviewDecision === 'CHANGES_REQUESTED' && !prev.startsWith('CHANGES_REQUESTED'))
-      changed.push(`🔴 Changes requested: #${p.number}`)
-    if ((ci === 'FAILURE' || ci === 'ERROR') && !/\|(FAILURE|ERROR)$/.test(prev)) changed.push(`✗ CI failed: #${p.number}`)
+      changed.push(`🔴 Changes requested: ${p.repository.nameWithOwner}#${p.number}`)
+    if ((ci === 'FAILURE' || ci === 'ERROR') && !/\|(FAILURE|ERROR)$/.test(prev))
+      changed.push(`✗ CI failed: ${p.repository.nameWithOwner}#${p.number}`)
   }
   const messages = [...requested, ...changed]
   if (messages.length > 0) {
@@ -1209,7 +1211,7 @@ async function approve($: EngineInterface, pr: PR): Promise<void> {
   const an = a && 'risk' in a ? a : undefined
   const facts = [
     an ? `Risk: ${an.risk.toUpperCase()}` : 'Risk: not analyzed',
-    an ? `release: ${{ yes: 'user-visible change', no: 'no visible change', unknown: 'impact unclear' }[an.impact]}` : '',
+    an ? `on release: ${{ yes: 'user-visible change', no: 'no visible change', unknown: 'impact unclear' }[an.impact]}` : '',
     r ? '' : 'AI review: none',
   ].filter(Boolean)
   const ai =
@@ -1286,7 +1288,7 @@ async function postApproval($: EngineInterface, pr: PR, how: string): Promise<bo
     return false
   }
   if (head !== pr.headRefOid) {
-    $.ui.toast(`Not approved: #${pr.number} has new commits since ${sha}. Review them first`, { timeoutMs: 8000 })
+    $.ui.toast(`Not approved: ${askLabel(pr)} has new commits since ${sha}. Review them first`, { timeoutMs: 8000 })
     await refresh($)
     return false
   }
@@ -1413,7 +1415,7 @@ async function toggleAsk($: EngineInterface, pr: PR): Promise<void> {
   }
   $.ui.toast(
     asking
-      ? `${askLabel(pr)}'s link is in the prompt: Esc, then type after it, or ctrl+a and /skill for a skill (${asking.write ? 'Claude may change files' : 'read-only'}) · p again ${asking.write ? 'takes it out' : 'lets it change files'}`
+      ? `${askLabel(pr)}'s link is in the prompt: Esc, then type after it, or ctrl+a and /skill for a skill (${asking.write ? 'Claude may change files' : 'read-only'}) · p: ${asking.write ? 'take link out' : 'allow edits'}`
       : `Took ${askLabel(pr)}'s link out of the prompt`,
     { timeoutMs: 8000 },
   )
@@ -2179,7 +2181,7 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
   const finish = async () => {
     if (cancelled()) {
       run.state = 'cancelled'
-      $.ui.toast(`AI review of #${pr.number} cancelled`)
+      $.ui.toast(`AI review of ${askLabel(pr)} cancelled`)
       redraw()
       return
     }
@@ -2205,8 +2207,8 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
       const gated = run.verdicts.length === 0 && run.injection.length === 0
       $.ui.toast(
         gated
-          ? `AI review not run on #${pr.number}: ${fit(run.problems[0] ?? '', 60)}`
-          : `✗ AI review blocked #${pr.number}: ${fit(run.problems[0] ?? '', 80)}`,
+          ? `AI review not run on ${askLabel(pr)}: ${fit(run.problems[0] ?? '', 60)}`
+          : `✗ AI review blocked ${askLabel(pr)}: ${fit(run.problems[0] ?? '', 80)}`,
         { timeoutMs: 8000 },
       )
     } else {
@@ -3114,7 +3116,7 @@ async function postFindings($: EngineInterface, pr: PR): Promise<void> {
   const run = reviewOfHead(pr)
   const all = (run?.findings ?? []).filter((f) => f.severity !== 'pre-existing' && f.confirmed !== false)
   if (!run || all.length === 0) {
-    $.ui.toast(`No AI review findings to send for #${pr.number}`, { timeoutMs: 6000 })
+    $.ui.toast(`No AI review findings to send for ${askLabel(pr)}`, { timeoutMs: 6000 })
     return
   }
   const ask = async (question: string, options: string[], header: string, multiSelect = false) => {
@@ -3132,14 +3134,19 @@ async function postFindings($: EngineInterface, pr: PR): Promise<void> {
   // Which ones: each by name when they fit the dialog, else the ones that block or all
   let chosen: Finding[] = []
   if (all.length <= 4) {
-    const answer = await ask(`Which AI review findings go to ${askLabel(pr)} as comments on their lines?`, all.map(label), 'Send', true)
+    const answer = await ask(
+      `Which AI review findings go to ${askLabel(pr)} as comments on their lines?`,
+      all.map(label),
+      'Send findings',
+      true,
+    )
     const picked = answer.split(',').map((x) => x.trim())
     chosen = all.filter((f) => picked.includes(label(f)))
   } else {
     const answer = await ask(
       `${all.length} AI review findings on ${askLabel(pr)}. Which go to GitHub as comments on their lines?`,
       ['Cancel', ...(blocking.length ? [`The ${blocking.length} that block`] : []), `All ${all.length}`],
-      'Send',
+      'Send findings',
     )
     chosen = answer.startsWith('All') ? all : answer.startsWith('The ') ? blocking : []
   }
@@ -3157,7 +3164,7 @@ async function postFindings($: EngineInterface, pr: PR): Promise<void> {
   // Pinned to the reviewed commit: if new commits came, the lines may have moved
   const { head } = await currentHead($, pr)
   if (head && head !== pr.headRefOid) {
-    $.ui.toast(`Not posted: #${pr.number} has new commits since ${sha} · v: review them`, { timeoutMs: 10000 })
+    $.ui.toast(`Not posted: ${askLabel(pr)} has new commits since ${sha} · v: review them`, { timeoutMs: 10000 })
     await refresh($)
     return
   }
@@ -3234,7 +3241,9 @@ async function mergePr($: EngineInterface, pr: PR): Promise<void> {
   if (r.exitCode !== 0) {
     const moved = /head|match|expected/i.test(r.stderr)
     $.ui.toast(
-      moved ? `Not merged: #${pr.number} has new commits since ${sha} · refreshed` : `Not merged: ${fit(clean(r.stderr), 90)} · refreshed`,
+      moved
+        ? `Not merged: ${askLabel(pr)} has new commits since ${sha} · refreshed`
+        : `Not merged: ${fit(clean(r.stderr), 90)} · refreshed`,
       { timeoutMs: 10000 },
     )
     await refresh($)
@@ -3316,7 +3325,7 @@ function failedRuns(pr: PR): string[] {
 async function rerunFailed($: EngineInterface, pr: PR): Promise<void> {
   const runs = failedRuns(pr)
   if (runs.length === 0) {
-    $.ui.toast(`No failed GitHub Actions run to re-run on #${pr.number}; open the check for other CI`, { timeoutMs: 8000 })
+    $.ui.toast(`No failed GitHub Actions run to re-run on ${askLabel(pr)}; open the check for other CI`, { timeoutMs: 8000 })
     return
   }
   const failed: string[] = []
@@ -3327,7 +3336,7 @@ async function rerunFailed($: EngineInterface, pr: PR): Promise<void> {
   $.ui.toast(
     failed.length
       ? `Re-run failed for ${failed.length} of ${runs.length} runs: ${failed[0]}`
-      : `🔁 Re-running the failed jobs of ${plural(runs.length, 'run')} on #${pr.number}`,
+      : `🔁 Re-running the failed jobs of ${plural(runs.length, 'run')} on ${askLabel(pr)}`,
     { timeoutMs: 8000 },
   )
   await refresh($)
@@ -3400,11 +3409,11 @@ async function fixCi($: EngineInterface, pr: PR): Promise<void> {
   const repo = pr.repository.nameWithOwner
   const branch = pr.headRefName ?? ''
   if (!REPO_NAME.test(repo) || !BRANCH_NAME.test(branch) || pr.isCrossRepository) {
-    $.ui.toast(`Cannot fix #${pr.number} here: its branch is not in ${repo} or has an unexpected name`, { timeoutMs: 8000 })
+    $.ui.toast(`Cannot fix ${askLabel(pr)} here: its branch is not in ${repo} or has an unexpected name`, { timeoutMs: 8000 })
     return
   }
   if (fixJob) {
-    $.ui.toast(`Claude is still fixing #${fixJob.pr.number}: wait for it to finish`, { timeoutMs: 8000 })
+    $.ui.toast(`Claude is still fixing ${askLabel(fixJob.pr)}: wait for it to finish`, { timeoutMs: 8000 })
     return
   }
   const clone = await findClone($, repo)
@@ -3438,7 +3447,7 @@ async function fixCi($: EngineInterface, pr: PR): Promise<void> {
       let answer = ''
       try {
         answer = await $.ui.ask(
-          `The worktree of #${pr.number} has ${plural(left.length, 'commit')} not on ${branch}: ${left.slice(0, 3).join('; ')}. Go on from them, or start again from the PR head?`,
+          `The worktree of ${askLabel(pr)} has ${plural(left.length, 'commit')} not on ${branch}: ${left.slice(0, 3).join('; ')}. Go on from them, or start again from the PR head?`,
           { options: ['Cancel', 'Go on from them', 'Start again from the PR head'], header: 'Worktree' },
         )
       } catch {
@@ -3462,13 +3471,13 @@ async function fixCi($: EngineInterface, pr: PR): Promise<void> {
   fixReady.delete(pr.url)
   // Not awaited: the call waits until the turn starts
   void $.prompt.submit({ text: fixRequest(job), asUser: true })
-  $.ui.toast(`Claude is fixing the CI of #${pr.number} in ${dir}`, { timeoutMs: 8000 })
+  $.ui.toast(`Claude is fixing the CI of ${askLabel(pr)} in ${dir}`, { timeoutMs: 8000 })
   $.ui.invalidate('ui.render')
   // A request that never became a turn (queued behind another, then dropped) does not hold c forever
   $.clock.after(2 * MINUTE, () => {
     if (fixJob === job && !job.turnId) {
       fixJob = undefined
-      $.ui.toast(`The fix of #${pr.number} did not start · c: try again`, { timeoutMs: 8000 })
+      $.ui.toast(`The fix of ${askLabel(pr)} did not start · c: try again`, { timeoutMs: 8000 })
       $.ui.invalidate('ui.render')
     }
   })
@@ -3510,7 +3519,7 @@ async function afterFix($: EngineInterface, job: FixJob, end: FixEnd = 'done'): 
   $.ui.invalidate('ui.render')
   if (commits.length === 0) {
     fixReady.delete(job.pr.url)
-    $.ui.toast(`No new commit for #${job.pr.number} in ${job.dir}`, { timeoutMs: 8000 })
+    $.ui.toast(`No new commit for ${askLabel(job.pr)} in ${job.dir}`, { timeoutMs: 8000 })
     return
   }
   const ready = { ...job, commits }
@@ -3599,14 +3608,14 @@ async function ciMenu($: EngineInterface, pr: PR): Promise<void> {
   if (fixJob?.pr.url === pr.url) {
     const job = fixJob
     const answer = await ask(
-      `Claude is fixing #${pr.number} in ${job.dir} (${elapsed(new Date(job.startedAt).toISOString(), Date.now())}).`,
+      `Claude is fixing ${askLabel(pr)} in ${job.dir} (${elapsed(new Date(job.startedAt).toISOString(), Date.now())}).`,
       ['Ask to push what it has now', 'Stop watching (Claude keeps working; Esc in the prompt stops it)'],
       'Fixing',
     )
     if (answer === 'Ask to push what it has now') await afterFix($, job, 'early')
     else if (answer.startsWith('Stop watching')) {
       fixJob = undefined
-      $.ui.toast(`Stopped following the fix of #${pr.number}; the worktree stays in ${job.dir}`, { timeoutMs: 8000 })
+      $.ui.toast(`Stopped following the fix of ${askLabel(pr)}; the worktree stays in ${job.dir}`, { timeoutMs: 8000 })
       $.ui.invalidate('ui.render')
     }
     return
@@ -3615,7 +3624,7 @@ async function ciMenu($: EngineInterface, pr: PR): Promise<void> {
   if (ready) {
     const n = ready.commits?.length ?? 0
     const answer = await ask(
-      `A fix of #${pr.number} waits in ${ready.dir}: ${plural(n, 'commit')} not pushed.`,
+      `A fix of ${askLabel(pr)} waits in ${ready.dir}: ${plural(n, 'commit')} not pushed.`,
       [`Push ${plural(n, 'commit')}`, 'Show the diff', 'Forget it (the worktree stays)'],
       'Fix ready',
     )
@@ -4914,7 +4923,7 @@ export function register(on: On, options: PluginOptions) {
     // AI review every bot PR in turn: those with no review of their current commit yet
     const unreviewedBots = g.bots.filter((p) => !reviewOfHead(p) && reviews.get(p.url)?.state !== 'running').length
     // w sits on the bots heading
-    const reviewBotsLabel = botBatch ? `stop AI review (${botBatch.done}/${botBatch.total})` : `AI review ${unreviewedBots} not reviewed`
+    const reviewBotsLabel = botBatch ? `stop AI review (${botBatch.done}/${botBatch.total})` : `AI review ${unreviewedBots} unreviewed`
     const reviewBots =
       tab === 'review' && (unreviewedBots > 0 || botBatch)
         ? small('review-bots', reviewBotsLabel, 'w', () => {

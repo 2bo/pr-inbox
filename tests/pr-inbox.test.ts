@@ -338,7 +338,7 @@ async function start($: TestEngine, clock: ReturnType<typeof mock.clock>) {
 test('fetches on start and shows the counts under the prompt', async ($, on) => {
   const s = stubs(on)
   await start($, s.clock)
-  expect(s.statuses.at(-1)).toBe('review 2 ⚙1 · ▲1 high │ mine ✗1 fix · ✓1 ready · …1 in review')
+  expect(s.statuses.at(-1)).toBe('to review 2 ⚙1 · ▲1 high │ my PRs ✗1 fix · ✓1 ready · …1 in review')
 })
 
 // Get a whole PR row (title, summary, status, failed checks)
@@ -427,7 +427,7 @@ test('does not approve when the PR got new commits after it was shown', async ($
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-approve' })
   expect(approved(s.calls)).toBe(false)
-  expect(s.toasts.at(-1)).toContain('Not approved: #11 has new commits')
+  expect(s.toasts.at(-1)).toContain('Not approved: app#11 has new commits')
   await ui.unmount()
 })
 
@@ -770,7 +770,7 @@ test('toasts new review requests and changes requested', async ($, on) => {
   })
   await start($, s.clock)
   expect(s.toasts.at(-1)).toContain('👀 Review requested: acme/app#11')
-  expect(s.toasts.at(-1)).toContain('🔴 Changes requested: #21')
+  expect(s.toasts.at(-1)).toContain('🔴 Changes requested: acme/app#21')
 })
 
 test('a failed analysis is not retried on every fetch, only after a backoff', async ($, on) => {
@@ -992,14 +992,14 @@ test('falls back to notify-send when osascript is not there', async ($, on) => {
 test('desktop_notify all also covers changes to my PRs', { options: { desktop_notify: 'all' } }, async ($, on) => {
   const s = stubs(on, { snapshot: { review: [HUMAN.url, HUMAN2.url], mine: { [CHANGES.url]: 'REVIEW_REQUIRED|SUCCESS' } } })
   await start($, s.clock)
-  expect(notifications(s.calls).at(-1)?.at(-1)).toBe('🔴 Changes requested: #21 · ✗ CI failed: #21')
+  expect(notifications(s.calls).at(-1)?.at(-1)).toBe('🔴 Changes requested: acme/app#21 · ✗ CI failed: acme/app#21')
 })
 
 test('the default leaves changes to my PRs to the toast', async ($, on) => {
   const s = stubs(on, { snapshot: { review: [HUMAN.url, HUMAN2.url], mine: { [CHANGES.url]: 'REVIEW_REQUIRED|SUCCESS' } } })
   await start($, s.clock)
   expect(notifications(s.calls)).toEqual([])
-  expect(s.toasts.at(-1)).toContain('🔴 Changes requested: #21')
+  expect(s.toasts.at(-1)).toContain('🔴 Changes requested: acme/app#21')
 })
 
 test('desktop_notify off raises no OS notification', { options: { desktop_notify: 'off' } }, async ($, on) => {
@@ -1950,7 +1950,7 @@ test('w reviews every bot PR in turn and sums up', { options: { ai_approve: 'aut
   const s = stubs(on, { graphql: twoBots })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
-  expect((await ui.find({ key: 'review-bots' }))?.props.label).toBe('AI review 2 not reviewed')
+  expect((await ui.find({ key: 'review-bots' }))?.props.label).toBe('AI review 2 unreviewed')
   await ui.press({ key: 'review-bots' })
   await settleReview(s)
   await settleReview(s)
@@ -2147,7 +2147,7 @@ test('the a dialog states the risk, the release impact and that there was no AI 
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-approve' })
-  expect(s.questions.at(-1)).toContain('Risk: HIGH · release: user-visible change · AI review: none.')
+  expect(s.questions.at(-1)).toContain('Risk: HIGH · on release: user-visible change · AI review: none.')
   await ui.unmount()
 })
 
@@ -2540,7 +2540,7 @@ test('after the fix turn, Cancel pushes nothing, and no commit means nothing to 
   await $.turn.complete({ turnId: 'fix2', answer: '' } as never)
   for (let i = 0; i < 10; i++) await s.clock.settle()
   expect(s.questions.length).toBe(asked)
-  expect(s.toasts.at(-1)).toContain('No new commit for #21')
+  expect(s.toasts.at(-1)).toContain('No new commit for app#21')
   expect(s.calls.some((c) => c.includes('push'))).toBe(false)
   await ui.unmount()
 })
@@ -2765,7 +2765,7 @@ test('w sits on the bots heading and counts the bot PRs not reviewed yet', async
   const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
-  expect((await ui.find({ key: 'review-bots' }))?.props.label).toBe('AI review 1 not reviewed')
+  expect((await ui.find({ key: 'review-bots' }))?.props.label).toBe('AI review 1 unreviewed')
   await ui.unmount()
 })
 
@@ -2793,7 +2793,7 @@ test('after the fix, you can look at its diff first; c then pushes it', async ($
   expect(await lineOf(ui, 21)).toContain('⇡ PUSH')
   s.setAnswer('Push 1 commit')
   await ui.press({ key: 'act-ci' })
-  expect(s.questions.at(-2)).toContain('A fix of #21 waits')
+  expect(s.questions.at(-2)).toContain('A fix of app#21 waits')
   await ui.unmount()
 })
 
@@ -2834,7 +2834,7 @@ test('a worktree with commits left from before asks before going on; a turn cut 
   await ui.press({ key: 'tab-mine' })
   s.setAnswer('Fix with Claude (asks before push)')
   await ui.press({ key: 'act-ci' })
-  expect(s.questions.at(-1)).toContain('The worktree of #21 has 1 commit not on fix-21: old1111 An earlier try')
+  expect(s.questions.at(-1)).toContain('The worktree of app#21 has 1 commit not on fix-21: old1111 An earlier try')
   expect(s.choices.at(-1)).toEqual(['Cancel', 'Go on from them', 'Start again from the PR head'])
   await ui.unmount()
 })
@@ -2901,7 +2901,7 @@ test('a review stopped by a gate says it did not run, in plain words', async ($,
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-ai-review' })
   await settleReview(s)
-  expect(s.toasts.at(-1)).toBe('AI review not run on #11: it is a draft')
+  expect(s.toasts.at(-1)).toBe('AI review not run on app#11: it is a draft')
   await ui.unmount()
 })
 
@@ -2936,7 +2936,7 @@ test('a merge refused because the PR moved says so and fetches again', async ($,
   await ui.press({ key: 'nav-down' })
   const fetches = s.calls.filter((c) => c.includes('graphql')).length
   await ui.press({ key: 'act-merge' })
-  expect(s.toasts.at(-1)).toContain('Not merged: #22 has new commits since')
+  expect(s.toasts.at(-1)).toContain('Not merged: app#22 has new commits since')
   expect(s.calls.filter((c) => c.includes('graphql')).length).toBe(fetches + 1)
   await ui.unmount()
 })
@@ -3040,6 +3040,17 @@ test('p puts the PR link in the prompt; a prompt sent with it runs read-only, p 
   await ui.press({ key: 'act-ask' })
   expect((await ui.find({ key: 'act-ask' }))?.props.label).toBe('link to prompt')
   expect(s.promptBox()).not.toContain(HUMAN.url)
+  await ui.unmount()
+})
+
+test('p says in its toast what the next p does, in the words of its key', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-ask' })
+  expect(s.toasts.at(-1)).toContain('(read-only) · p: allow edits')
+  await ui.press({ key: 'act-ask' })
+  expect(s.toasts.at(-1)).toContain('(Claude may change files) · p: take link out')
   await ui.unmount()
 })
 
