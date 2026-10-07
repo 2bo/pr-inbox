@@ -4290,9 +4290,10 @@ export function register(on: On, options: PluginOptions) {
     // Row 1: tabs and refresh
     // Every key says what pressing it does; refresh says so while it fetches (the list refreshes itself, so the time of
     // the last fetch is left out)
-    const refreshLabel = loading ? '⟳ refreshing…' : 'refresh'
-    const filterLabel = filterText ? `filter /${filterText}` : 'filter'
-    const helpLabel = showHelp ? 'close help' : 'help'
+    // Marks, not words: the header is read at every glance, and u says what each key does
+    const refreshLabel = loading ? '⟳ updating…' : '⟳'
+    const filterLabel = filterText ? `/${filterText}` : '/'
+    const helpLabel = showHelp ? 'close help' : '?'
     const reviewTabLabel = `${tab === 'review' ? '◉ ' : ''}to review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`
     const mineTabLabel = `${tab === 'mine' ? '◉ ' : ''}my PRs ${mine.length}`
     const tabButton = (name: typeof tab, label: string, hotkey: string) =>
