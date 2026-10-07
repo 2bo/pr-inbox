@@ -567,6 +567,25 @@ test('shows the summary, risk, reason and release impact in the list', async ($,
   await ui.unmount()
 })
 
+test('the details say each fact once: why the risk on its own line, CI in words, never twice', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  // Why the risk is its own line, its label in the risk's color; the facts line stays short
+  expect((await ui.find({ type: 'Text', text: /^▲ 根拠$/ }))?.props.color).toBe('#ff5f5f')
+  expect(await ui.find({ type: 'Text', text: /^@alice · requested 1d ago · CI passed · \+10 -2$/ })).toBeDefined()
+  // Your PR: what needs you, then the rest; a failed CI is said once
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /^needs you: changes requested, CI failed · \+10 -2 · updated 1d ago$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /✗CI/ })).toBeUndefined()
+  // Ready: says so, and the key that merges it; waiting: what it waits on
+  await ui.press({ key: 'nav-down' })
+  expect(await ui.find({ type: 'Text', text: /^ready to merge · m: merge · CI passed · / })).toBeDefined()
+  await ui.press({ key: 'nav-down' })
+  expect(await ui.find({ type: 'Text', text: /^waiting for reviews · CI passed · / })).toBeDefined()
+  await ui.unmount()
+})
+
 test('does not analyze again unless the PR was updated', async ($, on) => {
   const s = stubs(on)
   await start($, s.clock)
@@ -593,7 +612,8 @@ test('strips control characters from PR titles and model output', async ($, on) 
   const ui = await $.ui.mount(PANE)
   expect(await ui.find({ type: 'Text', text: /^ ログイン画面を直す 二行目$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^要約です$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^@eve {2}.*根拠: 赤字$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^@eve · requested / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^○ 根拠: 赤字$/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -1158,7 +1178,7 @@ test('confirm is the default: nothing is approved when the dialog is cancelled',
   await start($, s.clock)
   const ui = await pressReview($, s)
   expect(approvedAt(s)).toEqual([])
-  expect(await ui.find({ type: 'Text', text: /^AI review ✓ passed, not approved: no blocking issues/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^AI review ✓ passed at aaaaaaa: no blocking issues · a: approve/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -1623,7 +1643,7 @@ test('a failing perspective held back by low confidence is △, not ✗', async 
   await start($, s.clock)
   const ui = await pressReview($, s)
   expect(await ui.find({ type: 'Text', text: /^△ Tests \(not blocking: low confidence\): Might break caching\.$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^AI review ✓ passed, not approved/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^AI review ✓ passed at aaaaaaa: no blocking issues · a: approve/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -2094,6 +2114,9 @@ test('no inbox zero when the fetch failed: the error says how to retry', async (
   expect(await ui.find({ type: 'Text', text: /zero ✦/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^✗ GitHub CLI is not signed in/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /r: retry/ })).toBeDefined()
+  // Not "no review requests": the list is empty because the fetch failed
+  expect(await ui.find({ type: 'Text', text: /No review requests/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Nothing to show until GitHub answers · r: retry/ })).toBeDefined()
   await ui.unmount()
 })
 

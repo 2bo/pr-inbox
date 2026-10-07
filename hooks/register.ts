@@ -710,14 +710,6 @@ function summary(g: Record<Group, PR[]>): string {
   return `${left.join(' · ')} │ mine ${right.length ? right.join(' · ') : mine.length}`
 }
 
-function age(iso: string, now: number): string {
-  const days = Math.floor((now - Date.parse(iso)) / DAY)
-  if (days < 1) return 'today'
-  if (days < 60) return `${days}d ago`
-  if (days < 365) return `${Math.floor(days / 30)}mo ago`
-  return `${Math.floor(days / 365)}y ago`
-}
-
 // Time since the request
 function elapsed(iso: string, now: number): string {
   const ms = Math.max(0, now - Date.parse(iso))
@@ -738,11 +730,12 @@ function failedChecks(pr: PR): { name: string; url?: string }[] {
 // Max failed checks listed under a PR
 const MAX_FAILED_CHECKS = 3
 
-function ciMark(pr: PR): string {
+// CI in words, for the details (the row has the mark)
+function ciWord(pr: PR): string {
   const ci = ciState(pr)
-  if (ci === 'SUCCESS') return '✓CI'
-  if (ci === 'FAILURE' || ci === 'ERROR') return '✗CI'
-  if (ci === 'PENDING' || ci === 'EXPECTED') return '◌CI'
+  if (ci === 'SUCCESS') return 'CI passed'
+  if (ci === 'FAILURE' || ci === 'ERROR') return 'CI failed'
+  if (ci === 'PENDING' || ci === 'EXPECTED') return 'CI running'
   return ''
 }
 
@@ -4052,7 +4045,7 @@ export function register(on: On, options: PluginOptions) {
         })
       const rows: El[] = [
         pick(0, `${v.cursor === 0 ? '▸' : ' '}    Description`),
-        pick(1, `${v.cursor === 1 ? '▸' : ' '}    Conversation  ${plural(v.talk.length, 'comment')}`),
+        pick(1, `${v.cursor === 1 ? '▸' : ' '}    Conversation  ${v.talk.length}`),
       ]
       for (const row of fileTree(files.map((f) => f.path))) {
         if (row.kind === 'dir') {
@@ -4102,8 +4095,7 @@ export function register(on: On, options: PluginOptions) {
         columnGap: 2,
         children: [
           Text({ bold: true, color: NEON.cyan, children: ['Description'] }),
-          Text({ dimColor: true, children: [author] }),
-          Text({ dimColor: true, children: [`${plural(v.talk.length, 'comment')} · ${plural(files.length, 'file')} · l: next`] }),
+          Text({ dimColor: true, children: [author ? `by ${author}` : ''] }),
         ],
       })
       const text = v.body ? Markdown({ text: v.body }) : Text({ color: NEON.muted, children: ['No description'] })
@@ -4138,7 +4130,7 @@ export function register(on: On, options: PluginOptions) {
         columnGap: 2,
         children: [
           Text({ bold: true, color: NEON.cyan, children: ['Conversation'] }),
-          Text({ dimColor: true, children: [`${plural(v.talk.length, 'comment')} and reviews · l: the first file`] }),
+          Text({ dimColor: true, children: ['comments and reviews, oldest first'] }),
         ],
       })
       return done(
@@ -4559,36 +4551,45 @@ export function register(on: On, options: PluginOptions) {
       return { text: `${L.release}: ${L.impact[a.impact]}${detail}`, color: impactColor(a.impact) }
     }
 
-    // "4 comments · d" when there is a conversation to read
+    // "4 comments" when there is a conversation to read (d)
     const talkNote = (p: PR): string => {
       const n = (p.comments?.totalCount ?? 0) + (p.reviewThreads?.totalCount ?? 0)
-      return n > 0 ? `${plural(n, 'comment')} (d)` : ''
+      return n > 0 ? plural(n, 'comment') : ''
     }
+    // Facts about the PR, one short phrase each, · between them; CI said once, in words
     const metaLine = (p: PR): string => {
       // Claude fixing it, or a fix waiting for your push, comes first
       const ready = fixReady.get(p.url)
       const fixing =
         fixJob?.pr.url === p.url
-          ? `⟳ Claude is fixing it in ${fixJob.dir} (${elapsed(new Date(fixJob.startedAt).toISOString(), now)})`
+          ? `⟳ Claude is fixing its CI in ${fixJob.dir} (${elapsed(new Date(fixJob.startedAt).toISOString(), now)})`
           : ready
-            ? `⇡ fix ready: ${plural(ready.commits?.length ?? 0, 'commit')} not pushed · c`
+            ? `⇡ fix ready: ${plural(ready.commits?.length ?? 0, 'commit')} not pushed · c: push it`
             : ''
-      return [fixing, stackNote(p), metaOf(p), talkNote(p)].filter(Boolean).join('  ')
+      return [fixing, stackNote(p), ...metaOf(p), talkNote(p)].filter(Boolean).join(' · ')
     }
-    const metaOf = (p: PR): string => {
+    const metaOf = (p: PR): string[] => {
+      const size = `+${p.additions} -${p.deletions}`
+      const author = `@${p.author?.login ?? '?'}`
       if (isApproved(p)) {
         const a = myApproval(p)
         const who = autoApproved.has(p.url) ? 'approved automatically by the AI review' : 'approved by you'
         const when = a ? `${who} ${elapsed(a.at, now)} ago${a.oid ? ` at ${a.oid.slice(0, 7)}` : ''}` : who
-        return `@${p.author?.login ?? '?'}  ${when}  ${approvedWhy(p, now)}  ${ciMark(p)}  +${p.additions} -${p.deletions}`
+        const why = approvedWhy(p, now)
+        return [author, when, why, /\bCI\b/.test(why) ? '' : ciWord(p), size]
       }
-      if (tab === 'review') {
-        const a = analysisOf(p)
-        const reason = a && 'reason' in a && a.reason ? `  ${L.why}: ${a.reason}` : ''
-        return `@${p.author?.login ?? '?'}  requested ${elapsed(requestedAt(p), now)} ago  ${ciMark(p)}  +${p.additions} -${p.deletions}${reason}`
-      }
-      const reasons = classify(p, now).reasons.join(', ')
-      return [reasons, ciMark(p), `+${p.additions} -${p.deletions}`, age(p.updatedAt, now)].filter(Boolean).join('  ')
+      if (tab === 'review') return [author, `requested ${elapsed(requestedAt(p), now)} ago`, ciWord(p), size]
+      // Where it stands first: what needs you, ready, or what it waits on
+      const { group, reasons } = classify(p, now)
+      const state =
+        group === 'action'
+          ? `needs you: ${reasons.join(', ')}`
+          : group === 'ready'
+            ? 'ready to merge · m: merge'
+            : group === 'stale'
+              ? `no update for ${cfg.stale_days}+ days`
+              : notReadyWhy(p, now)
+      return [state, /\bCI\b/.test(state) ? '' : ciWord(p), size, `updated ${short(p.updatedAt, now)} ago`]
     }
 
     // The AI review's rows under a review request: its state, then what blocked it
@@ -4617,7 +4618,7 @@ export function register(on: On, options: PluginOptions) {
               ? {
                   text: mine.some((m) => m.url === p.url)
                     ? `AI review ✓ passed: no blocking issues${hint}`
-                    : `AI review ✓ passed, not approved: no blocking issues${hint}`,
+                    : `AI review ✓ passed at ${r.pr.headRefOid.slice(0, 7)}: no blocking issues · a: approve${hint}`,
                   color: NEON.green,
                 }
               : { text: 'AI review ✓ passed: waiting for your approval', color: NEON.green }
@@ -4731,6 +4732,22 @@ export function register(on: On, options: PluginOptions) {
           }),
           wrappedLines(a.text, bodyColumns),
         )
+        // Why that risk, its label in the risk's color and mark
+        if (an && 'reason' in an && an.reason) {
+          const head = `${{ high: '▲', medium: '◆', low: '○' }[an.risk]} ${L.why}`
+          add(
+            Box({
+              paddingLeft: INDENT,
+              children: [
+                Text({
+                  wrap: 'wrap',
+                  children: [Text({ color: riskColor(an.risk), bold: true, children: [head] }), `: ${an.reason}`],
+                }),
+              ],
+            }),
+            wrappedLines(`${head}: ${an.reason}`, bodyColumns),
+          )
+        }
         const impact = impactLine(p)
         if (impact) {
           const cut = impact.text.indexOf(' — ')
@@ -5061,7 +5078,11 @@ export function register(on: On, options: PluginOptions) {
           Text({
             color: NEON.cyan,
             children: [
-              loading ? `  ${SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]} fetching your PRs…` : '  not fetched yet · r: refresh',
+              loading
+                ? `  ${SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]} fetching your PRs…`
+                : error
+                  ? '  Nothing to show until GitHub answers · r: retry'
+                  : '  not fetched yet · r: refresh',
             ],
           }),
         )
@@ -5086,10 +5107,12 @@ export function register(on: On, options: PluginOptions) {
             dimColor: true,
             children: [
               filterText
-                ? `  No PRs match "${filterText}" · f, then an empty ⏎ clears it`
-                : tab === 'review'
-                  ? '  No review requests from people'
-                  : '  No open PRs',
+                ? `  No PRs match "${filterText}" · f: change or clear the filter`
+                : error
+                  ? '  Nothing to show until GitHub answers · r: retry'
+                  : tab === 'review'
+                    ? '  No review requests from people'
+                    : '  You have no open PRs',
             ],
           }),
         )

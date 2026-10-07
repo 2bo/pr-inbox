@@ -48,7 +48,7 @@ One line per PR. From left to right:
 | CI | `✓` passed · `✗` failed · `◌` running · `·` none. Judged from the latest run of each check, so a job that failed and then passed on a re-run counts as passed |
 | AI | `✓` passed or approved · `✗` blocked · `?` passed, waits for you · `·` no AI review |
 
-Under the list, the selected PR's details: the summary, the release impact, the reason, the AI review and, for your PRs, the failed checks. Nothing is folded: bots, the PRs you approved and old PRs each have a heading; only snoozed PRs wait behind `z`.
+Under the list, the selected PR's details: the summary, why that risk, the release impact, one line of facts (for your PRs it starts with where the PR stands: what needs you, ready to merge, or what it waits on), the AI review and, for your PRs, the failed checks. Each fact is said once, and hints name the key that acts on them (`a: approve`, `m: merge`). Nothing is folded: bots, the PRs you approved and old PRs each have a heading; only snoozed PRs wait behind `z`.
 
 ## Keys
 
