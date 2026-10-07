@@ -52,19 +52,19 @@ Under the list, the selected PR's details: the summary, why that risk, the relea
 
 ## Keys
 
-**Anywhere**
+**Anywhere** (the bottom line shows the keys for the selected PR, the most used first)
 
 | Key | Action |
 | :- | :- |
 | `j` / `k` | Next / previous PR |
-| `1` / `2`, `h` / `l` | To review / My PRs, or the tab to the left / right |
 | `d` | Read the PR (below) |
 | `e` | Ask Claude to explain the PR, or for your own, to diagnose what blocks it. Claude reads the description, comments, reviews and linked issues, not only the diff, in a read-only turn |
 | `p` | Your own question, instruction or `/skill` about the PR, in the main prompt: `p` puts the PR's link in the prompt, then `Esc` and type after it (for a skill, `ctrl+a` and `/name `). What you send is what you see. Read-only like `e`, as the hint under the prompt says; press `p` twice to let Claude change files, three times to take the link out |
-| `o` | Open in the browser |
+| `o` | Open on GitHub, in the browser |
 | `x` / `z` | Snooze the PR until it is updated / show snoozed PRs |
 | `f` | Filter by repository, number, title or @author (Enter keeps it; an empty one clears it) |
 | `r` | Refresh: fetch again |
+| `1` / `2`, `h` / `l` | To review / My PRs, or the tab to the left / right |
 | `u` | Help: every key and mark |
 | `Esc` / `ctrl+x tab` | Back to the prompt (the pane stays open) / back to the pane |
 | `q` | Close the pane (`/pr-inbox` opens it again) |
@@ -75,7 +75,7 @@ Under the list, the selected PR's details: the summary, why that risk, the relea
 | :- | :- |
 | `a` | Approve, after you choose **Approve** in the dialog (Cancel is selected first). On a `↻ RE` PR, approves its new commit |
 | `v` | AI review ([below](#ai-review-and-approve)). `v` again cancels it. On your own PR (My PRs) too: a review for you to fix before others read it, which never approves |
-| `i` | Every finding of the AI review, with links to the lines; `n` pages them when they do not fit |
+| `i` | Findings: every finding of the AI review, with links to the lines; `n` pages them when they do not fit. On your PR too, once it has an AI review |
 | `s` | Send the AI review's findings to the author: you pick them (or the ones that block), then **Request changes** or **Comment** (Cancel first); each goes on its line as one GitHub review, pinned to the reviewed commit |
 | `w` | AI review every bot PR not reviewed yet, then approve those that passed in one dialog (on the bots heading) |
 
@@ -88,7 +88,7 @@ Under the list, the selected PR's details: the summary, why that risk, the relea
 
 **In the reader (`d`)**
 
-Three tabs, `1` description, `2` conversation (comments and reviews, oldest first, each with its verdict), `3` files (the diff one file at a time); `h` / `l` walk through them page by page. Comments on lines show above the file they are on, drawn like Claude Code's own diffs. On a `↻ RE` PR, it opens at what changed since your approval.
+Three tabs, `1` description, `2` conversation (comments and reviews, oldest first, each with its verdict), `3` files (the diff one file at a time); `h` / `l` walk through them page by page. Comments on lines show above the file they are on (`»` in the file tree), and the diff is drawn like Claude Code's own. On a `↻ RE` PR, it opens at what changed since your approval.
 
 | Key | Action |
 | :- | :- |
@@ -97,7 +97,7 @@ Three tabs, `1` description, `2` conversation (comments and reviews, oldest firs
 | `f` | File tree: the description, the conversation and the changed files (with each file's +/-, AI findings and comments): `j` / `k` move, `l` or `1`-`9` open |
 | `t` | On a `↻ RE` PR: the whole PR, or only what changed since your approval |
 | `g` | Show a folded lockfile or generated file |
-| `a` / `v` / `e` / `p` | Approve, review, explain or ask without leaving |
+| `a` / `v` / `e` / `p` / `o` | Approve, AI review, explain, ask or open on GitHub without leaving |
 | `n` | The next PR in the list |
 | `q` | Back to the list |
 

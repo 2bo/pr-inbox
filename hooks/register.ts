@@ -4977,36 +4977,66 @@ export function register(on: On, options: PluginOptions) {
     }
 
     if (showHelp) {
-      const help: [string, string][] = [
-        ['1 / 2  h / l', 'To review / My PRs, or the tab to the left / right'],
-        ['j / k', 'next / previous PR'],
-        ['e', 'ask Claude to explain the PR (read-only), or diagnose your own'],
+      // Every key, grouped by where it acts and the most used first in each group; then every mark
+      const help: [string, [string, string][]][] = [
         [
-          'p',
-          "the PR's link goes in the prompt: Esc, then type your question, instruction or /skill around it. Read-only; p twice lets it change files, three times takes the link out",
+          'the selected PR',
+          [
+            ['d', 'read it: description, conversation and files, in tabs 1 / 2 / 3'],
+            ['a', 'approve, after a dialog naming the commit · on ↻ RE: approve again'],
+            ['v', 'AI review; on your own PR it never approves · v again cancels'],
+            ['e', 'Claude explains it (read-only), or diagnoses what blocks your own'],
+            [
+              'p',
+              'its link goes in the prompt: Esc, then type around it (a /skill too) · read-only; p again allows edits, then takes the link out',
+            ],
+            ['o', 'open on GitHub'],
+            ['i', "the AI review's findings, linked to their lines"],
+            ['s', 'send findings to GitHub as review comments, after two dialogs'],
+            ['x', 'snooze it until it is updated'],
+          ],
         ],
-        ['a', 'approve, after a confirmation'],
-        ['v', 'AI review, then approve if it passes (v again cancels a running review)'],
-        ['i', 'info: every finding of the AI review, with links to the lines'],
-        ['n', 'next page of the details, when they do not fit (at the end, back to the top)'],
-        ['x', 'snooze the PR until it is updated (z shows snoozed PRs)'],
-        ['w', 'AI review every bot PR in turn (w again stops)'],
-        ['m', 'merge one of your PRs that is ready, after picking a method'],
-        ['c', 'CI failed on your PR: Claude fixes it in a worktree (you confirm the push), or re-run the failed jobs'],
-        ['f', 'filter by repository, number, title or @author (Enter keeps it; empty clears)'],
-        ['d', 'read the PR: description, then the diff file by file (h / l pages, f list of pages, q back)'],
-        ['s', "send the AI review's findings to GitHub as comments on their lines (you pick them, then Request changes or Comment)"],
-        ['o', 'open in the browser'],
-        ['z', 'show or hide snoozed PRs'],
-        ['a (again)', 'on a PR you approved that changed since (↻ RE): approve its current commit; d shows only the change'],
-        ['r', 'fetch again'],
-        ['Esc', 'back to the prompt; the pane stays open (ctrl+x tab comes back)'],
-        ['Ctrl+X Tab', 'move between the prompt and this pane (keys reach the pane only while it has the focus)'],
-        ['q', 'close the pane (/pr-inbox opens it again)'],
-        ['u', 'close this help'],
+        [
+          'your PRs (2)',
+          [
+            ['m', 'merge when ready, after picking a method (a stack: gh stack merge)'],
+            ['c', 'CI failed: Claude fixes it in a worktree (asks before push), or re-run'],
+          ],
+        ],
+        [
+          'the list',
+          [
+            ['j / k', 'next / previous PR'],
+            ['1 / 2', 'To review / My PRs · h / l: the tab to the left / right'],
+            ['w', 'AI review every bot PR not reviewed yet, then approve those that passed in one dialog · w again stops'],
+            ['z', 'show or hide snoozed PRs'],
+            ['f', 'filter by repository, number, title or @author · empty clears it'],
+            ['n', 'next page of the details, when they do not fit'],
+            ['r', 'refresh: fetch again'],
+          ],
+        ],
+        [
+          'the reader (d)',
+          [
+            ['1 / 2 / 3', 'description · conversation · files'],
+            ['h / l', 'previous / next page · j / k scroll'],
+            ['f', 'file tree: j / k move, l or 1-9 open · » comments on lines'],
+            ['t / g', 'since your approval / the whole PR · show a folded generated file'],
+            ['n / q', 'read the next PR / back to the list'],
+          ],
+        ],
+        [
+          'the pane',
+          [
+            ['Esc', 'back to the prompt; the pane stays open'],
+            ['ctrl+x tab', 'back to the pane: keys reach it only while it has the focus'],
+            ['q', 'close it (/pr-inbox opens it again)'],
+            ['u', 'close this help'],
+          ],
+        ],
       ]
       // Keys in cyan, what they do beside them, wrapped lines hanging under the text rather than under the key
-      const KEY_WIDTH = 12
+      const KEY_WIDTH = 11
       const textColumns = Math.max(10, columns - 2 - KEY_WIDTH)
       const entry = (k: string, what: string, color: string = NEON.cyan) =>
         Box({
@@ -5014,6 +5044,15 @@ export function register(on: On, options: PluginOptions) {
           children: [
             Text({ color, bold: true, children: [`  ${k.padEnd(KEY_WIDTH)}`] }),
             Box({ width: textColumns, children: [Text({ wrap: 'wrap', children: [what] })] }),
+          ],
+        })
+      const heading = (name: string) =>
+        Box({
+          flexDirection: 'row',
+          children: [
+            Text({ color: NEON.rule, children: ['── '] }),
+            Text({ color: NEON.violet, bold: true, children: [`${name} `] }),
+            Text({ color: NEON.rule, children: ['─'.repeat(Math.max(0, columns - textWidth(name) - 4))] }),
           ],
         })
       // Every mark, column by column
@@ -5032,14 +5071,14 @@ export function register(on: On, options: PluginOptions) {
         ['AI', '✓ passed or approved · ✗ blocked · ? passed, waits for you · ⠋ running · · none', NEON.cyan],
       ]
       const helpRows = [
-        ...help.map(([k, what]) => entry(k, what)),
-        Text({ color: NEON.muted, children: ['  symbols'] }),
+        ...help.flatMap(([name, keys]) => [heading(name), ...keys.map(([k, what]) => entry(k, what))]),
+        heading('marks'),
         ...legend.map(([k, what, color]) => entry(k, what, color)),
       ]
       lastHeight =
         topLines +
         1 +
-        help.reduce((n, [, what]) => n + wrappedLines(what, textColumns), 0) +
+        help.reduce((n, [, keys]) => n + 1 + keys.reduce((m, [, what]) => m + wrappedLines(what, textColumns), 0), 0) +
         1 +
         legend.reduce((n, [, what]) => n + wrappedLines(what, textColumns), 0)
       const helpTree = [...top, rule(), ...helpRows]

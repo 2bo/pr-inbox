@@ -1607,7 +1607,11 @@ test('h shows the keys', async ($, on) => {
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'help' })
-  expect(await ui.find({ type: 'Text', text: /snooze the PR until it is updated/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /snooze it until it is updated/ })).toBeDefined()
+  // Grouped by where the keys act, the most used first; the reader's keys are there too
+  expect(await ui.find({ type: 'Text', text: /^the selected PR $/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^the reader \(d\) $/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {2}d {10}$/ })).toBeDefined()
   expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeUndefined()
   await ui.press({ key: 'help' })
   expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
@@ -1885,8 +1889,8 @@ test('the help says how to move the focus to the pane', async ($, on) => {
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'help' })
-  expect(await ui.find({ type: 'Text', text: /Ctrl\+X Tab/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^move between the prompt and this pane/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /ctrl\+x tab/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^back to the pane: keys reach it only while it has the focus/ })).toBeDefined()
   // The symbols are explained too
   expect(await ui.find({ type: 'Text', text: /LOW from the analysis/ })).toBeDefined()
   await ui.unmount()
