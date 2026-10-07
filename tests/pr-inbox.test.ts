@@ -123,6 +123,8 @@ type StubOptions = {
   head?: string
   // The model's answer (default: analysisFor)
   model?: (prompt: string) => string
+  // What the review's summary says
+  summary?: string
   // Close the approve dialog without answering
   dismiss?: boolean
   // What gh pr view --json title,body,files and gh pr diff return
@@ -163,6 +165,8 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
   const submitted: string[] = []
   // What each submitted prompt carried beside it, unseen
   const contexts: string[][] = []
+  // The AI review summaries asked for
+  const summaries: { system: string; prompt: string }[] = []
   const statuses: (string | undefined)[] = []
   const toasts: string[] = []
   const questions: string[] = []
@@ -213,6 +217,10 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
   })
   on('model.complete', async (_, e) => {
     const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    if ((e.system ?? '').startsWith('You sum up an AI code review')) {
+      summaries.push({ system: e.system ?? '', prompt: e.prompt })
+      return { value: { isAnswered: true, text: opts.summary ?? 'Fine to approve: every perspective passed.', usage } }
+    }
     if ((e.system ?? '').startsWith('You screen content')) {
       screened.push(e.prompt)
       return { value: { isAnswered: true, text: JSON.stringify({ injection_suspected: opts.suspicious?.(e.prompt) ?? false }), usage } }
@@ -292,6 +300,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
   }
   return {
     setAnswer,
+    summaries,
     promptBox,
     contexts,
     calls,
@@ -2956,5 +2965,43 @@ test('the reader shows its parts as tabs, the one shown lit, each a digit away',
   // 3 comes back to the file last shown
   await ui.press({ key: 'diff-tab-3' })
   expect(await label(3)).toBe('◉ files 2/2')
+  await ui.unmount()
+})
+
+// ---- AI review: a summary, and your own PRs ----
+
+test('an AI review ends with a summary in your language, under its headline and in the transcript', async ($, on) => {
+  const s = stubs(on, {
+    graphql: only(member()),
+    review: bugIn('Correctness & compatibility'),
+    verify: () => JSON.stringify({ results: [{ id: 1, confirmed: true, reason: 'yes' }], injection: false }),
+    summary: 'ブロック: app/login.rb:12 で user が nil のときに落ちる。ほかの観点は問題なし。',
+    locale: { LANG: 'ja_JP.UTF-8' },
+  })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  expect(s.summaries.length).toBe(1)
+  expect(s.summaries[0]?.system).toContain('Write it in Japanese.')
+  // The reviewers' answers go in as data
+  expect(s.summaries[0]?.prompt).toContain('<review_data>')
+  expect(s.summaries[0]?.prompt).toContain('nil check missing')
+  expect(await ui.find({ type: 'Text', text: /^→ ブロック: app\/login\.rb:12 で user が nil/ })).toBeDefined()
+  expect(s.logs.some((l) => l.includes('ブロック: app/login.rb:12'))).toBe(true)
+  await ui.unmount()
+})
+
+test('v reviews your own PR too, even with changes requested, and never approves it', async ($, on) => {
+  const s = stubs(on, { answer: 'Approve' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await isSelected(ui, 21)).toBe(true)
+  await ui.press({ key: 'act-ai-review' })
+  await settleReview(s)
+  expect(reviewsOf(s).length).toBe(5)
+  expect(approvedAt(s)).toEqual([])
+  expect(s.questions).toEqual([])
+  expect(s.toasts.some((t) => t.includes('AI review of your #21 passed'))).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /^AI review ✓ passed: no blocking issues/ })).toBeDefined()
   await ui.unmount()
 })

@@ -74,7 +74,7 @@ Under the list, the selected PR's details: the summary, the release impact, the 
 | Key | Action |
 | :- | :- |
 | `a` | Approve, after you choose **Approve** in the dialog (Cancel is selected first). On a `↻ RE` PR, approves its new commit |
-| `v` | AI review ([below](#ai-review-and-approve)). `v` again cancels it |
+| `v` | AI review ([below](#ai-review-and-approve)). `v` again cancels it. On your own PR (My PRs) too: a review for you to fix before others read it, which never approves |
 | `i` | Every finding of the AI review, with links to the lines; `n` pages them when they do not fit |
 | `w` | AI review every bot PR not reviewed yet, then approve those that passed in one dialog (on the bots heading) |
 
@@ -127,7 +127,7 @@ Three tabs, `1` description, `2` conversation (comments and reviews, oldest firs
 4. **Verification**: important findings (confidence 80+) go to a verifier that tries to refute them against the code
 5. **Decision, in code**: it passes only when every gate holds, nothing looked like an injection, every reviewer answered, no important finding survived and the PR got no new commits. Nits do not block
 
-Under the PR, the outcome comes first, then each perspective's conclusion in a sentence or two: ✓ no problems, ✗ blocks the approval, △ found something that does not block (low confidence, or refuted by the verifier), ? could not tell. `i` shows every finding with its evidence and a link to the line. The conclusions and findings are also written to the transcript.
+Under the PR, the outcome comes first, then the gist in one sentence in your `language` (`→ Blocked: …`, written by the analysis model from the reviewers' answers), then each perspective's conclusion in a sentence or two: ✓ no problems, ✗ blocks the approval, △ found something that does not block (low confidence, or refuted by the verifier), ? could not tell. `i` shows every finding with its evidence and a link to the line. The conclusions and findings are also written to the transcript.
 
 Only problems within each reviewer's perspective count, and the same problem found from two perspectives is shown once. The result is kept for the reviewed commit, so it is still there after a restart; when new commits arrive, the row says the review is of an older commit.
 
