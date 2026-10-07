@@ -2587,7 +2587,8 @@ ${SAMPLE_DIFF}`
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-diff' })
-  await ui.press({ key: 'diff-next' })
+  // Files come in the tree's order: app/login.rb, then a.txt, then pnpm-lock.yaml
+  await ui.press({ key: 'diff-tab-3' })
   await ui.press({ key: 'diff-next' })
   // 30 lines in blocks of 12: three blocks, keyed for scrolling
   expect(await ui.find({ key: 'block-2' })).toBeDefined()
@@ -2596,12 +2597,13 @@ ${SAMPLE_DIFF}`
   // It scrolls (a surface does that); nothing to say about it
   expect(s.toasts.length).toBe(before)
   // j on a page without lines is caught, not sent to the prompt
-  await ui.press({ key: 'diff-prev' })
+  await ui.press({ key: 'diff-tab-2' })
   await ui.press({ key: 'diff-down' })
   expect(s.toasts.at(-1)).toContain('l: the next page')
-  // f: j/k move the cursor, l opens it; a digit opens a file straight away
+  // f: the files as a tree; j/k move the cursor, l opens it; a digit opens a file straight away
   await ui.press({ key: 'diff-list' })
-  await ui.press({ key: 'diff-cursor-down' })
+  expect(await ui.find({ type: 'Text', text: /^ +app\/$/ })).toBeDefined()
+  expect(String((await ui.find({ key: 'diff-file-1' }))?.props.label)).toContain('└ login.rb')
   await ui.press({ key: 'diff-cursor-down' })
   await ui.press({ key: 'diff-pick' })
   expect((await codes(ui))[0]?.path).toBe('app/login.rb')

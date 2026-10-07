@@ -93,7 +93,7 @@ Three tabs, `1` description, `2` conversation (comments and reviews, oldest firs
 | :- | :- |
 | `h` / `l` | Previous / next page |
 | `j` / `k` | Scroll by a block of lines (↑↓ and PgUp/PgDn scroll too) |
-| `f` | The list of pages: `j` / `k` move, `l` or `1`-`9` open |
+| `f` | The description, the conversation and the changed files as a tree (with each file's +/-, AI findings and comments): `j` / `k` move, `l` or `1`-`9` open |
 | `t` | On a `↻ RE` PR: the whole PR, or only what changed since your approval |
 | `g` | Show a folded lockfile or generated file |
 | `a` / `v` / `e` / `p` | Approve, review, explain or ask without leaving |

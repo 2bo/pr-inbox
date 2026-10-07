@@ -2592,7 +2592,7 @@ async function openDiff($: EngineInterface, pr: PR, mode: 'auto' | 'since' | 'al
     // The approved commit may be gone (a force push): show the whole PR instead
     if (since) return openDiff($, pr, 'all')
     view.error = clean(r.stderr) || `gh exited with code ${r.exitCode}`
-  } else view.files = parseDiff(r.stdout)
+  } else view.files = treeOrder(parseDiff(r.stdout))
   if (since) {
     view.since = since
     const n = Number(commits?.stdout.trim())
@@ -2609,6 +2609,61 @@ async function openDiff($: EngineInterface, pr: PR, mode: 'auto' | 'since' | 'al
   const firstFinding = view.files.findIndex((f) => findingsIn(pr, f.path).length > 0)
   view.at = since && view.files.length > 0 ? FIRST_FILE : firstFinding >= 0 ? firstFinding + FIRST_FILE : 0
   $.ui.invalidate('ui.render')
+}
+
+// The changed files as a tree: directories first, then files, each by name; a directory with a single directory
+// in it and nothing else is one row (`views/sessions/`), as GitHub shows them
+type TreeRow = { kind: 'dir' | 'file'; prefix: string; name: string; file?: number }
+type TreeNode = { dirs: Map<string, TreeNode>; files: { name: string; index: number }[] }
+
+function fileTree(paths: string[]): TreeRow[] {
+  const root: TreeNode = { dirs: new Map(), files: [] }
+  paths.forEach((path, index) => {
+    const parts = path.split('/')
+    const name = parts.pop() ?? path
+    let node = root
+    for (const part of parts) {
+      let next = node.dirs.get(part)
+      if (!next) {
+        next = { dirs: new Map(), files: [] }
+        node.dirs.set(part, next)
+      }
+      node = next
+    }
+    node.files.push({ name, index })
+  })
+  const rows: TreeRow[] = []
+  const walk = (node: TreeNode, prefix: string, top: boolean) => {
+    const dirs = [...node.dirs.entries()].sort(([a], [b]) => a.localeCompare(b))
+    const files = [...node.files].sort((a, b) => a.name.localeCompare(b.name))
+    const all = [...dirs.map(([name, child]) => ({ name, child })), ...files.map((f) => ({ name: f.name, index: f.index }))]
+    all.forEach((item, i) => {
+      const last = i === all.length - 1
+      const lead = top ? '' : `${prefix}${last ? '└ ' : '├ '}`
+      const inner = top ? '' : `${prefix}${last ? '  ' : '│ '}`
+      if ('child' in item) {
+        let name = item.name
+        let child = item.child
+        // One directory in it and nothing else: one row
+        while (child.files.length === 0 && child.dirs.size === 1) {
+          const [only, deeper] = [...child.dirs.entries()][0] as [string, TreeNode]
+          name = `${name}/${only}`
+          child = deeper
+        }
+        rows.push({ kind: 'dir', prefix: lead, name: `${name}/` })
+        walk(child, inner, false)
+      } else rows.push({ kind: 'file', prefix: lead, name: item.name, file: item.index })
+    })
+  }
+  walk(root, '', true)
+  return rows
+}
+
+// The files in the tree's order, so h/l, "file 2/7" and the list agree
+function treeOrder(files: DiffFile[]): DiffFile[] {
+  return fileTree(files.map((f) => f.path))
+    .filter((r) => r.file !== undefined)
+    .map((r) => files[r.file as number] as DiffFile)
 }
 
 // The conversation, from gh: comments and reviews in one call, comments on lines in another. Written by others:
@@ -3339,7 +3394,7 @@ async function openFixDiff($: EngineInterface, job: FixJob): Promise<void> {
     pr: job.pr,
     body: '',
     talk: [],
-    files: r.exitCode === 0 ? parseDiff(r.stdout) : [],
+    files: r.exitCode === 0 ? treeOrder(parseDiff(r.stdout)) : [],
     at: FIRST_FILE,
     block: 0,
     cursor: 0,
@@ -3791,37 +3846,56 @@ export function register(on: On, options: PluginOptions) {
       })
     const notHere = (k: string) => `${k}: no such key in the reader · h/l pages · j/k scroll · f files · q back`
 
-    // f: the description and every file. j/k move, l opens, 1-9 open a file straight away
+    // f: the description, the conversation, and the files as a tree. j/k move between them, l opens, 1-9 open a file
     if (v.list) {
-      const rows = [
-        Button({ key: 'diff-file-0', plain: true, label: `${v.cursor === 0 ? '▸' : ' '}    Description`, onPress: () => go(0) }),
+      const lineTalk = (path: string) => v.talk.filter((t) => t.kind === 'line' && t.path === path).length
+      const pick = (page: number, label: string, extra: Record<string, unknown> = {}) =>
         Button({
-          key: 'diff-file-talk',
+          key: page === 0 ? 'diff-file-0' : page === 1 ? 'diff-file-talk' : `diff-file-${page - 1}`,
           plain: true,
-          label: `${v.cursor === 1 ? '▸' : ' '}    Conversation  ${plural(v.talk.length, 'comment')}`,
-          onPress: () => go(1),
-        }),
-        ...files.map((f, i) => {
-          const m = marks(f)
-          const n = i + 1
-          const page = i + FIRST_FILE
-          const number = n <= 9 ? `${n}` : ' '
-          return Button({
-            key: `diff-file-${n}`,
-            plain: true,
-            ...(n <= 9 ? { hotkey: number } : {}),
-            dimColor: isGenerated(f.path),
-            label: `${v.cursor === page ? '▸' : ' '}${n <= 9 ? '' : '   '} ${fit(f.path, Math.max(10, columns - 26))}  ${counts(f)}${m.text ? `  ${m.text}` : ''}`,
-            onPress: () => go(page),
-          })
-        }),
+          label,
+          onPress: () => go(page),
+          ...extra,
+        })
+      const rows: El[] = [
+        pick(0, `${v.cursor === 0 ? '▸' : ' '}    Description`),
+        pick(1, `${v.cursor === 1 ? '▸' : ' '}    Conversation  ${plural(v.talk.length, 'comment')}`),
       ]
+      for (const row of fileTree(files.map((f) => f.path))) {
+        if (row.kind === 'dir') {
+          rows.push(Text({ color: NEON.muted, children: [`      ${row.prefix}${row.name}`] }))
+          continue
+        }
+        const index = row.file as number
+        const f = files[index] as DiffFile
+        const page = index + FIRST_FILE
+        const n = index + 1
+        const m = marks(f)
+        const said = lineTalk(f.path)
+        const tail = [counts(f), m.text, said ? `» ${said}` : '', isGenerated(f.path) ? 'folded' : ''].filter(Boolean).join('  ')
+        const name = `${row.prefix}${row.name}`
+        rows.push(
+          pick(
+            page,
+            `${v.cursor === page ? '▸' : ' '}${n <= 9 ? '' : '   '} ${fit(name, Math.max(10, columns - textWidth(tail) - 10))}  ${tail}`,
+            {
+              ...(n <= 9 ? { hotkey: String(n) } : {}),
+              dimColor: isGenerated(f.path),
+            },
+          ),
+        )
+      }
       const tree = [
         ...head,
         keys,
         rule,
         ...sinceNote,
-        Text({ color: NEON.muted, children: [`${plural(files.length, 'file')} changed`] }),
+        Text({
+          color: NEON.muted,
+          children: [
+            `${plural(files.length, 'file')} changed · +${files.reduce((n, f) => n + f.additions, 0)} -${files.reduce((n, f) => n + f.deletions, 0)}`,
+          ],
+        }),
         ...rows,
       ]
       return done(tree, (k) => `${k}: no such key in the list · j/k move · l or 1-9 open · f closes`)
