@@ -354,6 +354,9 @@ const flag = (name) => {
 
 if (args[0] === 'api' && args[1] === 'graphql') {
   out({ data: { viewer: { login: 'you' }, review: { nodes: REVIEW }, mine: { nodes: MINE }, approved: { nodes: APPROVED } } })
+} else if (args[0] === 'api' && args.includes('--input') && args.some((a) => /\/pulls\/\d+\/reviews$/.test(a))) {
+  // A review from the AI findings (s): goes nowhere
+  out({ state: 'COMMENTED' })
 } else if (args[0] === 'api' && args.includes('event=APPROVE')) {
   out({ state: 'APPROVED' })
 } else if (args[0] === 'api') {

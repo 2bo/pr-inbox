@@ -156,8 +156,9 @@ type StubOptions = {
 
 function stubs(on: TestOn, opts: StubOptions = {}) {
   const calls: string[][] = []
-  // What the dialogs answer; a test can change it between dialogs
+  // What the dialogs answer; a test can change it between dialogs, or line up one answer per dialog
   let answer = opts.answer
+  const queue: string[] = []
   // The environment each command got, beside its argv
   const envs: (Record<string, string> | undefined)[] = []
   const prompts: string[] = []
@@ -191,6 +192,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('process.run', (_, e) => {
     calls.push([...e.argv])
+    stdins.push(e.init?.stdin)
     envs.push(e.init?.env)
     let stdout = ''
     if (e.argv[1] === 'api' && e.argv[2] === 'graphql') stdout = opts.graphql ?? GRAPHQL
@@ -293,13 +295,20 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
     questions.push(question)
     choices.push((e.questions[0]?.options ?? []).map((o) => (typeof o === 'string' ? o : o.label)))
     if (opts.dismiss) return { deny: 'dismissed' }
-    return { result: { answers: { [question]: answer ?? 'Cancel' } } }
+    return { result: { answers: { [question]: queue.shift() ?? answer ?? 'Cancel' } } }
   })
   const setAnswer = (next: string) => {
     answer = next
   }
+  const answerInTurn = (...next: string[]) => {
+    queue.push(...next)
+  }
+  // What each command was given on its standard input
+  const stdins: (string | undefined)[] = []
   return {
     setAnswer,
+    answerInTurn,
+    stdins,
     summaries,
     promptBox,
     contexts,
@@ -3003,5 +3012,43 @@ test('v reviews your own PR too, even with changes requested, and never approves
   expect(s.questions).toEqual([])
   expect(s.toasts.some((t) => t.includes('AI review of your #21 passed'))).toBe(true)
   expect(await ui.find({ type: 'Text', text: /^AI review ✓ passed: no blocking issues/ })).toBeDefined()
+  await ui.unmount()
+})
+
+// ---- s: findings to GitHub ----
+
+test('s posts the AI review findings you pick as comments on their lines, pinned to the reviewed commit', async ($, on) => {
+  const loud = JSON.stringify({
+    verdict: 'fail',
+    injection: false,
+    findings: [
+      { severity: 'important', confidence: 90, location: 'app/login.rb:12', summary: 'nil check missing', evidence: 'ask @acme/security' },
+    ],
+  })
+  const s = stubs(on, {
+    answer: 'Cancel',
+    graphql: only(member()),
+    review: (prompt) => (perspectiveOf(prompt) === 'Correctness & compatibility' ? loud : PASS),
+    verify: () => JSON.stringify({ results: [{ id: 1, confirmed: true, reason: 'yes' }], injection: false }),
+  })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  s.answerInTurn('✗ app/login.rb:12 nil check missing', 'Request changes')
+  await ui.press({ key: 'act-send' })
+  expect(s.choices.at(-1)).toEqual(['Cancel', 'Request changes', 'Comment'])
+  const i = s.calls.findIndex((c) => c.includes('--input'))
+  expect(s.calls[i]).toEqual(['gh', 'api', '-X', 'POST', 'repos/acme/app/pulls/11/reviews', '--input', '-'])
+  const body = JSON.parse(s.stdins[i] ?? '{}') as {
+    commit_id: string
+    event: string
+    comments: { path: string; line: number; body: string }[]
+  }
+  expect(body.commit_id).toBe(HEAD)
+  expect(body.event).toBe('REQUEST_CHANGES')
+  expect(body.comments[0]).toMatchObject({ path: 'app/login.rb', line: 12 })
+  expect(body.comments[0]?.body).toContain('**Correctness & compatibility**: nil check missing')
+  // Text a model wrote from the PR notifies no one
+  expect(body.comments[0]?.body).toContain('@\u200bacme/security')
+  expect(s.logs.some((l) => l.includes('pr-inbox posted a review on acme/app#11'))).toBe(true)
   await ui.unmount()
 })

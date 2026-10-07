@@ -3085,6 +3085,106 @@ async function reviewAllBots($: EngineInterface): Promise<void> {
   $.ui.invalidate('ui.render')
 }
 
+// ---- s: the AI review's findings to GitHub, as comments on their lines ----
+
+// What a finding says on GitHub: its perspective, what is wrong, and why. Written by a model from someone else's PR
+// and posted under your name, so mentions are defused (no one gets notified by text the PR author steered)
+function findingComment(f: Finding): string {
+  const text = `**${f.perspective}**: ${f.summary}${f.evidence ? `\n\n${f.evidence}` : ''}\n\n<sub>From an AI review (pr-inbox)</sub>`
+  return text.replace(/@(?=[\w-])/g, '@\u200b')
+}
+
+// "app/login.rb:12" or "app/login.rb:12-14" → where on the new side it goes
+function findingPlace(f: Finding): { path: string; line: number } | undefined {
+  const m = f.location.match(/^([\w@+./-]+?):(\d+)/)
+  return m?.[1] && m[2] ? { path: m[1], line: Number(m[2]) } : undefined
+}
+
+async function postFindings($: EngineInterface, pr: PR): Promise<void> {
+  const run = reviewOfHead(pr)
+  const all = (run?.findings ?? []).filter((f) => f.severity !== 'pre-existing' && f.confirmed !== false)
+  if (!run || all.length === 0) {
+    $.ui.toast(`No AI review findings to send for #${pr.number}`, { timeoutMs: 6000 })
+    return
+  }
+  const ask = async (question: string, options: string[], header: string, multiSelect = false) => {
+    let answer = ''
+    try {
+      answer = await $.ui.ask(question, { options, header, ...(multiSelect ? { multiSelect: true } : {}) })
+    } catch {
+      // Dismissed
+    }
+    await focusPane($)
+    return answer
+  }
+  const blocking = all.filter((f) => isCandidate(f))
+  const label = (f: Finding) => fit(`${isCandidate(f) ? '✗' : '·'} ${f.location} ${f.summary}`.replace(/,/g, ';'), 70)
+  // Which ones: each by name when they fit the dialog, else the ones that block or all
+  let chosen: Finding[] = []
+  if (all.length <= 4) {
+    const answer = await ask(`Which AI review findings go to ${askLabel(pr)} as comments on their lines?`, all.map(label), 'Send', true)
+    const picked = answer.split(',').map((x) => x.trim())
+    chosen = all.filter((f) => picked.includes(label(f)))
+  } else {
+    const answer = await ask(
+      `${all.length} AI review findings on ${askLabel(pr)}. Which go to GitHub as comments on their lines?`,
+      ['Cancel', ...(blocking.length ? [`The ${blocking.length} that block`] : []), `All ${all.length}`],
+      'Send',
+    )
+    chosen = answer.startsWith('All') ? all : answer.startsWith('The ') ? blocking : []
+  }
+  if (chosen.length === 0) return
+  // As what: your own PR takes comments only (GitHub refuses changes requested by its author)
+  const own = mine.some((p) => p.url === pr.url)
+  const sha = pr.headRefOid.slice(0, 7)
+  const verdict = await ask(
+    `Post ${plural(chosen.length, 'comment')} on ${pr.repository.nameWithOwner}#${pr.number} at ${sha} as you? ${chosen.map((f) => f.location).join('; ')}`,
+    ['Cancel', ...(own ? [] : ['Request changes']), 'Comment'],
+    'Post review',
+  )
+  const event = verdict === 'Request changes' ? 'REQUEST_CHANGES' : verdict === 'Comment' ? 'COMMENT' : ''
+  if (!event || !REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) return
+  // Pinned to the reviewed commit: if new commits came, the lines may have moved
+  const { head } = await currentHead($, pr)
+  if (head && head !== pr.headRefOid) {
+    $.ui.toast(`Not posted: #${pr.number} has new commits since ${sha} · v to review them`, { timeoutMs: 10000 })
+    await refresh($)
+    return
+  }
+  const placed = chosen.filter((f) => findingPlace(f))
+  const loose = chosen.filter((f) => !findingPlace(f))
+  const intro = run.summary ? `${run.summary.replace(/@(?=[\w-])/g, '@\u200b')}\n\n` : ''
+  const send = (comments: Finding[], extra: Finding[]) =>
+    $.process
+      .run(['gh', 'api', '-X', 'POST', `repos/${pr.repository.nameWithOwner}/pulls/${pr.number}/reviews`, '--input', '-'], {
+        stdin: JSON.stringify({
+          commit_id: pr.headRefOid,
+          event,
+          body:
+            `${intro}${extra.map((f) => `- \`${f.location || 'general'}\` ${findingComment(f)}`).join('\n\n')}`.trim() ||
+            'AI review (pr-inbox)',
+          comments: comments.map((f) => ({
+            ...(findingPlace(f) as { path: string; line: number }),
+            side: 'RIGHT',
+            body: findingComment(f),
+          })),
+        }),
+      })
+      .catch(ghMissing)
+  let r = await send(placed, loose)
+  // A line outside the diff is refused: then everything goes in the review's body, each with its place
+  if (r.exitCode !== 0 && placed.length > 0 && /line|position|diff|422|Unprocessable/i.test(r.stderr)) r = await send([], chosen)
+  if (r.exitCode !== 0) {
+    $.ui.toast(`Not posted: ${fit(clean(r.stderr), 90)}`, { timeoutMs: 10000 })
+    return
+  }
+  $.ui.toast(`✦ posted ${plural(chosen.length, 'comment')} on ${askLabel(pr)} (${verdict.toLowerCase()})`, { timeoutMs: 8000 })
+  $.ui.log(
+    `pr-inbox posted a review on ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${verdict.toLowerCase()}, ${plural(chosen.length, 'AI finding')}): you chose it in the dialog of s`,
+  )
+  await refresh($)
+}
+
 // ---- My PRs: merge (m) and re-run failed CI (c) ----
 
 const MERGE_METHODS: Record<string, string> = {
@@ -4369,6 +4469,19 @@ export function register(on: On, options: PluginOptions) {
           onPress: () => openDiff($, pr),
         }),
         // The AI review's findings: for review requests, and for approved PRs that had a review
+        // The AI review's findings, to the author as comments on their lines
+        ...(reviewOfHead(pr)?.findings.some((f) => f.severity !== 'pre-existing' && f.confirmed !== false)
+          ? [
+              Button({
+                key: 'act-send',
+                label: 'send findings',
+                hotkey: 's',
+                plain: true,
+                dimColor: true,
+                onPress: () => postFindings($, pr),
+              }),
+            ]
+          : []),
         ...(isReview || reviews.has(pr.url)
           ? [
               Button({
@@ -4901,6 +5014,7 @@ export function register(on: On, options: PluginOptions) {
         ['c', 'CI failed on your PR: Claude fixes it in a worktree (you confirm the push), or re-run the failed jobs'],
         ['f', 'filter by repository, number, title or @author (Enter keeps it; empty clears)'],
         ['d', 'read the PR: description, then the diff file by file (h / l pages, f list of pages, q back)'],
+        ['s', "send the AI review's findings to GitHub as comments on their lines (you pick them, then Request changes or Comment)"],
         ['o', 'open in the browser'],
         ['z', 'show or hide snoozed PRs'],
         ['a (again)', 'on a PR you approved that changed since (↻ RE): approve its current commit; d shows only the change'],
