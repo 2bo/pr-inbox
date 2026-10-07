@@ -4434,7 +4434,7 @@ export function register(on: On, options: PluginOptions) {
         const fixing = fixJob?.pr.url === pr.url
         const ready = fixReady.has(pr.url)
         if (fixing || ready || ciState(pr) === 'FAILURE' || ciState(pr) === 'ERROR')
-          actions.push(act('act-ci', fixing ? 'fixing CI…' : ready ? 'push fix' : 'fix CI', 'c', () => ciMenu($, pr)))
+          actions.push(act('act-ci', fixing ? 'push early / stop watching' : ready ? 'push fix' : 'fix CI', 'c', () => ciMenu($, pr)))
       }
       // An AI review of your own PR is one to fix before others read it; it never approves
       if (isReview || isMine) actions.push(act('act-ai-review', reviewLabel, 'v', () => aiReview($, pr)))
@@ -4605,7 +4605,7 @@ export function register(on: On, options: PluginOptions) {
     const reviewRows = (p: PR): { text: string; color?: string; dim?: boolean; indent?: number }[] => {
       const r = reviews.get(p.url)
       if (!r) return []
-      if (r.state === 'cancelled') return [{ text: 'AI review cancelled', dim: true }]
+      if (r.state === 'cancelled') return [{ text: 'AI review cancelled · v: run it again', dim: true }]
       if (r.state === 'running' && r.step !== 'approving…')
         return [
           {
@@ -4614,7 +4614,7 @@ export function register(on: On, options: PluginOptions) {
           },
         ]
       if (r.pr.headRefOid !== p.headRefOid)
-        return [{ text: `AI review of an older commit (${r.pr.headRefOid.slice(0, 7)}): v to review the new one`, dim: true }]
+        return [{ text: `AI review of an older commit (${r.pr.headRefOid.slice(0, 7)}) · v: review the new one`, dim: true }]
       // The decision first, then each perspective's conclusion; findings and evidence wait behind d
       const notes = r.findings.filter((f) => f.severity !== 'pre-existing').length
       const hint = expanded === p.url ? '' : notes > 0 || r.problems.length > 0 ? ' · i: findings' : ''
@@ -4672,7 +4672,7 @@ export function register(on: On, options: PluginOptions) {
     const detailRows = (p: PR): DetailRow[] => {
       if (expanded !== p.url) return []
       const r = reviews.get(p.url)
-      if (!r || r.state === 'cancelled') return [{ text: 'No AI review yet: v to run one', dim: true }]
+      if (!r || r.state === 'cancelled') return [{ text: 'No AI review yet · v: AI review', dim: true }]
       // While it runs the findings are still coming; once it is waiting on the approval they are all in
       if (r.state === 'running' && r.step !== 'approving…') return [{ text: 'The AI review is still running', dim: true }]
       const repo = p.repository.nameWithOwner
@@ -4982,7 +4982,7 @@ export function register(on: On, options: PluginOptions) {
       const above = lo
       const below = rows.length - lo - shown.length
       const parts = [above > 0 ? `↑ ${above} more` : '', below > 0 ? `↓ ${below} more` : ''].filter(Boolean)
-      more.push(Text({ dimColor: true, children: [`  ${parts.join('  ')}  (j/k to move)`] }))
+      more.push(Text({ dimColor: true, children: [`  ${parts.join('  ')} · j/k: move`] }))
     }
 
     if (showHelp) {

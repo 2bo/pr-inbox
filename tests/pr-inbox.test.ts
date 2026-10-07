@@ -1547,7 +1547,7 @@ test('v again while the review runs cancels it', { options: { ai_approve: 'auto'
   await s.clock.advance(60_000)
   await settleReview(s)
   expect(approvedAt(s)).toEqual([])
-  expect(await ui.find({ type: 'Text', text: /^AI review cancelled$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^AI review cancelled · v: run it again$/ })).toBeDefined()
   await ui.unmount()
 })
 
