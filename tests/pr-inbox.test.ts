@@ -1946,7 +1946,7 @@ const dependabot = pr({
 })
 const twoBots = JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [renovate(), dependabot] }, mine: { nodes: [] } } })
 
-test('w reviews every bot PR in turn and sums up', { options: { ai_approve: 'auto' } }, async ($, on) => {
+test('b reviews every bot PR in turn and sums up', { options: { ai_approve: 'auto' } }, async ($, on) => {
   const s = stubs(on, { graphql: twoBots })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
@@ -1961,7 +1961,7 @@ test('w reviews every bot PR in turn and sums up', { options: { ai_approve: 'aut
   await ui.unmount()
 })
 
-test('w again stops the bulk review', { options: { ai_approve: 'auto' } }, async ($, on) => {
+test('b again stops the bulk review', { options: { ai_approve: 'auto' } }, async ($, on) => {
   const s = stubs(on, { graphql: twoBots, slow: true })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
@@ -2653,9 +2653,9 @@ test('every key says what pressing it does, the most used first', async ($, on) 
   expect((await ui.find({ key: 'act-open' }))?.props.label).toBe('open on GitHub')
   await ui.press({ key: 'act-details' })
   expect((await ui.find({ key: 'act-details' }))?.props.label).toBe('hide findings')
-  // Your PR with failed CI: read, then fixing it comes before asking
+  // Your PR with failed CI: read, then fixing it and its reviewers come before asking
   await ui.press({ key: 'tab-mine' })
-  expect(await hotkeysOf(ui, 'footer')).toEqual(['d', 'c', 'v', 'e', 'p', 'o', 'x'])
+  expect(await hotkeysOf(ui, 'footer')).toEqual(['d', 'c', 'w', 'v', 'e', 'p', 'o', 'x'])
   expect((await ui.find({ key: 'act-ci' }))?.props.label).toBe('fix CI')
   // e says what it asked, and where the answer comes
   await ui.press({ key: 'act-explain' })
@@ -2674,8 +2674,8 @@ test('a key with nothing to act on says why: no PR, nothing to send, nothing sno
   await ui.press({ key: 'tab-mine' })
   await ui.press({ key: 'unbound-d' })
   expect(s.toasts.at(-1)).toContain('d: no PR is selected on this tab')
-  await ui.press({ key: 'unbound-w' })
-  expect(s.toasts.at(-1)).toContain('w reviews the bot PRs on To review (1)')
+  await ui.press({ key: 'unbound-b' })
+  expect(s.toasts.at(-1)).toContain('b reviews the bot PRs on To review (1)')
   await ui.unmount()
 })
 
@@ -2761,11 +2761,295 @@ test('approved PRs carry why they are still open as their badge', async ($, on) 
   await ui.unmount()
 })
 
-test('w sits on the bots heading and counts the bot PRs not reviewed yet', async ($, on) => {
+test('b sits on the bots heading and counts the bot PRs not reviewed yet', async ($, on) => {
   const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   expect((await ui.find({ key: 'review-bots' }))?.props.label).toBe('AI review 1 unreviewed')
+  expect((await ui.find({ key: 'review-bots' }))?.props.hotkey).toBe('b')
+  await ui.unmount()
+})
+
+// ---- Reviewers (w) ----
+
+const user = (login: string) => ({ __typename: 'User', login })
+const team = (slug: string) => ({ __typename: 'Team', combinedSlug: `acme/${slug}` })
+const event = (kind: 'ReviewRequestedEvent' | 'ReviewRequestRemovedEvent', at: string, who: unknown) => ({
+  __typename: kind,
+  createdAt: at,
+  requestedReviewer: who,
+})
+// A team with code review assignment: its request taken back and a member asked, in the same second
+const assignedBy = (slug: string, login: string, at: string) => [
+  event('ReviewRequestedEvent', at, team(slug)),
+  event('ReviewRequestRemovedEvent', at, team(slug)),
+  event('ReviewRequestedEvent', at, user(login)),
+]
+const mineOf = (number: number, over: Record<string, unknown>) =>
+  pr({
+    number,
+    url: `https://github.com/acme/app/pull/${number}`,
+    author: { login: 'me', __typename: 'User' },
+    reviewRequests: { nodes: [] },
+    requestEvents: { nodes: [] },
+    latestReviews: { nodes: [] },
+    ...over,
+  })
+// Nobody asked
+const LONELY = mineOf(25, { title: '誰にも頼んでいない' })
+// The backend team assigned mika
+const ASSIGNED = mineOf(26, {
+  title: 'チームが割り当てた',
+  reviewRequests: { nodes: [{ requestedReviewer: user('mika') }] },
+  requestEvents: { nodes: assignedBy('backend', 'mika', '2026-10-02T10:00:00Z') },
+})
+// mika asked for changes, and the PR got a push since
+const PUSHED = mineOf(27, {
+  title: '直して push した',
+  reviewDecision: 'CHANGES_REQUESTED',
+  latestReviews: {
+    nodes: [
+      { author: { login: 'mika' }, state: 'CHANGES_REQUESTED', submittedAt: '2026-10-01T00:00:00Z', commit: { oid: 'b'.repeat(40) } },
+    ],
+  },
+})
+const reviewersGraphql = (...prs: unknown[]) =>
+  JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: prs } } })
+const stateOf = (p: Record<string, unknown>) => ({
+  headRefOid: p.headRefOid,
+  isDraft: false,
+  reviewDecision: p.reviewDecision,
+  reviewRequests: p.reviewRequests,
+  requestEvents: p.requestEvents,
+  latestReviews: p.latestReviews,
+})
+// GitHub for the picker: the PR's reviews, the suggestions, your recent PRs here (both asked the backend team, which
+// assigned kai on one; ren reviewed both), merged PRs reviewed by sora, and the team's settings
+function reviewersGh(prs: Record<string, unknown>[], after?: (posted: string) => Record<string, unknown>) {
+  let posted = ''
+  return (argv: readonly string[]) => {
+    const query = argv.find((a) => a.startsWith('query=')) ?? ''
+    const number = Number(argv.find((a) => a.startsWith('number='))?.slice('number='.length))
+    const p = prs.find((x) => x.number === number) ?? {}
+    if (argv.includes('POST') && argv.some((a) => a.endsWith('/requested_reviewers'))) posted = argv.join(' ')
+    const state = posted && after ? { ...stateOf(p), ...after(posted) } : stateOf(p)
+    if (query.includes('suggestedReviewers'))
+      return {
+        stdout: JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                ...state,
+                suggestedReviewers: [
+                  { isCommenter: false, reviewer: { login: 'yui' } },
+                  { isCommenter: false, reviewer: { login: 'evil\u001b[2J' } },
+                ],
+              },
+            },
+            mine: {
+              nodes: [
+                {
+                  number: 30,
+                  requestEvents: { nodes: assignedBy('backend', 'kai', '2026-09-20T00:00:00Z') },
+                  latestReviews: { nodes: [{ author: { login: 'kai' } }, { author: { login: 'ren' } }] },
+                },
+                {
+                  number: 31,
+                  requestEvents: { nodes: [event('ReviewRequestedEvent', '2026-09-10T00:00:00Z', team('backend'))] },
+                  latestReviews: { nodes: [{ author: { login: 'ren' } }] },
+                },
+              ],
+            },
+            merged: { nodes: [{ latestReviews: { nodes: [{ author: { login: 'sora' } }, { author: { login: 'me' } }] } }] },
+          },
+        }),
+      }
+    if (query.includes('reviewRequestDelegationEnabled'))
+      return {
+        stdout: JSON.stringify({
+          data: {
+            t0: {
+              team: {
+                reviewRequestDelegationEnabled: true,
+                reviewRequestDelegationAlgorithm: 'ROUND_ROBIN',
+                reviewRequestDelegationMemberCount: 1,
+              },
+            },
+          },
+        }),
+      }
+    if (query.includes('assignableUsers'))
+      return {
+        stdout: JSON.stringify({
+          data: {
+            repository: {
+              assignableUsers: {
+                nodes: [
+                  { login: 'sofia-ito', name: 'Sofia Ito' },
+                  { login: 'me', name: 'Me' },
+                ],
+              },
+            },
+          },
+        }),
+      }
+    if (query.includes('...asked') && !query.includes('search('))
+      return { stdout: JSON.stringify({ data: { repository: { pullRequest: state } } }) }
+    return undefined
+  }
+}
+const pickText = async (ui: Finder, id: string) => JSON.stringify(await ui.find({ key: `pick-${id}` }))
+const requestCalls = (calls: string[][]) => calls.filter((c) => c.some((a) => a.endsWith('/requested_reviewers')))
+
+test('your PR that waits on reviews with nobody asked says so: ○ ASK, and w asks someone', async ($, on) => {
+  const s = stubs(on, { graphql: reviewersGraphql(LONELY, ASSIGNED) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await lineOf(ui, 25)).toContain('○ ASK')
+  expect(await lineOf(ui, 25)).toContain('no reviewer asked · w: ask someone')
+  expect((await ui.find({ key: 'act-reviewers' }))?.props.label).toBe('ask a reviewer')
+  expect((await ui.find({ key: 'act-reviewers' }))?.props.hotkey).toBe('w')
+  // One a team assigned: whom it waits on, and through which team
+  await ui.press({ key: 'nav-down' })
+  expect(await lineOf(ui, 26)).toContain('… REVW')
+  expect(await lineOf(ui, 26)).toContain('waiting for @mika (via @acme/backend)')
+  expect((await ui.find({ key: 'act-reviewers' }))?.props.label).toBe('reviewers')
+  await ui.unmount()
+})
+
+test('w suggests the team this repository is reviewed by, checked; s asks it and says whom it assigned', async ($, on) => {
+  const s = stubs(on, {
+    graphql: reviewersGraphql(LONELY),
+    gh: reviewersGh([LONELY], () => ({ reviewRequests: { nodes: [{ requestedReviewer: user('mika') }] } })),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-reviewers' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  // The team first, checked, with how it assigns; then people by how much they review your PRs here
+  const teamRow = await pickText(ui, 'acme/backend')
+  expect(teamRow).toContain('[x]')
+  expect(teamRow).toContain('assigns 1 (round robin)')
+  expect(teamRow).toContain('asked on 2 of your PRs here')
+  expect(await pickText(ui, 'ren')).toContain('reviewed 2 of your PRs here')
+  expect(await pickText(ui, 'yui')).toContain('GitHub suggests')
+  expect(await pickText(ui, 'sora')).toContain('reviews often here')
+  // Not the one the team picked at random, not you, not a name that is not a login
+  expect(await ui.find({ key: 'pick-kai' })).toBeUndefined()
+  expect(await ui.find({ key: 'pick-me' })).toBeUndefined()
+  expect(JSON.stringify(await ui.find({ key: 'picker-keys' }))).not.toContain('evil')
+  // Nothing goes out before s
+  expect(requestCalls(s.calls)).toEqual([])
+  await ui.press({ key: 'pick-send' })
+  expect(requestCalls(s.calls)).toEqual([['gh', 'api', '-X', 'POST', 'repos/acme/app/pulls/25/requested_reviewers', '--input', '-']])
+  expect(s.stdins[s.calls.findIndex((c) => c.includes('POST'))]).toBe('{"reviewers":[],"team_reviewers":["backend"]}')
+  expect(s.store.get('reviewers:acme/app')).toEqual(['acme/backend'])
+  expect(s.toasts.at(-1)).toContain('Requested @acme/backend on app#25 · ⟳ waiting for @acme/backend to pick a reviewer')
+  // Back on the list; the team picks mika a moment later
+  expect(await ui.find({ key: 'pick-send' })).toBeUndefined()
+  await s.clock.advance(1500)
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(s.toasts.at(-1)).toBe('@acme/backend assigned @mika on app#25')
+  expect(await lineOf(ui, 25)).toContain('waiting for @mika')
+  await ui.unmount()
+})
+
+test('f finds people by name; what you checked before stays listed and is sent with them', async ($, on) => {
+  const s = stubs(on, { graphql: reviewersGraphql(LONELY), gh: reviewersGh([LONELY]) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-reviewers' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  await ui.press({ key: 'pick-find' })
+  await $.ui.input({ plugin: 'pr-inbox', key: 'reviewer-search', text: 'so', kind: 'change' })
+  await s.clock.advance(300)
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  await $.ui.input({ plugin: 'pr-inbox', key: 'reviewer-search', text: 'so' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(await pickText(ui, 'sofia-ito')).toContain('Sofia Ito')
+  // Not you, even when GitHub lists you
+  expect(await ui.find({ key: 'pick-me' })).toBeUndefined()
+  // The team checked before the search is still there, still checked
+  expect(await pickText(ui, 'acme/backend')).toContain('[x]')
+  await ui.press({ key: 'pick-row-2' })
+  await ui.press({ key: 'pick-send' })
+  expect(s.stdins[s.calls.findIndex((c) => c.includes('POST'))]).toBe('{"reviewers":["sofia-ito"],"team_reviewers":["backend"]}')
+  await ui.unmount()
+})
+
+test('after a push, w asks again whoever requested changes, to them and not to their team', async ($, on) => {
+  const s = stubs(on, { graphql: reviewersGraphql(PUSHED), gh: reviewersGh([PUSHED]) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await lineOf(ui, 27)).toContain('w: re-request @mika')
+  expect((await ui.find({ key: 'act-reviewers' }))?.props.label).toBe('re-request review')
+  await ui.press({ key: 'act-reviewers' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  // Checked already: w then s asks them again
+  const row = await pickText(ui, 'mika')
+  expect(row).toContain('[x]')
+  expect(row).toContain('✗ changes')
+  expect(row).toContain('(before your push)')
+  expect(row).toContain('↻')
+  // Their team is not checked: it would pick someone else
+  expect(await pickText(ui, 'acme/backend')).toContain('[ ]')
+  await ui.press({ key: 'pick-send' })
+  expect(s.stdins[s.calls.findIndex((c) => c.includes('POST'))]).toBe('{"reviewers":["mika"],"team_reviewers":[]}')
+  expect(s.toasts.at(-1)).toBe('Re-requested @mika on app#27')
+  await ui.unmount()
+})
+
+test('w takes a request back when you uncheck it; q leaves without sending anything', async ($, on) => {
+  const s = stubs(on, { graphql: reviewersGraphql(ASSIGNED), gh: reviewersGh([ASSIGNED]) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-reviewers' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(await pickText(ui, 'mika')).toContain('via @acme/backend')
+  await ui.press({ key: 'pick-toggle' })
+  expect(JSON.stringify(await ui.find({ key: 'pick-mika' }))).toContain('[ ]')
+  // q: nothing sent, back to the list
+  await ui.press({ key: 'pick-back' })
+  expect(requestCalls(s.calls)).toEqual([])
+  expect(await ui.find({ key: `line-${ASSIGNED.url}` })).toBeDefined()
+  // Again, and this time s
+  await ui.press({ key: 'act-reviewers' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  await ui.press({ key: 'pick-toggle' })
+  await ui.press({ key: 'pick-send' })
+  expect(requestCalls(s.calls)).toEqual([['gh', 'api', '-X', 'DELETE', 'repos/acme/app/pulls/26/requested_reviewers', '--input', '-']])
+  expect(s.stdins[s.calls.findIndex((c) => c.includes('DELETE'))]).toBe('{"reviewers":["mika"],"team_reviewers":[]}')
+  expect(s.toasts.at(-1)).toBe('Removed @mika on app#26')
+  await ui.unmount()
+})
+
+test('w works from the reader of your PR too, and q goes back to the reader', async ($, on) => {
+  const s = stubs(on, { graphql: reviewersGraphql(LONELY), gh: reviewersGh([LONELY]) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-diff' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect((await ui.find({ key: 'diff-reviewers' }))?.props.hotkey).toBe('w')
+  await ui.press({ key: 'diff-reviewers' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect((await ui.find({ key: 'pick-back' }))?.props.label).toBe('back to the PR')
+  await ui.press({ key: 'pick-back' })
+  expect(await ui.find({ key: 'diff-close' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('w on a review request says it is for your own PRs, and points to b for the bots', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'unbound-w' })
+  expect(s.toasts.at(-1)).toBe('w asks for reviews on your PRs (2: My PRs) · b: AI review the bots')
   await ui.unmount()
 })
 
@@ -2799,7 +3083,7 @@ test('after the fix, you can look at its diff first; c then pushes it', async ($
 
 // ---- Trust, recovery and the daily flow ----
 
-test('while Claude fixes CI, it cannot push, merge, approve or post through gh; committing is fine', async ($, on) => {
+test('while Claude fixes CI, it cannot push, merge, approve, post or ask for reviews through gh; committing is fine', async ($, on) => {
   const s = stubs(on, { answer: 'Fix with Claude (asks before push)', git: fixGit(), locale: { HOME: '/home/me' } })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   await start($, s.clock)
@@ -2813,6 +3097,10 @@ test('while Claude fixes CI, it cannot push, merge, approve or post through gh; 
     'gh pr merge 21 --squash',
     'gh pr review 21 --approve',
     'gh api -X POST repos/acme/app/issues/21/comments -f body=hi',
+    // Nor ask for reviews: that stays with w
+    'gh pr edit 21 --add-reviewer mika',
+    'gh api -X POST repos/acme/app/pulls/21/requested_reviewers -f reviewers[]=mika',
+    `gh api graphql -f query='mutation { requestReviews(input: {pullRequestId: "x", userIds: ["y"]}) { clientMutationId } }'`,
   ]) {
     expect(await $.tool.call({ tool: 'Bash', command } as never)).toHaveProperty('deny')
   }
@@ -2879,7 +3167,7 @@ test('after an approval the selection goes to the next review request, not to wh
   await ui.unmount()
 })
 
-test('w reviews the bot PRs without moving the selection, then asks once to approve those that passed', async ($, on) => {
+test('b reviews the bot PRs without moving the selection, then asks once to approve those that passed', async ($, on) => {
   const s = stubs(on, { graphql: twoBots, answer: 'Approve all 2' })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)

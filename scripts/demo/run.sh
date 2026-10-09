@@ -8,6 +8,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 store="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/store"
 backup="$(mktemp -d)"
+# Review requests made in the demo (w) live here until it ends
+export PR_INBOX_DEMO_STATE="$(mktemp)"
 
 shopt -s nullglob
 mkdir -p "$store"
@@ -17,6 +19,7 @@ restore() {
   rm -f "$store"/pr-inbox_inline-*.json
   for f in "$backup"/*.json; do mv "$f" "$store/"; done
   rmdir "$backup"
+  rm -f "$PR_INBOX_DEMO_STATE"
 }
 trap restore EXIT
 

@@ -41,7 +41,7 @@ One line per PR. From left to right:
 | :- | :- |
 | Marks | `▸` selected · `●` updated since you last selected it · `⚙` a bot · `┌ ├ └` a stack, bottom (on the base branch) to top |
 | RISK (To review) | `▲ HIGH` · `◆ MED` · `○ LOW` from the analysis · `…` analyzing · `·` not analyzed |
-| STATE (My PRs) | `✗ FIX` needs you · `✓ RDY` ready to merge · `… REVW` in review · `◇ OLD` no update for `stale_days` · `⏸ SNZ` snoozed · `⟳ WIP` Claude is fixing its CI · `⇡ PUSH` a fix waits for your push |
+| STATE (My PRs) | `✗ FIX` needs you · `✓ RDY` ready to merge · `… REVW` in review · `○ ASK` waits on a review, but nobody is asked (`w`) · `◇ OLD` no update for `stale_days` · `⏸ SNZ` snoozed · `⟳ WIP` Claude is fixing its CI · `⇡ PUSH` a fix waits for your push |
 | Approved by you | `↻ RE` changed since you approved (re-review) · `… REVW` waits on other reviews · `◌ CI` running · `✗ CI` / `✗ CONF` / `✗ CHG` what blocks it · `✓ RDY` ready to merge |
 | PR, TITLE | Links to GitHub (Cmd+click in a terminal that supports hyperlinks) |
 | AGE | `▰▱▱` how long it has waited: one cell at 4 hours, two at a day, three at three days |
@@ -77,7 +77,7 @@ Under the list, the selected PR's details: the summary, why that risk, the relea
 | `v` | AI review ([below](#ai-review-and-approve)). `v` again cancels it. On your own PR (My PRs) too: a review for you to fix before others read it, which never approves |
 | `i` | Findings: every finding of the AI review, with links to the lines; `n` pages them when they do not fit. On your PR too, once it has an AI review |
 | `s` | Send the AI review's findings to the author: you pick them (or the ones that block), then **Request changes** or **Comment** (Cancel first); each goes on its line as one GitHub review, pinned to the reviewed commit |
-| `w` | AI review every bot PR not reviewed yet, then approve those that passed in one dialog (on the bots heading) |
+| `b` | AI review every bot PR not reviewed yet, then approve those that passed in one dialog (on the bots heading) |
 
 **On your PR**
 
@@ -85,6 +85,7 @@ Under the list, the selected PR's details: the summary, why that risk, the relea
 | :- | :- |
 | `m` | Merge a PR that is ready, after picking a method. Pinned to the commit on screen. A PR in a stack merges with `gh stack merge`: the stack from its bottom up to that PR, all or nothing; the dialog names every PR that goes |
 | `c` | CI failed: fix it with Claude in a worktree ([below](#fixing-ci)), or re-run the failed jobs |
+| `w` | Reviewers ([below](#asking-for-reviews)): ask people or a team, ask again after a push, or take a request back |
 
 **In the reader (`d`)**
 
@@ -98,10 +99,21 @@ Three tabs, `1` description, `2` conversation (comments and reviews, oldest firs
 | `t` | On a `↻ RE` PR: the whole PR, or only what changed since your approval |
 | `g` | Show a folded lockfile or generated file |
 | `a` / `v` / `e` / `p` / `o` | Approve, AI review, explain, ask or open on GitHub without leaving |
+| `w` | On your PR: reviewers, as in the list (`q` comes back to the reader) |
 | `n` | The next PR in the list |
 | `q` | Back to the list |
 
 `/pr-inbox refresh` fetches again and prints the counts without opening the pane.
+
+## Asking for reviews
+
+`w` on your PR opens the reviewers in the pane. **On this PR** lists who is asked now and who reviewed, with their verdict and, for someone a team assigned, the team (`via @acme/web`). **Suggested** ranks people and teams by GitHub's suggestions, who reviewed your recent PRs in that repository, who reviews there often, and who you asked last time; you and the people already on the PR are left out. `f` finds anyone who can be asked by login or name, and the repository's teams.
+
+`x` (or `1`-`9`) checks and unchecks, and the line above the keys says what `s` will send: `+` ask, `↻` ask again, `−` take a request back. Nothing goes to GitHub before `s`; `q` leaves without sending.
+
+- **Repositories reviewed by a team.** When you asked a team on half or more of your recent PRs there, the team comes first, and is checked when nobody is on the PR yet: `w` then `s` asks it. A team with GitHub's code review assignment says so (`assigns 1 (round robin)`); after you ask it, pr-inbox waits a few seconds and tells you whom it picked. People a team picked at random do not count as the ones who usually review your PRs
+- **After a push.** Someone who requested changes, or approved a commit before your push while GitHub still wants an approval, is checked to be asked again (`w: re-request @mika` on the row). It goes to them, not to their team, which would pick someone else
+- **Nobody asked.** A PR that waits on a review with no one asked shows `○ ASK` instead of `… REVW`
 
 ## Fixing CI
 
@@ -184,10 +196,10 @@ When a PR is too large to read whole (more than 30,000 characters of diff, 4,000
 - **Merging.** `m` merges only after you pick a method in its dialog, where Cancel is selected first. A single PR's merge is pinned to the commit on screen. A stack merge goes through `gh stack merge`, which cannot be pinned to commits: its dialog lists every PR that goes, and GitHub still applies your branch rules to each
 - **Displayed text is sanitized.** Terminal escape sequences, control characters, bidirectional override characters and invisible characters are stripped from PR titles, author names, check names and model output before they are drawn. The diff (`d`) is drawn by Claude Code's own highlighter, line by line with the same characters stripped (tabs kept), and is never sent to a model. Links open only canonical `https://` URLs. Failed-check links point wherever the CI system says, which may be a third-party site
 - **What is sent, and when.** With `analysis` on `auto`, as soon as Claude Code starts (including `claude -p` runs and sessions in other projects) and on every refresh, each review request that has not been analyzed yet is sent to the model Claude Code is configured with (Anthropic, or your Bedrock, Vertex or gateway setup), under your account: its repository and number, author, title, list of changed files, description (first 4,000 characters) and diff (first 30,000 characters). You do not have to open the pane. Follow your organization's rules for work code: narrow it with `org_filter`, or set `analysis` to `when opened` or `off`
-- **Posting from the pane.** pr-inbox writes to GitHub only after a dialog you answer: approve (`a`, `w`), merge (`m`), push a CI fix (`c`), and the AI review's findings as a review (`s`), which it posts under your name with @mentions defused, as the text was written by a model from someone else's PR
+- **Posting from the pane.** pr-inbox writes to GitHub only after a dialog you answer: approve (`a`, `b`), merge (`m`), push a CI fix (`c`), and the AI review's findings as a review (`s`), which it posts under your name with @mentions defused, as the text was written by a model from someone else's PR. Review requests (`w`) have no dialog: they go out when you press `s` in the reviewers, exactly as the line above the keys lists them, and only for logins and teams in GitHub's own format. No model chooses or sends them
 - **`p`.** Your prompt with the PR's link in it, as you see it. Its turn runs under the same read-only guard as `e` unless you pressed `p` twice; a note beside it tells Claude to treat the PR's text as data either way
-- **What is stored locally.** In Claude Code's plugin store (`~/.claude/plugins/store/`): the URLs of your review requests and the state of your own PRs (to notice changes), each analysis (summary, risk, release impact), each AI review's findings, snoozed PRs and which updates you have seen. Analyses of PRs that are no longer open are deleted on the next refresh
-- **Fixing CI (`c`).** The fix is an ordinary Claude turn with your session's permissions (your permission mode and allow rules apply), working in a separate worktree, never in your checkout. While it runs, pr-inbox refuses its `git push`, and `gh` merges, reviews, comments and other writes (`gh api` POST/PUT/PATCH/DELETE): those stay with you. The push dialog lists exactly the commits a push would send (those not on the branch as fetched), says when the turn was cut short, and a worktree with commits left from an earlier fix asks before going on. CI logs are written by tools and other people, so the request tells Claude to treat them as data. pr-inbox pushes only after you choose Push in its dialog, to the PR's own branch, never with force; your PRs from forks are left out
+- **What is stored locally.** In Claude Code's plugin store (`~/.claude/plugins/store/`): the URLs of your review requests and the state of your own PRs (to notice changes), each analysis (summary, risk, release impact), each AI review's findings, snoozed PRs, which updates you have seen, and the reviewers you last asked in each repository (to suggest them again). Analyses of PRs that are no longer open are deleted on the next refresh
+- **Fixing CI (`c`).** The fix is an ordinary Claude turn with your session's permissions (your permission mode and allow rules apply), working in a separate worktree, never in your checkout. While it runs, pr-inbox refuses its `git push`, and `gh` merges, reviews, comments, review requests and other writes (`gh api` POST/PUT/PATCH/DELETE and GraphQL mutations): those stay with you. The push dialog lists exactly the commits a push would send (those not on the branch as fetched), says when the turn was cut short, and a worktree with commits left from an earlier fix asks before going on. CI logs are written by tools and other people, so the request tells Claude to treat them as data. pr-inbox pushes only after you choose Push in its dialog, to the PR's own branch, never with force; your PRs from forks are left out
 - **Access.** All GitHub access goes through `gh`; the mod holds no token. OS notifications go through `osascript` or `notify-send`, with the text passed as arguments, never as script. Commands run as argument lists, without a shell
 
 ## Development

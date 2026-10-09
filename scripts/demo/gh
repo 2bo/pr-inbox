@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import fs from 'node:fs'
+
 // A fake gh for trying pr-inbox (pnpm run demo) and taking screenshots: every PR, person and repository here is made
 // up, and nothing is sent anywhere.
 // Handles only the calls the mod makes; everything else fails.
@@ -95,8 +97,30 @@ const stacked = (at) => ({
   stackEntry: { position: at },
 })
 
+// Reviews of your PRs: who is asked (a person or a team) and the requests made and taken back. The web team assigns
+// one member on its own, as GitHub's code review assignment does
+const user = (login) => ({ __typename: 'User', login })
+const team = (slug) => ({ __typename: 'Team', combinedSlug: `acme/${slug}` })
+const asked = (...who) => ({ reviewRequests: { nodes: who.map((w) => ({ requestedReviewer: w })) } })
+const viaTeam = (slug, login, hours) => ({
+  requestEvents: {
+    nodes: [
+      { __typename: 'ReviewRequestedEvent', createdAt: ago(hours), requestedReviewer: team(slug) },
+      { __typename: 'ReviewRequestRemovedEvent', createdAt: ago(hours), requestedReviewer: team(slug) },
+      { __typename: 'ReviewRequestedEvent', createdAt: ago(hours), requestedReviewer: user(login) },
+    ],
+  },
+})
+const reviewed = (login, state, hours, commit) => ({
+  latestReviews: { nodes: [{ author: { login }, state, submittedAt: ago(hours), commit: { oid: commit } }] },
+})
+const nobody = { reviewRequests: { nodes: [] }, requestEvents: { nodes: [] }, latestReviews: { nodes: [] } }
+
 const MINE = [
   pr('storefront', 475, 'Move session storage to Redis', 'you', {
+    ...nobody,
+    ...viaTeam('web', 'mtanaka', 30),
+    ...reviewed('mtanaka', 'CHANGES_REQUESTED', 20, oid(4750)),
     additions: 188,
     deletions: 64,
     reviewDecision: 'CHANGES_REQUESTED',
@@ -106,18 +130,35 @@ const MINE = [
       run('e2e / checkout', 'FAILURE', 9103),
     ]),
   }),
-  pr('billing-api', 1281, 'Paginate GET /v2/invoices', 'you', { additions: 97, deletions: 21, reviewDecision: 'APPROVED' }),
+  pr('billing-api', 1281, 'Paginate GET /v2/invoices', 'you', {
+    ...nobody,
+    ...reviewed('mtanaka', 'APPROVED', 5, oid(1281)),
+    additions: 97,
+    deletions: 21,
+    reviewDecision: 'APPROVED',
+  }),
   pr('storefront', 470, 'Extract feature flag helpers into a module', 'you', {
+    ...nobody,
+    ...asked(user('lena-park')),
+    ...viaTeam('web', 'lena-park', 8),
     additions: 132,
     deletions: 118,
     ...ci('PENDING'),
   }),
-  pr('infra', 88, 'Tune autoscaling thresholds for queue workers', 'you', { additions: 14, deletions: 8 }),
+  // Nobody asked to review it yet
+  pr('infra', 88, 'Tune autoscaling thresholds for queue workers', 'you', { ...nobody, additions: 14, deletions: 8 }),
   // A stack made with gh stack: metrics, then autoscaling on them, then a dashboard
-  pr('infra', 95, 'Export queue depth metrics', 'you', { additions: 64, deletions: 3, reviewDecision: 'APPROVED', ...stacked(1) }),
-  pr('infra', 96, 'Autoscale workers on queue depth', 'you', { additions: 41, deletions: 12, ...stacked(2) }),
-  pr('infra', 97, 'Queue dashboard', 'you', { additions: 120, deletions: 0, ...ci('PENDING'), ...stacked(3) }),
-  pr('docs', 61, 'API versioning guide', 'you', { isDraft: true, updatedAt: ago(24 * 45), additions: 240, deletions: 0 }),
+  pr('infra', 95, 'Export queue depth metrics', 'you', {
+    ...nobody,
+    ...reviewed('rkumar', 'APPROVED', 10, oid(95)),
+    additions: 64,
+    deletions: 3,
+    reviewDecision: 'APPROVED',
+    ...stacked(1),
+  }),
+  pr('infra', 96, 'Autoscale workers on queue depth', 'you', { ...nobody, ...asked(user('rkumar')), additions: 41, deletions: 12, ...stacked(2) }),
+  pr('infra', 97, 'Queue dashboard', 'you', { ...nobody, ...asked(user('rkumar')), additions: 120, deletions: 0, ...ci('PENDING'), ...stacked(3) }),
+  pr('docs', 61, 'API versioning guide', 'you', { ...nobody, isDraft: true, updatedAt: ago(24 * 45), additions: 240, deletions: 0 }),
 ]
 
 // Bodies, files and diffs the analysis reads
@@ -352,8 +393,114 @@ const flag = (name) => {
   return i >= 0 ? args[i + 1] : undefined
 }
 
+// Review requests made in the demo (w), kept in a file for the demo's length (run.sh removes it): by repo#number, who
+// is asked now and the events. A request to the web team becomes one of its members, as code review assignment does
+const STATE = process.env.PR_INBOX_DEMO_STATE
+const readState = () => {
+  try {
+    return STATE ? JSON.parse(fs.readFileSync(STATE, 'utf8')) : {}
+  } catch {
+    return {}
+  }
+}
+const withRequests = (p) => {
+  const s = readState()[key(p)]
+  return s ? { ...p, reviewRequests: { nodes: s.asked.map((w) => ({ requestedReviewer: w })) }, requestEvents: { nodes: s.events } } : p
+}
+const WEB_TEAM = ['lena-park', 'mtanaka', 'rkumar']
+const PEOPLE = [
+  { login: 'lena-park', name: 'Lena Park' },
+  { login: 'mtanaka', name: 'Mei Tanaka' },
+  { login: 'rkumar', name: 'Ravi Kumar' },
+  { login: 'sofia-ito', name: 'Sofia Ito' },
+  { login: 'jbaker', name: 'Jo Baker' },
+]
+const TEAMS = [
+  { slug: 'web', name: 'Web' },
+  { slug: 'platform', name: 'Platform' },
+]
+
 if (args[0] === 'api' && args[1] === 'graphql') {
-  out({ data: { viewer: { login: 'you' }, review: { nodes: REVIEW }, mine: { nodes: MINE }, approved: { nodes: APPROVED } } })
+  const query = (args.find((a) => a.startsWith('query=')) ?? '').slice('query='.length)
+  const number = Number(flag('-F')?.replace(/^number=/, ''))
+  const repo = (args.find((a) => a.startsWith('name=')) ?? '').slice('name='.length)
+  const mineHere = MINE.map(withRequests).find((p) => p.number === number && p.repository.nameWithOwner === `acme/${repo}`)
+  const state = (p) => ({
+    headRefOid: p.headRefOid,
+    isDraft: p.isDraft,
+    reviewDecision: p.reviewDecision,
+    reviewRequests: p.reviewRequests,
+    requestEvents: p.requestEvents,
+    latestReviews: p.latestReviews,
+  })
+  if (query.includes('suggestedReviewers')) {
+    // Your recent PRs here: the web team asked on both, mtanaka reviewing; merged PRs reviewed by rkumar
+    out({
+      data: {
+        repository: { pullRequest: { ...state(mineHere ?? MINE[0]), suggestedReviewers: [{ isCommenter: false, reviewer: { login: 'sofia-ito' } }] } },
+        mine: {
+          nodes: [
+            { number: 401, ...viaTeam('web', 'lena-park', 24 * 9), latestReviews: { nodes: [{ author: { login: 'lena-park' } }, { author: { login: 'jbaker' } }] } },
+            { number: 402, ...viaTeam('web', 'mtanaka', 24 * 20), latestReviews: { nodes: [{ author: { login: 'jbaker' } }] } },
+          ],
+        },
+        merged: { nodes: [{ latestReviews: { nodes: [{ author: { login: 'rkumar' } }, { author: { login: 'jbaker' } }] } }] },
+      },
+    })
+  } else if (query.includes('reviewRequestDelegationEnabled')) {
+    const data = {}
+    for (let i = 0; args.some((a) => a.startsWith(`s${i}=`)); i++) {
+      const slug = args.find((a) => a.startsWith(`s${i}=`)).slice(3)
+      data[`t${i}`] = {
+        team: {
+          reviewRequestDelegationEnabled: slug === 'web',
+          reviewRequestDelegationAlgorithm: 'ROUND_ROBIN',
+          reviewRequestDelegationMemberCount: 1,
+        },
+      }
+    }
+    out({ data })
+  } else if (query.includes('assignableUsers')) {
+    const q = (args.find((a) => a.startsWith('q=')) ?? '').slice(2).toLowerCase()
+    out({ data: { repository: { assignableUsers: { nodes: PEOPLE.filter((p) => `${p.login} ${p.name}`.toLowerCase().includes(q)) } } } })
+  } else if (query.includes('...asked') && !query.includes('search(')) {
+    out({ data: { repository: { pullRequest: mineHere ? state(mineHere) : null } } })
+  } else {
+    out({ data: { viewer: { login: 'you' }, review: { nodes: REVIEW }, mine: { nodes: MINE.map(withRequests) }, approved: { nodes: APPROVED } } })
+  }
+} else if (args[0] === 'api' && args.some((a) => /\/pulls\/\d+\/requested_reviewers$/.test(a))) {
+  // Asking for reviews (w): remembered for the demo, so the list and the picker show it
+  const m = args.find((a) => a.endsWith('/requested_reviewers')).match(/^repos\/acme\/([^/]+)\/pulls\/(\d+)\//)
+  const p = MINE.find((x) => x.repository.nameWithOwner === `acme/${m[1]}` && x.number === Number(m[2]))
+  if (!p) fail('gh: Not Found (HTTP 404)')
+  const body = JSON.parse(fs.readFileSync(0, 'utf8') || '{}')
+  const all = readState()
+  const now = new Date().toISOString()
+  const cur = all[key(p)] ?? {
+    asked: (p.reviewRequests?.nodes ?? []).map((n) => n.requestedReviewer),
+    events: p.requestEvents?.nodes ?? [],
+  }
+  const ids = (w) => w.login ?? w.combinedSlug
+  if (flag('-X') === 'DELETE') {
+    const gone = new Set([...(body.reviewers ?? []), ...(body.team_reviewers ?? []).map((t) => `acme/${t}`)])
+    cur.asked = cur.asked.filter((w) => !gone.has(ids(w)))
+  } else {
+    for (const login of body.reviewers ?? []) if (!cur.asked.some((w) => w.login === login)) cur.asked.push(user(login))
+    for (const slug of body.team_reviewers ?? []) {
+      cur.events.push({ __typename: 'ReviewRequestedEvent', createdAt: now, requestedReviewer: team(slug) })
+      if (slug !== 'web') {
+        cur.asked.push(team(slug))
+        continue
+      }
+      const pick = WEB_TEAM.find((l) => !cur.asked.some((w) => w.login === l)) ?? WEB_TEAM[0]
+      cur.events.push({ __typename: 'ReviewRequestRemovedEvent', createdAt: now, requestedReviewer: team(slug) })
+      cur.events.push({ __typename: 'ReviewRequestedEvent', createdAt: now, requestedReviewer: user(pick) })
+      cur.asked.push(user(pick))
+    }
+  }
+  all[key(p)] = cur
+  if (STATE) fs.writeFileSync(STATE, JSON.stringify(all))
+  out({ number: p.number })
 } else if (args[0] === 'api' && args.includes('--input') && args.some((a) => /\/pulls\/\d+\/reviews$/.test(a))) {
   // A review from the AI findings (s): goes nowhere
   out({ state: 'COMMENTED' })
@@ -362,7 +509,9 @@ if (args[0] === 'api' && args[1] === 'graphql') {
 } else if (args[0] === 'api') {
   const path = args.find((a) => a.startsWith('repos/')) ?? ''
   let m
-  if ((m = path.match(/^repos\/([^/]+\/[^/]+)\/contents\/([^?]+)/))) {
+  if ((m = path.match(/^repos\/acme\/[^/]+\/teams$/))) {
+    out(TEAMS)
+  } else if ((m = path.match(/^repos\/([^/]+\/[^/]+)\/contents\/([^?]+)/))) {
     const file = FILES[m[1]]?.[decodeURIComponent(m[2])]
     if (file === undefined) fail('gh: Not Found (HTTP 404)')
     out(file)

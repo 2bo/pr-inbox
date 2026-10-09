@@ -45,7 +45,15 @@ type PR = {
   }
   // Only on review requests
   timelineItems?: { nodes: ({ createdAt: string; requestedReviewer: { __typename: string; login?: string } | null } | null)[] }
+  // Only on your own PRs: who is asked to review now, and the requests made and taken back. A team that assigns its
+  // members takes its own request back and asks them in the same second
+  reviewRequests?: { nodes: ({ requestedReviewer: Reviewer | null } | null)[] }
+  requestEvents?: { nodes: (RequestEvent | null)[] }
 }
+
+// Someone asked to review: a person (login) or a team (combinedSlug, "org/slug")
+type Reviewer = { __typename: string; login?: string; combinedSlug?: string }
+type RequestEvent = { __typename: string; createdAt: string; requestedReviewer: Reviewer | null }
 
 // One CI check: a CheckRun (GitHub Actions and the like) or a legacy commit status (StatusContext)
 type CheckContext =
@@ -178,15 +186,30 @@ const MAX_ANALYSES_PER_HOUR = 30
 // Indent for the summary and detail lines
 const INDENT = 2
 
+// Each reviewer's latest review, and who is asked now with the requests made and taken back (your own PRs)
+const REVIEWED_FRAGMENT = `fragment reviewed on PullRequest {
+  latestReviews(first: 30) { nodes { author { login } state submittedAt commit { oid } } }
+}`
+const ASKED_FRAGMENT = `fragment asked on PullRequest {
+  reviewRequests(first: 20) { nodes { requestedReviewer { ...who } } }
+  requestEvents: timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT], last: 20) {
+    nodes {
+      __typename
+      ... on ReviewRequestedEvent { createdAt requestedReviewer { ...who } }
+      ... on ReviewRequestRemovedEvent { createdAt requestedReviewer { ...who } }
+    }
+  }
+}
+fragment who on RequestedReviewer { __typename ... on User { login } ... on Team { combinedSlug } }`
+
 const QUERY = `query($review: String!, $mine: String!, $approved: String!) {
   viewer { login }
   review: search(query: $review, type: ISSUE, first: 50) { nodes { ...pr ...checks ...requested } }
-  mine: search(query: $mine, type: ISSUE, first: 50) { nodes { ...pr ...checks } }
+  mine: search(query: $mine, type: ISSUE, first: 50) { nodes { ...pr ...checks ...reviewed ...asked } }
   approved: search(query: $approved, type: ISSUE, first: 50) { nodes { ...pr ...checks ...reviewed } }
 }
-fragment reviewed on PullRequest {
-  latestReviews(first: 30) { nodes { author { login } state submittedAt commit { oid } } }
-}
+${REVIEWED_FRAGMENT}
+${ASKED_FRAGMENT}
 fragment pr on PullRequest {
   number title url isDraft createdAt updatedAt headRefOid authorAssociation isCrossRepository additions deletions
   repository { nameWithOwner }
@@ -659,7 +682,9 @@ function notReadyWhy(pr: PR, now: number): string {
   const ci = ciState(pr)
   if (ci === 'PENDING' || ci === 'EXPECTED') return 'CI running'
   if (now - Date.parse(pr.updatedAt) > cfg.stale_days * DAY) return `no update for ${cfg.stale_days}+ days · o: open on GitHub`
-  return 'waiting for reviews'
+  if (needsReviewer(pr, now)) return 'no reviewer asked · w: ask someone'
+  const who = waitingOn(pr)
+  return who ? `waiting for ${who}` : 'waiting for reviews'
 }
 
 // Why a PR you approved is still open, as its badge: changed since (re-review), then what blocks it, or ready
@@ -2443,6 +2468,739 @@ function logReview($: EngineInterface, run: ReviewRun): void {
   for (const line of lines) $.ui.log(line)
 }
 
+// ---- Reviewers (w) ----
+//
+// Asking for reviews on your own PR. w opens a picker in the pane: who is asked now and who reviewed (checked to ask
+// again), then people and teams to suggest, from GitHub's suggestions, who reviewed your recent PRs in the repository,
+// who reviews there often, and who you asked last time. A team that assigns its members on its own (GitHub's code
+// review assignment) is suggested as the team, and after a request the picker waits to say whom it picked.
+// Requests go out only when the person presses s in the picker, as exactly the list under it
+
+// A GitHub login, and a team as "org/slug": anything else (bots, odd names) is never drawn nor sent
+const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/
+const TEAM_ID = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/
+// A team's request taken back this close to a member's being made is that team assigning the member
+const ASSIGN_WINDOW = 5000
+// The waits after asking a team, for GitHub to pick its members
+const ASSIGN_POLLS = [1500, 3000, 6000]
+// How long the people and teams to suggest stay fetched, per repository
+const CANDIDATES_TTL = 10 * MINUTE
+const MAX_SUGGESTED = 8
+
+const isTeamId = (id: string) => id.includes('/')
+
+// A reviewer as one id: the login of a person, org/slug of a team; '' for anything else
+function reviewerId(r: Reviewer | null | undefined): string {
+  if (!r) return ''
+  if (r.__typename === 'User' && typeof r.login === 'string' && LOGIN.test(r.login)) return r.login
+  if (r.__typename === 'Team' && typeof r.combinedSlug === 'string' && TEAM_ID.test(r.combinedSlug)) return r.combinedSlug
+  return ''
+}
+
+// Who is asked now; undefined when GitHub did not say (a review request, or an older fetch)
+function requestedNow(pr: PR): string[] | undefined {
+  if (!pr.reviewRequests) return undefined
+  return pr.reviewRequests.nodes.map((n) => reviewerId(n?.requestedReviewer)).filter(Boolean)
+}
+
+// The team each person was asked through: a team's request taken back in the same moment as theirs was made
+function viaTeams(events: (RequestEvent | null)[] | undefined): Map<string, string> {
+  const list = (events ?? []).filter((e): e is RequestEvent => e !== null)
+  const out = new Map<string, string>()
+  for (const e of list) {
+    const id = reviewerId(e.requestedReviewer)
+    if (e.__typename !== 'ReviewRequestedEvent' || !id || isTeamId(id)) continue
+    const at = Date.parse(e.createdAt)
+    const team = list.find(
+      (x) =>
+        x.__typename === 'ReviewRequestRemovedEvent' &&
+        isTeamId(reviewerId(x.requestedReviewer)) &&
+        Math.abs(Date.parse(x.createdAt) - at) <= ASSIGN_WINDOW,
+    )
+    if (team) out.set(id, reviewerId(team.requestedReviewer))
+  }
+  return out
+}
+
+// Teams that assigned a member on their own here: their request taken back right after it was made
+function assigningTeams(events: (RequestEvent | null)[] | undefined): Set<string> {
+  const list = (events ?? []).filter((e): e is RequestEvent => e !== null)
+  const out = new Set<string>()
+  for (const e of list) {
+    const id = reviewerId(e.requestedReviewer)
+    if (e.__typename !== 'ReviewRequestedEvent' || !isTeamId(id)) continue
+    const at = Date.parse(e.createdAt)
+    if (
+      list.some(
+        (x) =>
+          x.__typename === 'ReviewRequestRemovedEvent' &&
+          reviewerId(x.requestedReviewer) === id &&
+          Date.parse(x.createdAt) - at >= 0 &&
+          Date.parse(x.createdAt) - at <= ASSIGN_WINDOW,
+      )
+    )
+      out.add(id)
+  }
+  return out
+}
+
+type ReviewState = { state: string; oid: string; at: string }
+
+// Each other person's latest review of the PR
+function reviewsOf(pr: PR): Map<string, ReviewState> {
+  const out = new Map<string, ReviewState>()
+  for (const r of pr.latestReviews?.nodes ?? []) {
+    const login = r?.author?.login ?? ''
+    if (!r || !LOGIN.test(login) || login === pr.author?.login || login === viewer) continue
+    out.set(login, { state: r.state, oid: r.commit?.oid ?? '', at: r.submittedAt ?? '' })
+  }
+  return out
+}
+
+// Your PR waits on reviews, but nobody is asked: GitHub wants a review (not a repository that needs none), no
+// approval is enough yet, and no request is open
+function needsReviewer(pr: PR, now: number): boolean {
+  const asked = requestedNow(pr)
+  if (asked === undefined || asked.length > 0 || pr.isDraft) return false
+  return pr.reviewDecision === 'REVIEW_REQUIRED' && classify(pr, now).group === 'waiting'
+}
+
+// Who reviewed and is not asked now, whose review is of an older commit: changes requested, or an approval GitHub
+// no longer counts. Asking them again is the usual next step after a push
+function askAgain(pr: PR): string[] {
+  const asked = new Set(requestedNow(pr) ?? [])
+  return [...reviewsOf(pr)]
+    .filter(([login, r]) => !asked.has(login) && r.oid !== pr.headRefOid)
+    .filter(([, r]) => r.state === 'CHANGES_REQUESTED' || (r.state === 'APPROVED' && pr.reviewDecision !== 'APPROVED'))
+    .map(([login]) => login)
+}
+
+const atName = (id: string) => `@${id}`
+
+// "@mika (via @acme/backend), @acme/infra": who the PR waits on
+function waitingOn(pr: PR): string {
+  const asked = requestedNow(pr) ?? []
+  const via = viaTeams(pr.requestEvents?.nodes)
+  const names = asked.map((id) => (via.has(id) ? `${atName(id)} (via ${atName(via.get(id) ?? '')})` : atName(id)))
+  return names.length > 3 ? `${names.slice(0, 3).join(', ')} and ${names.length - 3} more` : names.join(', ')
+}
+
+// "@sora ✓ · @mika ✗": the reviews so far, for the facts line
+function reviewsNote(pr: PR): string {
+  const marks: Record<string, string> = { APPROVED: '✓', CHANGES_REQUESTED: '✗', COMMENTED: '»' }
+  return [...reviewsOf(pr)]
+    .filter(([, r]) => marks[r.state])
+    .map(([login, r]) => `${atName(login)} ${marks[r.state]}`)
+    .join(' · ')
+}
+
+// What w is for on this PR, as its label
+function reviewersKeyLabel(pr: PR, now: number): string {
+  if (needsReviewer(pr, now)) return 'ask a reviewer'
+  if (askAgain(pr).length > 0) return 're-request review'
+  return 'reviewers'
+}
+
+// One row of the picker
+type PickRow = {
+  id: string
+  // What is known about them: their review, how they were asked, why they are suggested
+  note: string
+  tone?: 'red' | 'green' | 'yellow' | 'cyan'
+  // Asked now (checked from the start; unchecking takes the request back)
+  asked: boolean
+  // Reviewed before: checking asks them again
+  reviewed?: boolean
+}
+
+type TeamInfo = { assigns: boolean | undefined; count?: number; algorithm?: string }
+
+type Candidates = {
+  at: number
+  // Ranked people and teams, with the reason each is suggested
+  rows: PickRow[]
+  // Teams you ask on most of your PRs here: checked when nobody is asked yet
+  usual: string[]
+  teams: Map<string, TeamInfo>
+}
+
+type Picker = {
+  pr: PR
+  // Back to the reader when opened from it
+  fromReader: boolean
+  candidates: Candidates | undefined
+  // People and teams found by name (f), while a search is on
+  found: PickRow[] | undefined
+  query: string
+  // The query the found rows are for
+  searched: string
+  searching: boolean
+  // What the person changed, by id: true to ask, false to take back
+  want: Map<string, boolean>
+  // Every row seen, so one checked stays listed after a search moves on
+  known: Map<string, PickRow>
+  cursor: number
+  loading: boolean
+  error: string
+  sending: boolean
+}
+
+let picker: Picker | undefined
+const candidateCache = new Map<string, Candidates>()
+// Teams with access to a repository, fetched once for finding by name
+const repoTeams = new Map<string, { id: string; name: string }[]>()
+let searchRun = 0
+
+// The rows on the PR itself: who is asked now, then who reviewed
+function onPrRows(pr: PR): PickRow[] {
+  const asked = requestedNow(pr) ?? []
+  const via = viaTeams(pr.requestEvents?.nodes)
+  const reviews = reviewsOf(pr)
+  const now = fetchedAt || Date.now()
+  const reviewNote = (r: ReviewState): { note: string; tone?: PickRow['tone'] } => {
+    const when = r.at ? ` ${elapsed(r.at, now)} ago` : ''
+    const old = r.oid && r.oid !== pr.headRefOid ? ' (before your push)' : ''
+    if (r.state === 'APPROVED') return { note: `✓ approved${when}${old}`, tone: 'green' }
+    if (r.state === 'CHANGES_REQUESTED') return { note: `✗ changes${when}${old}`, tone: 'red' }
+    return { note: `» commented${when}` }
+  }
+  const rows: PickRow[] = asked.map((id) => {
+    const r = reviews.get(id)
+    const parts = [
+      r ? reviewNote(r).note : isTeamId(id) ? 'team · no one assigned yet' : 'asked, no review yet',
+      via.has(id) ? `via ${atName(via.get(id) ?? '')}` : '',
+    ]
+    return { id, note: parts.filter(Boolean).join(' · '), asked: true, ...(r ? { tone: reviewNote(r).tone } : {}) }
+  })
+  for (const [login, r] of reviews) {
+    if (asked.includes(login)) continue
+    const n = reviewNote(r)
+    rows.push({
+      id: login,
+      note: `${n.note}${via.has(login) ? ` · via ${atName(via.get(login) ?? '')}` : ''}`,
+      ...(n.tone ? { tone: n.tone } : {}),
+      asked: false,
+      reviewed: true,
+    })
+  }
+  return rows
+}
+
+// Everything the picker lists, in order: the PR's own rows, those you checked that a search hides, then the found or
+// the suggested ones. A checked row never leaves the list, so what s sends is always on screen
+function pickerRows(p: Picker): PickRow[] {
+  const own = onPrRows(p.pr)
+  const listed = p.found ?? p.candidates?.rows ?? []
+  for (const r of [...(p.candidates?.rows ?? []), ...(p.found ?? [])]) if (!p.known.has(r.id)) p.known.set(r.id, r)
+  const ids = new Set([...own, ...listed].map((r) => r.id))
+  const kept = [...p.want]
+    .filter(([id, on]) => on && !ids.has(id))
+    .map(([id]) => p.known.get(id))
+    .filter((r): r is PickRow => r !== undefined)
+  const shown = new Set(own.map((r) => r.id))
+  return [...own, ...kept, ...listed.filter((r) => !shown.has(r.id))]
+}
+
+function isChecked(p: Picker, row: PickRow): boolean {
+  return p.want.get(row.id) ?? row.asked
+}
+
+// What s sends: people and teams to ask, those asked again, and requests to take back
+function pickerPlan(p: Picker): { add: string[]; again: string[]; remove: string[] } {
+  const add: string[] = []
+  const again: string[] = []
+  const remove: string[] = []
+  for (const row of pickerRows(p)) {
+    const checked = isChecked(p, row)
+    if (row.asked && !checked) remove.push(row.id)
+    else if (!row.asked && checked) (row.reviewed ? again : add).push(row.id)
+  }
+  return { add, again, remove }
+}
+
+function planText(plan: { add: string[]; again: string[]; remove: string[] }): string {
+  return [
+    ...plan.add.map((id) => `+ ${atName(id)}`),
+    ...plan.again.map((id) => `↻ ${atName(id)}`),
+    ...plan.remove.map((id) => `− ${atName(id)}`),
+  ].join('  ')
+}
+
+// The search query a repository's PRs are found with; the name was checked against REPO_NAME
+const inRepo = (repo: string, rest: string) => `repo:${repo} is:pr ${rest}`
+
+const CANDIDATES_QUERY = `query($owner: String!, $name: String!, $number: Int!, $mine: String!, $merged: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid isDraft reviewDecision
+      ...reviewed ...asked
+      suggestedReviewers { isCommenter reviewer { login } }
+    }
+  }
+  mine: search(query: $mine, type: ISSUE, first: 20) { nodes { ... on PullRequest { number ...reviewed ...asked } } }
+  merged: search(query: $merged, type: ISSUE, first: 30) { nodes { ... on PullRequest { latestReviews(first: 20) { nodes { author { login } } } } } }
+}
+${REVIEWED_FRAGMENT}
+${ASKED_FRAGMENT}`
+
+const REVIEW_STATE_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid isDraft reviewDecision ...reviewed ...asked } }
+}
+${REVIEWED_FRAGMENT}
+${ASKED_FRAGMENT}`
+
+type FreshState = Pick<PR, 'headRefOid' | 'isDraft' | 'reviewDecision' | 'latestReviews' | 'reviewRequests' | 'requestEvents'>
+
+// Put what was just fetched about a PR's reviews into the list, so its row and the picker agree
+function mergeReviewState(pr: PR, fresh: FreshState | undefined): PR {
+  if (!fresh) return pr
+  const updated: PR = {
+    ...pr,
+    isDraft: fresh.isDraft === true,
+    reviewDecision: fresh.reviewDecision ?? null,
+    ...(fresh.latestReviews ? { latestReviews: fresh.latestReviews } : {}),
+    ...(fresh.reviewRequests ? { reviewRequests: fresh.reviewRequests } : {}),
+    ...(fresh.requestEvents ? { requestEvents: fresh.requestEvents } : {}),
+  }
+  mine = mine.map((p) => (p.url === pr.url ? updated : p))
+  if (picker?.pr.url === pr.url) picker.pr = updated
+  return updated
+}
+
+function repoParts(pr: PR): [string, string] | undefined {
+  const repo = pr.repository.nameWithOwner
+  if (!REPO_NAME.test(repo)) return undefined
+  const [owner, name] = repo.split('/') as [string, string]
+  return [owner, name]
+}
+
+// Who is asked and who reviewed, fetched again (after a request, and while a team picks its members)
+async function fetchReviewState($: EngineInterface, pr: PR): Promise<PR> {
+  const parts = repoParts(pr)
+  if (!parts) return pr
+  const r = await $.process
+    .run([
+      'gh',
+      'api',
+      'graphql',
+      '-f',
+      `query=${REVIEW_STATE_QUERY}`,
+      '-f',
+      `owner=${parts[0]}`,
+      '-f',
+      `name=${parts[1]}`,
+      '-F',
+      `number=${pr.number}`,
+    ])
+    .catch(ghMissing)
+  if (r.exitCode !== 0) return pr
+  try {
+    const fresh = (JSON.parse(r.stdout) as { data?: { repository?: { pullRequest?: FreshState } } }).data?.repository?.pullRequest
+    const updated = mergeReviewState(pr, fresh)
+    $.ui.invalidate('ui.render')
+    return updated
+  } catch {
+    return pr
+  }
+}
+
+// Whether each team assigns its members on its own, as its settings say; a team you cannot read is left unknown
+async function teamSettings($: EngineInterface, ids: string[]): Promise<Map<string, TeamInfo>> {
+  const out = new Map<string, TeamInfo>()
+  if (ids.length === 0) return out
+  const vars: string[] = []
+  const fields = ids.map((id, i) => {
+    const [org, slug] = id.split('/') as [string, string]
+    vars.push('-f', `o${i}=${org}`, '-f', `s${i}=${slug}`)
+    return `t${i}: organization(login: $o${i}) { team(slug: $s${i}) { reviewRequestDelegationEnabled reviewRequestDelegationAlgorithm reviewRequestDelegationMemberCount } }`
+  })
+  const query = `query(${ids.map((_, i) => `$o${i}: String!, $s${i}: String!`).join(', ')}) {\n  ${fields.join('\n  ')}\n}`
+  const r = await $.process.run(['gh', 'api', 'graphql', '-f', `query=${query}`, ...vars]).catch(ghMissing)
+  // A team you cannot see fails the whole answer with the others still in it
+  let data: Record<string, { team?: Record<string, unknown> | null } | null> = {}
+  try {
+    data = (JSON.parse(r.stdout) as { data?: typeof data }).data ?? {}
+  } catch {
+    return out
+  }
+  ids.forEach((id, i) => {
+    const t = data[`t${i}`]?.team
+    if (!t || typeof t.reviewRequestDelegationEnabled !== 'boolean') return
+    out.set(id, {
+      assigns: t.reviewRequestDelegationEnabled,
+      ...(typeof t.reviewRequestDelegationMemberCount === 'number' ? { count: t.reviewRequestDelegationMemberCount } : {}),
+      ...(typeof t.reviewRequestDelegationAlgorithm === 'string'
+        ? { algorithm: t.reviewRequestDelegationAlgorithm.toLowerCase().replace(/_/g, ' ') }
+        : {}),
+    })
+  })
+  return out
+}
+
+type CandidateData = {
+  repository?: {
+    pullRequest?: (FreshState & { suggestedReviewers?: ({ isCommenter?: boolean; reviewer?: { login?: string } | null } | null)[] }) | null
+  } | null
+  mine?: { nodes: (Pick<PR, 'number' | 'latestReviews' | 'requestEvents'> | null)[] }
+  merged?: { nodes: ({ latestReviews?: { nodes: ({ author: { login: string } | null } | null)[] } } | null)[] }
+}
+
+// Rank the people and teams to suggest. Each reason adds points; the row says the one that gave the most
+function rankCandidates(
+  pr: PR,
+  data: CandidateData,
+  last: string[],
+  teams: Map<string, TeamInfo>,
+): { rows: PickRow[]; usual: string[]; teamIds: string[] } {
+  const score = new Map<string, { points: number; best: number; note: string }>()
+  const add = (id: string, points: number, note: string) => {
+    if (!id || points <= 0) return
+    const s = score.get(id) ?? { points: 0, best: 0, note: '' }
+    s.points += points
+    if (points > s.best) {
+      s.best = points
+      s.note = note
+    }
+    score.set(id, s)
+  }
+  for (const id of last) if (LOGIN.test(id) || TEAM_ID.test(id)) add(id, 5, 'you asked them last time here')
+  for (const s of data.repository?.pullRequest?.suggestedReviewers ?? []) {
+    const login = s?.reviewer?.login ?? ''
+    if (LOGIN.test(login))
+      add(login, s?.isCommenter ? 5 : 4, s?.isCommenter ? 'GitHub suggests · commented here' : 'GitHub suggests (they changed these files)')
+  }
+  // Your recent PRs here: who reviewed them (not those a team picked at random), and which teams you asked
+  const others = (data.mine?.nodes ?? []).filter((n): n is NonNullable<typeof n> => n !== null && n.number !== pr.number)
+  const reviewed = new Map<string, number>()
+  const teamAsked = new Map<string, number>()
+  for (const n of others) {
+    const via = viaTeams(n.requestEvents?.nodes)
+    for (const r of n.latestReviews?.nodes ?? []) {
+      const login = r?.author?.login ?? ''
+      if (LOGIN.test(login) && !via.has(login)) reviewed.set(login, (reviewed.get(login) ?? 0) + 1)
+    }
+    const asked = new Set(
+      (n.requestEvents?.nodes ?? [])
+        .filter((e) => e?.__typename === 'ReviewRequestedEvent')
+        .map((e) => reviewerId(e?.requestedReviewer))
+        .filter(isTeamId),
+    )
+    for (const id of asked) teamAsked.set(id, (teamAsked.get(id) ?? 0) + 1)
+  }
+  for (const [login, n] of reviewed) add(login, Math.min(6, 2 * n), `reviewed ${n} of your PRs here`)
+  const merged = new Map<string, number>()
+  for (const n of data.merged?.nodes ?? [])
+    for (const r of n?.latestReviews?.nodes ?? []) {
+      const login = r?.author?.login ?? ''
+      if (LOGIN.test(login)) merged.set(login, (merged.get(login) ?? 0) + 1)
+    }
+  for (const [login, n] of merged) add(login, Math.min(3, n), 'reviews often here')
+  // A team asked on half or more of your PRs here is how this repository is reviewed: it goes first
+  const usual = [...teamAsked]
+    .filter(([, n]) => others.length > 0 && n >= Math.max(2, Math.ceil(others.length / 2)))
+    .sort((a, b) => b[1] - a[1])
+    .map(([id]) => id)
+  for (const [id, n] of teamAsked) add(id, usual.includes(id) ? 100 + n : 2 * n, `asked on ${n} of your PRs here`)
+  // Not you, not on the PR already
+  const onPr = new Set(onPrRows(pr).map((r) => r.id))
+  const rows = [...score]
+    .filter(([id]) => id !== viewer && id !== pr.author?.login && !onPr.has(id))
+    .sort((a, b) => b[1].points - a[1].points || a[0].localeCompare(b[0]))
+    .slice(0, MAX_SUGGESTED)
+    .map(([id, s]): PickRow => {
+      if (!isTeamId(id)) return { id, note: s.note, asked: false }
+      const t = teams.get(id)
+      const how =
+        t?.assigns === true
+          ? `assigns ${t.count ?? 1}${t.algorithm ? ` (${t.algorithm})` : ''}`
+          : t?.assigns === false
+            ? 'the whole team is asked'
+            : ''
+      return { id, note: ['team', how, s.note].filter(Boolean).join(' · '), asked: false, ...(t?.assigns ? { tone: 'cyan' as const } : {}) }
+    })
+  return { rows, usual, teamIds: [...teamAsked.keys()] }
+}
+
+// Fetch the PR's reviews and the people and teams to suggest, in one call (and one more for the teams' settings)
+async function loadCandidates($: EngineInterface, p: Picker): Promise<void> {
+  const pr = p.pr
+  const repo = pr.repository.nameWithOwner
+  const parts = repoParts(pr)
+  if (!parts) {
+    p.loading = false
+    p.error = 'unexpected repository name'
+    return
+  }
+  const cached = candidateCache.get(repo)
+  const r = await $.process
+    .run([
+      'gh',
+      'api',
+      'graphql',
+      '-f',
+      `query=${CANDIDATES_QUERY}`,
+      '-f',
+      `owner=${parts[0]}`,
+      '-f',
+      `name=${parts[1]}`,
+      '-F',
+      `number=${pr.number}`,
+      '-f',
+      `mine=${inRepo(repo, 'author:@me sort:created-desc')}`,
+      '-f',
+      `merged=${inRepo(repo, 'is:merged sort:updated-desc')}`,
+    ])
+    .catch(ghMissing)
+  let data: CandidateData = {}
+  try {
+    data = (JSON.parse(r.stdout) as { data?: CandidateData }).data ?? {}
+  } catch {
+    // Nothing usable: say why below
+  }
+  if (r.exitCode !== 0 && !data.repository) {
+    p.loading = false
+    p.error = `Could not fetch reviewers: ${fit(clean(r.stderr) || `gh exited with code ${r.exitCode}`, 120)}`
+    return
+  }
+  const fresh = data.repository?.pullRequest ?? undefined
+  if (fresh) mergeReviewState(pr, fresh)
+  if (cached && (await $.clock.now()) - cached.at < CANDIDATES_TTL) {
+    p.candidates = cached
+  } else {
+    const stored = await $.store.get(`reviewers:${repo}`)
+    const last = Array.isArray(stored) ? stored.filter((x): x is string => typeof x === 'string') : []
+    const first = rankCandidates(p.pr, data, last, new Map())
+    // Each team's settings say whether it assigns its members; where they cannot be read, its history does
+    const teams = await teamSettings($, first.teamIds.slice(0, 10))
+    const history = new Set<string>()
+    for (const n of [...(data.mine?.nodes ?? []), fresh ?? null]) for (const id of assigningTeams(n?.requestEvents?.nodes)) history.add(id)
+    for (const id of first.teamIds) if (!teams.has(id) && history.has(id)) teams.set(id, { assigns: true })
+    const ranked = rankCandidates(p.pr, data, last, teams)
+    p.candidates = { at: await $.clock.now(), rows: ranked.rows, usual: ranked.usual, teams }
+    candidateCache.set(repo, p.candidates)
+  }
+  // Nobody asked or reviewed yet, in a repository reviewed by a team: that team is checked, so s alone asks it. After
+  // reviews, asking whoever reviewed comes first (their team would pick someone else)
+  if (onPrRows(p.pr).length === 0 && p.want.size === 0) for (const id of p.candidates.usual.slice(0, 1)) p.want.set(id, true)
+  p.loading = false
+}
+
+async function openPicker($: EngineInterface, pr: PR): Promise<void> {
+  if (!mine.some((p) => p.url === pr.url)) {
+    $.ui.toast('w asks for reviews on your own PRs (2: my PRs)', { timeoutMs: 4000 })
+    return
+  }
+  const p: Picker = {
+    pr,
+    fromReader: diffView !== undefined,
+    candidates: undefined,
+    found: undefined,
+    query: '',
+    searched: '',
+    searching: false,
+    want: new Map(),
+    known: new Map(),
+    cursor: 0,
+    loading: true,
+    error: '',
+    sending: false,
+  }
+  // Asking again whoever reviewed an older commit is what w is for then: checked, so s alone does it
+  for (const id of askAgain(pr)) p.want.set(id, true)
+  picker = p
+  $.ui.invalidate('ui.render')
+  await loadCandidates($, p)
+  $.ui.invalidate('ui.render')
+}
+
+// f: people who can be asked here, by login or name, and the repository's teams; as you type
+async function searchReviewers($: EngineInterface, p: Picker, query: string): Promise<void> {
+  const run = ++searchRun
+  const q = query.trim().replace(/^@/, '')
+  if (q && q === p.searched && p.found) return
+  if (!q) {
+    p.found = undefined
+    $.ui.invalidate('ui.render')
+    return
+  }
+  // Let the typing settle first (a wait cut short, as when the pane closes, ends the search)
+  try {
+    await $.clock.sleep(250)
+  } catch {
+    return
+  }
+  if (run !== searchRun || picker !== p) return
+  const parts = repoParts(p.pr)
+  if (!parts) return
+  const repo = p.pr.repository.nameWithOwner
+  if (!repoTeams.has(repo)) {
+    const t = await $.process.run(['gh', 'api', `repos/${repo}/teams`, '--paginate']).catch(ghMissing)
+    let teams: { id: string; name: string }[] = []
+    try {
+      if (t.exitCode === 0)
+        teams = (JSON.parse(t.stdout) as { slug?: string; name?: string }[])
+          .map((x) => ({ id: `${parts[0]}/${x.slug ?? ''}`, name: clean(x.name ?? '') }))
+          .filter((x) => TEAM_ID.test(x.id))
+    } catch {
+      // No teams to offer (a personal repository, or no access to its teams)
+    }
+    repoTeams.set(repo, teams)
+  }
+  const r = await $.process
+    .run([
+      'gh',
+      'api',
+      'graphql',
+      '-f',
+      'query=query($owner: String!, $name: String!, $q: String!) { repository(owner: $owner, name: $name) { assignableUsers(query: $q, first: 10) { nodes { login name } } } }',
+      '-f',
+      `owner=${parts[0]}`,
+      '-f',
+      `name=${parts[1]}`,
+      '-f',
+      `q=${q}`,
+    ])
+    .catch(ghMissing)
+  if (run !== searchRun || picker !== p) return
+  let users: { login?: string; name?: string | null }[] = []
+  try {
+    users =
+      (JSON.parse(r.stdout) as { data?: { repository?: { assignableUsers?: { nodes: typeof users } } } }).data?.repository?.assignableUsers
+        ?.nodes ?? []
+  } catch {
+    // Treated as no one found
+  }
+  const lower = q.toLowerCase()
+  p.found = [
+    ...(repoTeams.get(repo) ?? [])
+      .filter((t) => t.id.toLowerCase().includes(lower) || t.name.toLowerCase().includes(lower))
+      .slice(0, 5)
+      .map((t): PickRow => {
+        const info = p.candidates?.teams.get(t.id)
+        return {
+          id: t.id,
+          note: ['team', info?.assigns ? `assigns ${info.count ?? 1}` : '', t.name].filter(Boolean).join(' · '),
+          asked: false,
+        }
+      }),
+    ...users
+      .filter((u) => typeof u.login === 'string' && LOGIN.test(u.login) && u.login !== viewer && u.login !== p.pr.author?.login)
+      .map((u): PickRow => ({ id: u.login as string, note: clean(u.name ?? ''), asked: false })),
+  ]
+  p.searched = q
+  p.cursor = Math.min(p.cursor, Math.max(0, pickerRows(p).length - 1))
+  $.ui.invalidate('ui.render')
+}
+
+// s: send exactly the list under the picker. Asking (and asking again) is one POST, taking back one DELETE, each to
+// requested_reviewers with the ids on stdin. Then the picker closes and the PR's reviews are fetched again; a team
+// that assigns its members is watched until it has picked them
+async function sendReviewers($: EngineInterface, p: Picker): Promise<void> {
+  const plan = pickerPlan(p)
+  const asking = [...plan.add, ...plan.again]
+  if (asking.length === 0 && plan.remove.length === 0) {
+    $.ui.toast('Nothing to send · x: check someone, or uncheck to take a request back', { timeoutMs: 4000 })
+    return
+  }
+  const pr = p.pr
+  const repo = pr.repository.nameWithOwner
+  if (!REPO_NAME.test(repo) || ![...asking, ...plan.remove].every((id) => (isTeamId(id) ? TEAM_ID : LOGIN).test(id))) {
+    p.error = 'Not sent: unexpected repository or reviewer name'
+    $.ui.invalidate('ui.render')
+    return
+  }
+  const body = (ids: string[]) =>
+    JSON.stringify({
+      reviewers: ids.filter((id) => !isTeamId(id)),
+      team_reviewers: ids.filter(isTeamId).map((id) => id.split('/')[1]),
+    })
+  const path = `repos/${repo}/pulls/${pr.number}/requested_reviewers`
+  const send = (method: 'POST' | 'DELETE', ids: string[]) =>
+    $.process.run(['gh', 'api', '-X', method, path, '--input', '-'], { stdin: body(ids) }).catch(ghMissing)
+  p.sending = true
+  p.error = ''
+  $.ui.invalidate('ui.render')
+  const before = new Set(requestedNow(pr) ?? [])
+  if (asking.length > 0) {
+    const r = await send('POST', asking)
+    if (r.exitCode !== 0) {
+      p.sending = false
+      p.error = requestError(clean(r.stderr), asking, repo)
+      $.ui.invalidate('ui.render')
+      return
+    }
+    await $.store.set(`reviewers:${repo}`, asking)
+    candidateCache.delete(repo)
+  }
+  if (plan.remove.length > 0) {
+    const r = await send('DELETE', plan.remove)
+    if (r.exitCode !== 0) {
+      p.sending = false
+      p.error = `Asked, but could not take back ${plan.remove.map(atName).join(', ')}: ${fit(clean(r.stderr) || 'gh failed', 100)}`
+      $.ui.invalidate('ui.render')
+      return
+    }
+  }
+  if (picker === p) picker = undefined
+  $.ui.invalidate('ui.render')
+  const label = askLabel(pr)
+  const said = [
+    plan.add.length ? `requested ${plan.add.map(atName).join(', ')}` : '',
+    plan.again.length ? `re-requested ${plan.again.map(atName).join(', ')}` : '',
+    plan.remove.length ? `removed ${plan.remove.map(atName).join(', ')}` : '',
+  ].filter(Boolean)
+  const teams = plan.add.filter(isTeamId).filter((id) => p.candidates?.teams.get(id)?.assigns !== false)
+  if (teams.length === 0) {
+    $.ui.toast(`${capitalize(said.join(' · '))} on ${label}`, { timeoutMs: 6000 })
+    await fetchReviewState($, pr)
+    return
+  }
+  $.ui.toast(`${capitalize(said.join(' · '))} on ${label} · ⟳ waiting for ${teams.map(atName).join(', ')} to pick a reviewer…`, {
+    timeoutMs: 6000,
+  })
+  void watchAssignment($, pr, teams, new Set([...before, ...asking]))
+}
+
+// A team asked with code review assignment on: GitHub takes the team's request back and asks members in a second or
+// so. Say whom it picked, or that it picked no one yet
+async function watchAssignment($: EngineInterface, pr: PR, teams: string[], known: Set<string>): Promise<void> {
+  let current = pr
+  let waited = 0
+  for (const wait of ASSIGN_POLLS) {
+    try {
+      await $.clock.sleep(wait - waited)
+    } catch {
+      return
+    }
+    waited = wait
+    current = await fetchReviewState($, current)
+    const asked = requestedNow(current) ?? []
+    if (teams.some((id) => asked.includes(id))) continue
+    const picked = asked.filter((id) => !known.has(id))
+    $.ui.toast(
+      picked.length > 0
+        ? `${teams.map(atName).join(', ')} assigned ${picked.map(atName).join(', ')} on ${askLabel(pr)}`
+        : `${teams.map(atName).join(', ')} took the request on ${askLabel(pr)}`,
+      { timeoutMs: 8000 },
+    )
+    return
+  }
+  $.ui.toast(`Requested ${teams.map(atName).join(', ')} on ${askLabel(pr)} (no one assigned yet)`, { timeoutMs: 8000 })
+}
+
+// GitHub's refusals, in a line that says what to do
+function requestError(stderr: string, ids: string[], repo: string): string {
+  if (/collaborator/i.test(stderr)) return `${ids.map(atName).join(', ')} cannot review ${repo} (not a collaborator) · o: open on GitHub`
+  if (/team/i.test(stderr) && /not found|could not resolve|404/i.test(stderr))
+    return `A team was not found or you cannot ask it in ${repo} · o: open on GitHub`
+  if (/author/i.test(stderr)) return 'The author of a PR cannot review it'
+  return `Not sent: ${fit(stderr || 'gh failed', 120)}`
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1)
+}
+
 // ---- The diff (d) ----
 
 // What one Code element may hold is 10000 characters: pieces stay under this, cut between lines with their own @@
@@ -2973,6 +3731,8 @@ function badgeOf(pr: PR): Cell {
   if (fixJob?.pr.url === pr.url) return { text: '⟳ WIP ', color: NEON.cyan, bold: true }
   if (fixReady.has(pr.url)) return { text: '⇡ PUSH', color: NEON.cyan, bold: true }
   const group = classify(pr, fetchedAt || Date.now()).group
+  // Waiting on reviews with nobody asked: ask someone (w)
+  if (needsReviewer(pr, fetchedAt || Date.now())) return { text: '○ ASK ', color: NEON.yellow, bold: true }
   return group === 'action'
     ? { text: '✗ FIX ', color: NEON.red, bold: true }
     : group === 'ready'
@@ -3353,7 +4113,7 @@ const fixReady = new Map<string, FixJob>()
 const FIX_MARK = '[pr-inbox fix-ci]'
 // What the fix turn may not run: pushes, and gh writes to the PR or the repository
 const FIX_FORBIDDEN =
-  /\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr\s+(?:merge|review|comment|close|ready|edit)|release|repo\s+(?:delete|edit))\b|\bgh\s+api\b[^\n]*(?:-X\s*|--method[=\s]+)(?:POST|PUT|PATCH|DELETE)/i
+  /\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr\s+(?:merge|review|comment|close|ready|edit)|release|repo\s+(?:delete|edit))\b|\bgh\s+api\b[^\n]*(?:-X\s*|--method[=\s]+)(?:POST|PUT|PATCH|DELETE)|\bgh\s+api\s+graphql\b[^\n]*\bmutation\b/i
 const FIX_DENY =
   'pr-inbox: while fixing CI, pushing, merging, approving and commenting are left to the user. Commit your fix in the worktree and stop: pr-inbox shows the commits and asks before it pushes.'
 // A branch name safe to hand to git as one argument
@@ -3753,6 +4513,7 @@ export function register(on: On, options: PluginOptions) {
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE) {
       diffView = undefined
+      picker = undefined
       paneOpen = false
       paneFocused = false
       $.ui.invalidate('ui.render')
@@ -3791,10 +4552,194 @@ export function register(on: On, options: PluginOptions) {
     })
   })
 
+  // The reviewers picker (w), in the pane over the list or the reader: who is asked and who reviewed, then people
+  // and teams to suggest or found by name. x checks or unchecks, s sends exactly the line above the keys
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    if (e.requestId !== PANE || !picker) return next(e)
+    const kit = $.ui.resolve(e)
+    const { Box, Link } = kit
+    const { Text, Button } = glyphed(kit)
+    const Input = 'Input' in kit ? kit.Input : undefined
+    type El = ReturnType<typeof Box>
+    const redraw = () => $.ui.invalidate('ui.render')
+    const columns = Math.max(40, (e.props.bodyColumns ?? 80) - 1)
+    const focused = e.props.isFocused === true
+    const p = picker
+    const { pr } = p
+    const toast = (text: string) => $.ui.toast(text, { timeoutMs: 4000 })
+    const key = (k: string, label: string, hotkey: string, onPress: () => void, dim = false) =>
+      Button({ key: k, label, hotkey, plain: true, dimColor: dim, onPress })
+    const back = () => {
+      picker = undefined
+      redraw()
+    }
+    const rows = pickerRows(p)
+    p.cursor = Math.min(Math.max(0, p.cursor), Math.max(0, rows.length - 1))
+    const toggle = (row: PickRow | undefined) => {
+      if (!row || p.sending) return
+      const flipped = !isChecked(p, row)
+      if (flipped === row.asked) p.want.delete(row.id)
+      else p.want.set(row.id, flipped)
+      redraw()
+    }
+    const label = `${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number}`
+    const prLink = safeHref(pr.url)
+    const head = Box({
+      flexDirection: 'row',
+      columnGap: 1,
+      children: [
+        Text({ color: focused ? NEON.pink : NEON.rule, children: ['▍'] }),
+        Text({ color: NEON.pink, bold: true, children: ['reviewers'] }),
+        prLink
+          ? Link({ href: prLink, children: [Text({ color: NEON.cyan, underline: true, children: [label] })] })
+          : Text({ children: [label] }),
+        Text({ bold: true, wrap: 'truncate-end', children: [fit(pr.title, Math.max(10, columns - textWidth(label) - 14))] }),
+      ],
+    })
+    const rule = (heavy = false) => Text({ color: focused ? NEON.violet : NEON.rule, children: [(heavy ? '━' : '─').repeat(columns)] })
+    const heading = (name: string) => Text({ color: NEON.violet, bold: true, children: [name] })
+    const toneColor = (t: PickRow['tone']) =>
+      t ? { red: NEON.red, green: NEON.green, yellow: NEON.yellow, cyan: NEON.cyan }[t] : undefined
+    const ID_WIDTH = Math.min(28, Math.max(10, ...rows.map((r) => textWidth(atName(r.id)))))
+    const line = (row: PickRow, i: number) => {
+      const checked = isChecked(p, row)
+      const changed = p.want.has(row.id)
+      const here = i === p.cursor
+      const mark = !changed ? '' : !checked ? '−' : row.reviewed ? '↻' : '+'
+      const note = fit(row.note, Math.max(10, columns - ID_WIDTH - 12))
+      return Box({
+        key: `pick-${row.id}`,
+        flexDirection: 'row',
+        ...(here && focused ? { backgroundColor: NEON.selection } : {}),
+        children: [
+          Text({ color: focused ? NEON.pink : NEON.muted, bold: true, children: [here ? '▸' : ' '] }),
+          Text({ color: NEON.muted, children: [i < 9 ? `${i + 1}` : ' '] }),
+          Text({ color: checked ? NEON.green : NEON.muted, bold: checked, children: [checked ? ' [x] ' : ' [ ] '] }),
+          Text({
+            bold: here,
+            ...(here && focused ? { color: NEON.onSelection } : {}),
+            children: [atName(row.id).padEnd(ID_WIDTH)],
+          }),
+          Text({ children: [' '] }),
+          Text({ ...(toneColor(row.tone) ? { color: toneColor(row.tone) } : { dimColor: true }), children: [note] }),
+          Text({ color: mark === '−' ? NEON.red : NEON.cyan, bold: true, children: [mark ? `  ${mark}` : ''] }),
+        ],
+      })
+    }
+    const own = onPrRows(pr)
+    const body: El[] = [heading('On this PR')]
+    if (own.length === 0) body.push(Text({ color: NEON.muted, children: ['  nobody is asked yet'] }))
+    for (const [i, row] of own.entries()) body.push(line(row, i))
+    const more = rows.slice(own.length)
+    body.push(heading(p.found ? `Found for “${fit(p.query, 30)}”` : 'Suggested'))
+    if (p.found && more.length === 0) body.push(Text({ color: NEON.muted, children: ['  no one found · f: search again'] }))
+    else if (!p.found && p.loading)
+      body.push(Text({ color: NEON.cyan, children: [`  ${SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]} finding reviewers…`] }))
+    else if (!p.found && more.length === 0)
+      body.push(Text({ color: NEON.muted, children: ['  no one to suggest · f: find a person or team'] }))
+    for (const [i, row] of more.entries()) body.push(line(row, own.length + i))
+    // What s sends, and how it went
+    const plan = pickerPlan(p)
+    const planned = planText(plan)
+    const status = p.sending
+      ? Text({ color: NEON.cyan, children: ['⟳ sending…'] })
+      : p.error
+        ? Text({ color: NEON.red, wrap: 'wrap', children: [`✗ ${p.error}`] })
+        : planned
+          ? Box({
+              flexDirection: 'row',
+              children: [
+                Text({ color: NEON.muted, children: ['s sends: '] }),
+                Text({ color: NEON.cyan, bold: true, wrap: 'wrap', children: [planned] }),
+              ],
+            })
+          : Text({ color: NEON.muted, children: ['nothing to send yet · x: check or uncheck the selected row'] })
+    const search: El[] =
+      p.searching && Input
+        ? [
+            Input({
+              key: 'reviewer-search',
+              label: 'Find',
+              placeholder: 'login, name or team',
+              value: p.query,
+              submitLabel: 'done',
+              autoFocus: true,
+              onInput: (value: string) => {
+                p.query = value
+                void searchReviewers($, p, value)
+              },
+              onSubmit: (value: string) => {
+                p.query = value.trim()
+                p.searching = false
+                if (!p.query) p.found = undefined
+                void searchReviewers($, p, p.query)
+                redraw()
+                void focusPane($)
+              },
+            }),
+          ]
+        : []
+    const keys = Box({
+      key: 'picker-keys',
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      columnGap: 2,
+      children: [
+        // j / k move, 1-9 check a row: hidden keys, in the help line below
+        Box({
+          display: 'none',
+          children: [
+            key('pick-down', '↓', 'j', () => {
+              p.cursor = Math.min(rows.length - 1, p.cursor + 1)
+              redraw()
+            }),
+            key('pick-up', '↑', 'k', () => {
+              p.cursor = Math.max(0, p.cursor - 1)
+              redraw()
+            }),
+            ...rows.slice(0, 9).map((row, i) =>
+              key(`pick-row-${i + 1}`, String(i + 1), String(i + 1), () => {
+                p.cursor = i
+                toggle(row)
+              }),
+            ),
+          ],
+        }),
+        key('pick-toggle', 'check / uncheck', 'x', () => toggle(rows[p.cursor])),
+        key('pick-find', p.found ? 'search again' : 'find', 'f', () => {
+          p.searching = true
+          redraw()
+        }),
+        key('pick-send', 'send', 's', () => void sendReviewers($, p)),
+        key('pick-open', 'open on GitHub', 'o', async () => void (await $.process.run(['gh', 'pr', 'view', pr.url, '--web'])), true),
+        key('pick-back', p.fromReader ? 'back to the PR' : 'back to list', 'q', back),
+      ],
+    })
+    const tree: El[] = [
+      head,
+      rule(true),
+      ...search,
+      ...body,
+      rule(),
+      status,
+      keys,
+      Text({ color: NEON.muted, children: ['j/k move · 1-9 check a row · a team that assigns members picks them after you send'] }),
+    ]
+    return Box({
+      flexDirection: 'column',
+      children: [
+        ...tree,
+        ...(p.searching
+          ? []
+          : [keyCatcher(kit, tree, (k) => `${k}: no such key here · j/k move · x check · f find · s send · q back`, toast)]),
+      ],
+    })
+  })
+
   // The reader, in the pane while one is open (d): the description, then one file at a time, drawn by Claude Code's
   // own highlighter (the Code element). j/k scroll it by a block of lines, h/l turn the page
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
-    if (e.requestId !== PANE || !diffView) return next(e)
+    if (e.requestId !== PANE || !diffView || picker) return next(e)
     const kit = $.ui.resolve(e)
     const { Box, Link, Code, Markdown } = kit
     const { Text, Button } = glyphed(kit)
@@ -3908,6 +4853,8 @@ export function register(on: On, options: PluginOptions) {
       actOnPr.push(
         key('diff-review', reviews.get(pr.url)?.state === 'running' ? 'cancel AI review' : 'AI review', 'v', () => void aiReview($, pr)),
       )
+    if (mine.some((p) => p.url === pr.url))
+      actOnPr.push(key('diff-reviewers', reviewersKeyLabel(pr, fetchedAt || Date.now()), 'w', () => void openPicker($, pr)))
     actOnPr.push(
       key('diff-explain', mine.some((p) => p.url === pr.url) ? 'diagnose' : 'explain', 'e', () => {
         void $.prompt.submit({ text: explainRequest(pr), asUser: true })
@@ -4230,7 +5177,7 @@ export function register(on: On, options: PluginOptions) {
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     // The diff draws itself (above) while one is open
-    if (e.requestId !== PANE || diffView) return next(e)
+    if (e.requestId !== PANE || diffView || picker) return next(e)
     // Follow the focus, so the hint under the prompt can say where Esc and ctrl+x tab go
     const focused = e.props.isFocused === true
     if (!paneOpen || focused !== paneFocused) {
@@ -4436,6 +5383,7 @@ export function register(on: On, options: PluginOptions) {
         const ready = fixReady.has(pr.url)
         if (fixing || ready || ciState(pr) === 'FAILURE' || ciState(pr) === 'ERROR')
           actions.push(act('act-ci', fixing ? 'push early / stop watching' : ready ? 'push fix' : 'fix CI', 'c', () => ciMenu($, pr)))
+        actions.push(act('act-reviewers', reviewersKeyLabel(pr, now), 'w', () => openPicker($, pr)))
       }
       // An AI review of your own PR is one to fix before others read it; it never approves
       if (isReview || isMine) actions.push(act('act-ai-review', reviewLabel, 'v', () => aiReview($, pr)))
@@ -4496,7 +5444,7 @@ export function register(on: On, options: PluginOptions) {
       const n = pr ? askLabel(pr) : 'this PR'
       const ownTab = 'on your PRs (2: My PRs)'
       // Keys that act on the selected PR, with none selected
-      if (!pr && 'adeimopsvcx'.includes(k))
+      if (!pr && 'adeimopsvcxw'.includes(k))
         return filterText ? `${k}: no PR matches the filter · f: change it` : `${k}: no PR is selected on this tab`
       switch (k) {
         case 'a':
@@ -4522,7 +5470,9 @@ export function register(on: On, options: PluginOptions) {
             ? `The AI review of ${n} left nothing to send`
             : `No AI review findings to send for ${n} · v: AI review`
         case 'w':
-          return tab === 'review' ? 'Every bot PR has an AI review of its current commit' : 'w reviews the bot PRs on To review (1)'
+          return `w asks for reviews ${ownTab} · b: AI review the bots`
+        case 'b':
+          return tab === 'review' ? 'Every bot PR has an AI review of its current commit' : 'b reviews the bot PRs on To review (1)'
         case 'z':
           return 'No snoozed PRs on this tab · x: snooze the selected PR'
         case 'n':
@@ -4591,15 +5541,23 @@ export function register(on: On, options: PluginOptions) {
       if (tab === 'review') return [author, `requested ${elapsed(requestedAt(p), now)} ago`, ciWord(p), size]
       // Where it stands first: what needs you, ready, or what it waits on
       const { group, reasons } = classify(p, now)
+      const again = askAgain(p)
       const state =
         group === 'action'
-          ? `needs you: ${reasons.join(', ')}`
+          ? `needs you: ${reasons.join(', ')}${again.length > 0 ? ` · w: re-request ${again.map(atName).join(', ')}` : ''}`
           : group === 'ready'
             ? 'ready to merge · m: merge'
             : group === 'stale'
               ? `no update for ${cfg.stale_days}+ days`
               : notReadyWhy(p, now)
-      return [state, /\bCI\b/.test(state) ? '' : ciWord(p), size, `updated ${short(p.updatedAt, now)} ago`]
+      // The reviews so far, unless the state names who to ask again already
+      return [
+        state,
+        again.length > 0 ? '' : reviewsNote(p),
+        /\bCI\b/.test(state) ? '' : ciWord(p),
+        size,
+        `updated ${short(p.updatedAt, now)} ago`,
+      ]
     }
 
     // The AI review's rows under a review request: its state, then what blocked it
@@ -4923,11 +5881,11 @@ export function register(on: On, options: PluginOptions) {
     const folds: El[] = []
     // AI review every bot PR in turn: those with no review of their current commit yet
     const unreviewedBots = g.bots.filter((p) => !reviewOfHead(p) && reviews.get(p.url)?.state !== 'running').length
-    // w sits on the bots heading
+    // b sits on the bots heading
     const reviewBotsLabel = botBatch ? `stop AI review (${botBatch.done}/${botBatch.total})` : `AI review ${unreviewedBots} unreviewed`
     const reviewBots =
       tab === 'review' && (unreviewedBots > 0 || botBatch)
-        ? small('review-bots', reviewBotsLabel, 'w', () => {
+        ? small('review-bots', reviewBotsLabel, 'b', () => {
             void reviewAllBots($)
             redraw()
           })
@@ -5011,6 +5969,7 @@ export function register(on: On, options: PluginOptions) {
           [
             ['m', 'merge when ready, after picking a method (a stack: gh stack merge)'],
             ['c', 'CI failed: Claude fixes it in a worktree (asks before push), or re-run'],
+            ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · s in it sends'],
           ],
         ],
         [
@@ -5018,7 +5977,7 @@ export function register(on: On, options: PluginOptions) {
           [
             ['j / k', 'next / previous PR'],
             ['1 / 2', 'To review / My PRs · h / l: the tab to the left / right'],
-            ['w', 'AI review every bot PR not reviewed yet, then approve those that passed in one dialog · w again stops'],
+            ['b', 'AI review every bot PR not reviewed yet, then approve those that passed in one dialog · b again stops'],
             ['z', 'show or hide snoozed PRs'],
             ['f', 'filter by repository, number, title or @author · empty clears it'],
             ['n', 'next page of the details, when they do not fit'],
@@ -5069,7 +6028,11 @@ export function register(on: On, options: PluginOptions) {
       const legend: [string, string, string][] = [
         ['▸ ● ⚙ ┌├└', 'selected · updated since you last selected it · a bot · a stack, bottom (on the base) to top', NEON.pink],
         ['RISK', '▲ HIGH · ◆ MED · ○ LOW from the analysis · … analyzing · · not analyzed', NEON.yellow],
-        ['STATE', '✗ FIX needs you · ✓ RDY ready to merge · … REVW in review · ◇ OLD no update for a while · ⏸ SNZ snoozed', NEON.green],
+        [
+          'STATE',
+          '✗ FIX needs you · ✓ RDY ready to merge · … REVW in review · ○ ASK nobody is asked to review it · ◇ OLD no update for a while · ⏸ SNZ snoozed',
+          NEON.green,
+        ],
         ['', '⟳ WIP Claude is fixing its CI · ⇡ PUSH a fix waits for your push', NEON.cyan],
         [
           'approved',
@@ -5103,7 +6066,7 @@ export function register(on: On, options: PluginOptions) {
         if (name) {
           const label = `── ${name} `
           const onBots = reviewBots && name.startsWith('⚙')
-          const keyWidth = onBots ? textWidth(`· w: ${reviewBotsLabel} `) : 0
+          const keyWidth = onBots ? textWidth(`· b: ${reviewBotsLabel} `) : 0
           list.push(
             Box({
               flexDirection: 'row',
