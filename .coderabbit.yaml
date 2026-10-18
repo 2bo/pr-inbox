@@ -5,9 +5,11 @@ reviews:
   # Request changes on actionable findings, approve once they are resolved.
   # .github/workflows/dependabot-automerge.yml turns that approval into auto-merge for Dependabot PRs
   request_changes_workflow: true
-  # pnpm-lock.yaml is skipped by default; a security update can change only the lockfile
+  # Any pattern without "!" turns the list into an allowlist, so "**" keeps every file in.
+  # "**/pnpm-lock.yaml" lifts CodeRabbit's default block on it: a security update can change only the lockfile
   path_filters:
-    - "pnpm-lock.yaml"
+    - "**"
+    - "**/pnpm-lock.yaml"
   path_instructions:
     - path: "{package.json,pnpm-lock.yaml}"
       instructions: |
