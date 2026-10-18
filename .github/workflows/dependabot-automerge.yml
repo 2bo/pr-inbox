@@ -1,20 +1,22 @@
-# Turns on auto-merge for a Dependabot PR once CodeRabbit approves it.
+# Keeps auto-merge on a Dependabot PR only while CodeRabbit's latest review approves the current head.
 # GitHub merges it only after the required CI check passes (ruleset on main).
 # Major updates are left for a person: the model's approval is never the only gate.
+#
+# Each run decides from the PR as it is now, not from the event that started it,
+# so runs that arrive late or out of order still leave the right state
 name: Dependabot auto-merge
 
 on:
   pull_request_review:
-    types: [submitted]
+    types: [submitted, dismissed]
   pull_request:
     types: [synchronize]
 
+# Workflows started by Dependabot get a read-only token unless the permissions key raises it
 permissions:
   contents: write
   pull-requests: write
 
-# One run at a time per PR, in event order, so turning auto-merge off for a new push
-# cannot land after CodeRabbit's approval of that push turned it back on
 concurrency:
   group: dependabot-automerge-${{ github.event.pull_request.number }}
   cancel-in-progress: false
@@ -22,9 +24,6 @@ concurrency:
 jobs:
   automerge:
     if: >-
-      github.event_name == 'pull_request_review' &&
-      github.event.review.state == 'approved' &&
-      github.event.review.user.login == 'coderabbitai[bot]' &&
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
@@ -33,27 +32,23 @@ jobs:
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      # Approved for the commit CodeRabbit reviewed; refuse if the head moved since
-      - if: steps.metadata.outputs.update-type != 'version-update:semver-major'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          REVIEWED: ${{ github.event.review.commit_id }}
-        run: gh pr merge --auto --squash --match-head-commit "$REVIEWED" "$PR_URL"
-
-  # A new commit (a Dependabot rebase or anyone's push) has not been approved yet:
-  # turn auto-merge off until CodeRabbit approves the new head
-  unapproved-push:
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.user.login == 'dependabot[bot]' &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    steps:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
         run: |
-          if [ "$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')" = true ]; then
-            gh pr merge --disable-auto "$PR_URL"
+          head=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+          # CodeRabbit's latest review; a push dismisses older approvals (ruleset on main)
+          latest=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" \
+            --jq '.[] | select(.user.login == "coderabbitai[bot]") | "\(.state) \(.commit_id)"' | tail -n 1)
+          enabled=$(gh api "repos/$REPO/pulls/$PR" --jq '.auto_merge != null')
+          if [ "$latest" = "APPROVED $head" ] && [ "$UPDATE_TYPE" != version-update:semver-major ]; then
+            echo "CodeRabbit approved $head: auto-merge on"
+            gh pr merge --auto --squash --match-head-commit "$head" "$PR" --repo "$REPO"
+          elif [ "$enabled" = true ]; then
+            echo "Head $head is not approved (latest: ${latest:-none}): auto-merge off"
+            gh pr merge --disable-auto "$PR" --repo "$REPO"
+          else
+            echo "Head $head is not approved (latest: ${latest:-none}): nothing to do"
           fi
