@@ -22,6 +22,12 @@ Run `pnpm run check` before every commit; all of it must pass. `claude plugin va
 - `tests/pr-inbox.test.ts` — `claude plugin test`. GitHub, the model, the store and the environment are stubbed; tests must not touch the network
 - `.claude-plugin/plugin.json` — manifest and `userConfig`; `.claude-plugin/marketplace.json` lists this repo as a one-plugin marketplace
 
+## CI and dependency updates
+
+- `.github/workflows/ci.yml` runs `validate`, `lint` and `test` with the latest Claude Code. It skips `tsc`: the types are written only by an interactive, signed-in session, so run `pnpm run check` locally as well
+- Dependabot (`.github/dependabot.yml`) opens weekly PRs for npm and GitHub Actions. CodeRabbit (`.coderabbit.yaml`) reviews them and approves once its findings are resolved; `.github/workflows/dependabot-automerge.yml` then turns on auto-merge, pinned to the reviewed commit, and the `main` ruleset merges only after CI passes. Major updates are left for a person
+- Keep actions pinned to a full commit SHA with the version in a comment
+
 ## Mod API
 
 - The API changes between Claude Code versions. Check `.claude-plugin/types/claude-code/index.d.ts` (generated for the installed version, gitignored) and https://code.claude.com/docs/en/plugins/mods/ before relying on memory
