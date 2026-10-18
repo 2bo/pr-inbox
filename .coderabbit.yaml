@@ -21,7 +21,9 @@ reviews:
     - path: ".github/**"
       instructions: |
         CI and automation. Actions must stay pinned to a full commit SHA with the version in a comment.
-        Request changes for any new permission, secret, trigger such as pull_request_target, or a step that runs code from the PR with write access.
+        Request changes for any new permission or secret, for a trigger that gives write access or secrets to code or text from a PR, fork or comment
+        (pull_request_target, workflow_run, issue_comment and the like), and for a step that checks out or runs code from the PR with write access.
+        A trigger that only starts a job which reads the PR through the API and runs no PR code is not by itself a reason to request changes.
   pre_merge_checks:
     docstrings:
       mode: "off"
