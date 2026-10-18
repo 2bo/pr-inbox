@@ -6,14 +6,23 @@ name: Dependabot auto-merge
 on:
   pull_request_review:
     types: [submitted]
+  pull_request:
+    types: [synchronize]
 
 permissions:
   contents: write
   pull-requests: write
 
+# One run at a time per PR, in event order, so turning auto-merge off for a new push
+# cannot land after CodeRabbit's approval of that push turned it back on
+concurrency:
+  group: dependabot-automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
 jobs:
   automerge:
     if: >-
+      github.event_name == 'pull_request_review' &&
       github.event.review.state == 'approved' &&
       github.event.review.user.login == 'coderabbitai[bot]' &&
       github.event.pull_request.user.login == 'dependabot[bot]' &&
@@ -31,3 +40,20 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           REVIEWED: ${{ github.event.review.commit_id }}
         run: gh pr merge --auto --squash --match-head-commit "$REVIEWED" "$PR_URL"
+
+  # A new commit (a Dependabot rebase or anyone's push) has not been approved yet:
+  # turn auto-merge off until CodeRabbit approves the new head
+  unapproved-push:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          if [ "$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')" = true ]; then
+            gh pr merge --disable-auto "$PR_URL"
+          fi
