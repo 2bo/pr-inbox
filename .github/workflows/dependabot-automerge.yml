@@ -1,5 +1,6 @@
 # Keeps auto-merge on a Dependabot PR only while CodeRabbit's latest review approves the current head.
-# GitHub merges it only after the required CI check passes (ruleset on main).
+# GitHub merges it only with the required CI check passed and an approval of the head (ruleset on main),
+# so a review dismissed after this run still blocks the merge.
 # Major updates are left for a person: the model's approval is never the only gate.
 #
 # Each run decides from the PR as it is now, not from the event that started it,
@@ -8,7 +9,7 @@ name: Dependabot auto-merge
 
 on:
   pull_request_review:
-    types: [submitted, dismissed]
+    types: [submitted]
   pull_request:
     types: [synchronize]
 
