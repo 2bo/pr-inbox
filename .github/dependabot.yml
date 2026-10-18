@@ -9,8 +9,10 @@ updates:
     cooldown:
       default-days: 7
     groups:
+      # typescript gets PRs of its own: CI cannot type-check, so a person merges those
       dev-dependencies:
         patterns: ["*"]
+        exclude-patterns: ["typescript"]
         update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /
