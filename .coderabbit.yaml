@@ -5,9 +5,11 @@ reviews:
   # Request changes on actionable findings, approve once they are resolved.
   # .github/workflows/dependabot-automerge.yml turns that approval into auto-merge for Dependabot PRs
   request_changes_workflow: true
-  # pnpm-lock.yaml is skipped by default; a security update can change only the lockfile
+  # Any pattern without "!" turns the list into an allowlist, so "**" keeps every file in.
+  # "**/pnpm-lock.yaml" lifts CodeRabbit's default block on it: a security update can change only the lockfile
   path_filters:
-    - "pnpm-lock.yaml"
+    - "**"
+    - "**/pnpm-lock.yaml"
   path_instructions:
     - path: "{package.json,pnpm-lock.yaml}"
       instructions: |
@@ -19,7 +21,9 @@ reviews:
     - path: ".github/**"
       instructions: |
         CI and automation. Actions must stay pinned to a full commit SHA with the version in a comment.
-        Request changes for any new permission, secret, trigger such as pull_request_target, or a step that runs code from the PR with write access.
+        Request changes for any new permission or secret, for a trigger that gives write access or secrets to code or text from a PR, fork or comment
+        (pull_request_target, workflow_run, issue_comment and the like), and for a step that checks out or runs code from the PR with write access.
+        A trigger that only starts a job which reads the PR through the API and runs no PR code is not by itself a reason to request changes.
   pre_merge_checks:
     docstrings:
       mode: "off"

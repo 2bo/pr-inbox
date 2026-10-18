@@ -25,7 +25,8 @@ Run `pnpm run check` before every commit; all of it must pass. `claude plugin va
 ## CI and dependency updates
 
 - `.github/workflows/ci.yml` runs `validate`, `lint` and `test` with the latest Claude Code. It skips `tsc`: the types are written only by an interactive, signed-in session, so run `pnpm run check` locally as well
-- Dependabot (`.github/dependabot.yml`) opens weekly PRs for npm and GitHub Actions. CodeRabbit (`.coderabbit.yaml`) reviews them and approves once its findings are resolved; `.github/workflows/dependabot-automerge.yml` then turns on auto-merge, pinned to the reviewed commit, and the `main` ruleset merges only after CI passes. Major updates are left for a person
+- Dependabot (`.github/dependabot.yml`) opens weekly PRs for npm and GitHub Actions, for versions released at least 7 days ago (`cooldown`; security updates come at once). CodeRabbit (`.coderabbit.yaml`) reviews them and approves once its findings are resolved; `.github/workflows/dependabot-automerge.yml` keeps auto-merge on only while CodeRabbit's latest review approves the current head (each run decides from the PR as it is now, so late or reordered runs are harmless), and the `main` ruleset merges only with CI passed and one approval of the head (stale approvals are dismissed on push). Major updates are left for a person
+- `.github/CODEOWNERS` requests the maintainer's review on every PR, so a Dependabot PR that stops (CI failed, findings, a rate-limited review) stays visible in pr-inbox
 - Keep actions pinned to a full commit SHA with the version in a comment
 
 ## Mod API

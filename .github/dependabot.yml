@@ -4,6 +4,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Version updates wait a week after a release, so a compromised release is likely pulled first.
+    # Security updates are not delayed
+    cooldown:
+      default-days: 7
     groups:
       dev-dependencies:
         patterns: ["*"]
@@ -12,6 +16,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]
