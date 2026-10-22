@@ -22,10 +22,13 @@ type PR = {
   isCrossRepository: boolean
   additions: number
   deletions: number
-  repository: { nameWithOwner: string }
+  // autoMergeAllowed: the repository's setting (Settings → Allow auto-merge); missing on a snapshot from before it was read
+  repository: { nameWithOwner: string; autoMergeAllowed?: boolean }
   author: { login: string; __typename: string } | null
   reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN'
+  // Auto-merge is on: GitHub merges it with this method (MERGE, SQUASH or REBASE) once every requirement is met
+  autoMergeRequest?: { mergeMethod: string } | null
   commits: { nodes: { commit: { statusCheckRollup: { state: string; contexts?: { nodes: (CheckContext | null)[] } } | null } }[] }
   headRefName?: string
   // How much is being said: comments, and threads on lines
@@ -212,9 +215,10 @@ ${REVIEWED_FRAGMENT}
 ${ASKED_FRAGMENT}
 fragment pr on PullRequest {
   number title url isDraft createdAt updatedAt headRefOid authorAssociation isCrossRepository additions deletions
-  repository { nameWithOwner }
+  repository { nameWithOwner autoMergeAllowed }
   author { login __typename }
   reviewDecision mergeable headRefName
+  autoMergeRequest { mergeMethod }
   comments { totalCount } reviewThreads { totalCount }
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
   stack { number size baseRefName entries(first: 20) { nodes { position pullRequest { number state isDraft } } } }
@@ -435,7 +439,10 @@ function cleanPr(pr: PR): PR {
     authorAssociation: typeof pr.authorAssociation === 'string' ? pr.authorAssociation : 'NONE',
     isCrossRepository: pr.isCrossRepository !== false,
     author: pr.author ? { ...pr.author, login: clean(pr.author.login) } : null,
-    repository: { nameWithOwner: clean(pr.repository.nameWithOwner) },
+    repository: {
+      nameWithOwner: clean(pr.repository.nameWithOwner),
+      ...(typeof pr.repository.autoMergeAllowed === 'boolean' ? { autoMergeAllowed: pr.repository.autoMergeAllowed } : {}),
+    },
   }
 }
 
@@ -499,20 +506,34 @@ function byRequestedAt(a: PR, b: PR): number {
 
 // Sort my PRs into action / ready / waiting / stale
 function classify(pr: PR, now: number): { group: 'action' | 'ready' | 'waiting' | 'stale'; reasons: string[] } {
+  const reasons = blockers(pr)
+  if (reasons.length > 0) return { group: 'action', reasons }
+  if (now - Date.parse(pr.updatedAt) > cfg.stale_days * DAY) return { group: 'stale', reasons }
+  if (readyToMerge(pr)) return { group: 'ready', reasons }
+  return { group: 'waiting', reasons }
+}
+
+// What needs someone before the PR can merge
+function blockers(pr: PR): string[] {
   const ci = ciState(pr)
   const reasons: string[] = []
   if (pr.reviewDecision === 'CHANGES_REQUESTED') reasons.push('changes requested')
   if (ci === 'FAILURE' || ci === 'ERROR') reasons.push('CI failed')
   if (pr.mergeable === 'CONFLICTING') reasons.push('conflict')
-  if (reasons.length > 0) return { group: 'action', reasons }
-  if (now - Date.parse(pr.updatedAt) > cfg.stale_days * DAY) return { group: 'stale', reasons }
-  // Approved, or in a repository whose rules ask for no review (GitHub gives no decision then), once GitHub has
-  // checked that it merges cleanly
+  return reasons
+}
+
+// Ready to merge now: nothing blocks it, not a draft, approved (or in a repository whose rules ask for no review:
+// GitHub gives no decision then, so wait until it has checked that it merges cleanly), and CI passed or none
+function readyToMerge(pr: PR): boolean {
+  const ci = ciState(pr)
   const reviewed = pr.reviewDecision === 'APPROVED' || (pr.reviewDecision === null && pr.mergeable === 'MERGEABLE')
-  if (!pr.isDraft && reviewed && (ci === 'SUCCESS' || ci === 'NONE')) {
-    return { group: 'ready', reasons }
-  }
-  return { group: 'waiting', reasons }
+  return blockers(pr).length === 0 && !pr.isDraft && reviewed && (ci === 'SUCCESS' || ci === 'NONE')
+}
+
+// PRs m may merge: your own, and a bot's review requests (dependabot, renovate and the like) you keep up with
+function mayMerge(pr: PR): boolean {
+  return mine.some((p) => p.url === pr.url) || (isBot(pr) && [...review, ...approved].some((p) => p.url === pr.url))
 }
 
 function isSnoozed(pr: PR): boolean {
@@ -3635,6 +3656,7 @@ const ASCII: Record<string, string> = {
   '◌': '~',
   '⟳': '@',
   '⇡': '^',
+  '⇢': '>',
   '↻': 'R',
   '✓': 'v',
   '✗': 'x',
@@ -3733,13 +3755,14 @@ function badgeOf(pr: PR): Cell {
   const group = classify(pr, fetchedAt || Date.now()).group
   // Waiting on reviews with nobody asked: ask someone (w)
   if (needsReviewer(pr, fetchedAt || Date.now())) return { text: '○ ASK ', color: NEON.yellow, bold: true }
-  return group === 'action'
-    ? { text: '✗ FIX ', color: NEON.red, bold: true }
-    : group === 'ready'
-      ? { text: '✓ RDY ', color: NEON.green, bold: true }
-      : group === 'waiting'
-        ? { text: '… REVW', color: NEON.yellow }
-        : { text: '◇ OLD ' }
+  if (group === 'action') return { text: '✗ FIX ', color: NEON.red, bold: true }
+  // Auto-merge is on: GitHub merges it once it is ready, nothing to do but wait
+  if (pr.autoMergeRequest && group !== 'ready') return { text: '⇢ AUTO', color: NEON.cyan }
+  return group === 'ready'
+    ? { text: '✓ RDY ', color: NEON.green, bold: true }
+    : group === 'waiting'
+      ? { text: '… REVW', color: NEON.yellow }
+      : { text: '◇ OLD ' }
 }
 
 // How long it has waited, as a three-cell gauge that fills and heats up: green, then yellow, then red
@@ -3970,15 +3993,69 @@ const MERGE_METHODS: Record<string, string> = {
   'Rebase and merge': '--rebase',
 }
 
-// Merges a ready PR after the person picks a method in a dialog (Cancel selected first). The merge is pinned to the
-// commit on screen: if the head moved, GitHub refuses it
 // A command that could not start (gh not installed) reads as a failed run, so each caller says what went wrong
 function ghMissing(err: unknown): { exitCode: number; stdout: string; stderr: string } {
   return { exitCode: 127, stdout: '', stderr: friendlyError(messageOf(err)) }
 }
 
+// What m does on a PR you may merge (mayMerge): merge it now, turn auto-merge on so GitHub merges it once it is
+// ready, or turn auto-merge off again. Nothing on a stacked PR that is not ready (gh stack has no auto-merge, and a plain one would
+// land it in the branch below), in a repository whose settings allow no auto-merge, on a draft or on a conflict
+// (GitHub takes no auto-merge on those)
+type MergeAction = 'merge' | 'auto-merge' | 'auto-merge off'
+// What the m key says for each, so a merge now and an auto-merge later read apart at a glance
+const MERGE_LABELS: Record<MergeAction, string> = {
+  merge: 'merge now',
+  'auto-merge': 'auto-merge when ready',
+  'auto-merge off': 'auto-merge off',
+}
+
+function mergeAction(pr: PR): MergeAction | undefined {
+  if (readyToMerge(pr)) return 'merge'
+  if (stackKey(pr)) return undefined
+  if (pr.autoMergeRequest) return 'auto-merge off'
+  if (pr.repository.autoMergeAllowed === false || pr.isDraft || pr.mergeable === 'CONFLICTING') return undefined
+  return 'auto-merge'
+}
+
+// Why m offers no auto-merge on this PR (see mergeAction)
+function noAutoMergeWhy(pr: PR): string {
+  if (stackKey(pr)) return 'it is in a stack'
+  if (pr.repository.autoMergeAllowed === false) return `${pr.repository.nameWithOwner} does not allow it (repository settings)`
+  return pr.isDraft ? 'it is a draft' : 'it has a conflict'
+}
+
+// The method auto-merge will use, in a word; GitHub's enum is matched, never drawn
+function autoMergeWord(pr: PR): string {
+  const words: Record<string, string> = { MERGE: 'merge commit', SQUASH: 'squash', REBASE: 'rebase' }
+  return words[pr.autoMergeRequest?.mergeMethod ?? ''] ?? 'on'
+}
+
+// On a bot's PR you may merge: what m does, or that auto-merge is on
+function mergeHint(pr: PR): string {
+  const merge = mayMerge(pr) ? mergeAction(pr) : undefined
+  if (pr.autoMergeRequest) return `auto-merge on (${autoMergeWord(pr)})${merge === 'auto-merge off' ? ' · m: turn it off' : ''}`
+  return merge ? `m: ${MERGE_LABELS[merge]}` : ''
+}
+
+// Why the PR is not ready, without the key hint notReadyWhy may add
+function notReadyShort(pr: PR, now: number): string {
+  return notReadyWhy(pr, now).replace(/ · [a-z]: .*$/, '')
+}
+
+// m: merge now when ready, otherwise auto-merge on or off (see mergeAction)
 async function mergePr($: EngineInterface, pr: PR): Promise<void> {
+  const action = mergeAction(pr)
+  if (action === 'auto-merge') return enableAutoMerge($, pr)
+  if (action === 'auto-merge off') return disableAutoMerge($, pr)
+  if (action !== 'merge') return
   if (stackKey(pr)) return mergeStack($, pr)
+  return mergeNow($, pr)
+}
+
+// Merges a ready PR after the person picks a method in a dialog (Cancel selected first). The merge is pinned to the
+// commit on screen: if the head moved, GitHub refuses it
+async function mergeNow($: EngineInterface, pr: PR): Promise<void> {
   const sha = pr.headRefOid.slice(0, 7)
   if (!REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) {
     $.ui.toast('Merge failed: unexpected repository name or commit id', { timeoutMs: 8000 })
@@ -3987,9 +4064,9 @@ async function mergePr($: EngineInterface, pr: PR): Promise<void> {
   const title = fit(pr.title.replace(/["“”]/g, "'"), 80)
   let answer = ''
   try {
-    answer = await $.ui.ask(`Merge ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (“${title}”)?`, {
+    answer = await $.ui.ask(`Merge ${pr.repository.nameWithOwner}#${pr.number} now, at ${sha} (“${title}”)?`, {
       options: ['Cancel', ...Object.keys(MERGE_METHODS)],
-      header: 'Merge',
+      header: 'Merge now',
     })
   } catch {
     // The dialog was dismissed
@@ -4013,6 +4090,75 @@ async function mergePr($: EngineInterface, pr: PR): Promise<void> {
   $.ui.log(
     `pr-inbox merged ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${answer.toLowerCase()}): you chose it in the dialog of m`,
   )
+  await refresh($)
+}
+
+// Turns auto-merge on after the person picks a method in a dialog (Cancel selected first): GitHub merges the PR on
+// its own once every review and check passes. Turning it on is pinned to the commit on screen; the merge itself
+// comes later, at whatever commit the PR is at then, as auto-merge stays on through pushes by people with write
+// access. gh merges at once instead when GitHub already finds the PR ready; the dialog says so
+async function enableAutoMerge($: EngineInterface, pr: PR): Promise<void> {
+  const sha = pr.headRefOid.slice(0, 7)
+  if (!REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) {
+    $.ui.toast('Auto-merge failed: unexpected repository name or commit id', { timeoutMs: 8000 })
+    return
+  }
+  const title = fit(pr.title.replace(/["“”]/g, "'"), 80)
+  const why = notReadyShort(pr, fetchedAt || Date.now())
+  let answer = ''
+  try {
+    answer = await $.ui.ask(
+      `Turn auto-merge on for ${pr.repository.nameWithOwner}#${pr.number} (“${title}”, now at ${sha}: ${why})? GitHub then merges it on its own once every review and check passes, at the commit it is at then; if it is ready already, it merges now.`,
+      { options: ['Cancel', ...Object.keys(MERGE_METHODS)], header: 'Auto-merge' },
+    )
+  } catch {
+    // The dialog was dismissed
+  }
+  await focusPane($)
+  const flag = MERGE_METHODS[answer]
+  if (!flag) return
+  const r = await $.process.run(['gh', 'pr', 'merge', pr.url, '--auto', flag, '--match-head-commit', pr.headRefOid]).catch(ghMissing)
+  if (r.exitCode !== 0) {
+    const moved = /head|match|expected/i.test(r.stderr)
+    $.ui.toast(
+      moved
+        ? `Auto-merge not turned on: ${askLabel(pr)} has new commits since ${sha} · refreshed`
+        : `Auto-merge not turned on: ${fit(clean(r.stderr), 90)} · refreshed`,
+      { timeoutMs: 10000 },
+    )
+    await refresh($)
+    return
+  }
+  $.ui.toast(`✦ auto-merge on: ${askLabel(pr)} merges by itself once it is ready · ${answer.toLowerCase()}`)
+  $.ui.log(
+    `pr-inbox turned auto-merge on for ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${answer.toLowerCase()}): you chose it in the dialog of m`,
+  )
+  await refresh($)
+}
+
+// Turns auto-merge off after the person confirms it in a dialog (Cancel selected first)
+async function disableAutoMerge($: EngineInterface, pr: PR): Promise<void> {
+  if (!REPO_NAME.test(pr.repository.nameWithOwner)) return
+  const off = 'Turn auto-merge off'
+  let answer = ''
+  try {
+    answer = await $.ui.ask(
+      `Auto-merge is on for ${pr.repository.nameWithOwner}#${pr.number} (${autoMergeWord(pr)}): GitHub merges it once every review and check passes. Turn it off?`,
+      { options: ['Cancel', off], header: 'Auto-merge' },
+    )
+  } catch {
+    // The dialog was dismissed
+  }
+  await focusPane($)
+  if (answer !== off) return
+  const r = await $.process.run(['gh', 'pr', 'merge', pr.url, '--disable-auto']).catch(ghMissing)
+  if (r.exitCode !== 0) {
+    $.ui.toast(`Auto-merge still on: ${fit(clean(r.stderr), 90)} · refreshed`, { timeoutMs: 10000 })
+    await refresh($)
+    return
+  }
+  $.ui.toast(`auto-merge off for ${askLabel(pr)}`)
+  $.ui.log(`pr-inbox turned auto-merge off for ${pr.repository.nameWithOwner}#${pr.number}: you chose it in the dialog of m`)
   await refresh($)
 }
 
@@ -5377,13 +5523,18 @@ export function register(on: On, options: PluginOptions) {
       if (isReview && !running) actions.push(act('act-approve', 'approve', 'a', () => approve($, pr)))
       // Approved before and changed since: approve again
       if (isApproved(pr) && approvalOutdated(pr)) actions.push(act('act-approve', 'approve again', 'a', () => approve($, pr)))
+      // A bot's PR (dependabot, renovate …) is yours to merge too, once you have decided on it
+      const merge = mayMerge(pr) ? mergeAction(pr) : undefined
+      if (merge && !isMine) actions.push(act('act-merge', MERGE_LABELS[merge], 'm', () => mergePr($, pr)))
       if (isMine) {
-        if (classify(pr, now).group === 'ready') actions.push(act('act-merge', 'merge', 'm', () => mergePr($, pr)))
+        // Merge now comes first; auto-merge (on or off) is a quieter key, after fixing CI and the reviewers
+        if (merge === 'merge') actions.push(act('act-merge', MERGE_LABELS[merge], 'm', () => mergePr($, pr)))
         const fixing = fixJob?.pr.url === pr.url
         const ready = fixReady.has(pr.url)
         if (fixing || ready || ciState(pr) === 'FAILURE' || ciState(pr) === 'ERROR')
           actions.push(act('act-ci', fixing ? 'push early / stop watching' : ready ? 'push fix' : 'fix CI', 'c', () => ciMenu($, pr)))
         actions.push(act('act-reviewers', reviewersKeyLabel(pr, now), 'w', () => openPicker($, pr)))
+        if (merge && merge !== 'merge') actions.push(act('act-merge', MERGE_LABELS[merge], 'm', () => mergePr($, pr)))
       }
       // An AI review of your own PR is one to fix before others read it; it never approves
       if (isReview || isMine) actions.push(act('act-ai-review', reviewLabel, 'v', () => aiReview($, pr)))
@@ -5461,8 +5612,8 @@ export function register(on: On, options: PluginOptions) {
         case 'c':
           return pr && mine.some((p) => p.url === pr.url) ? `CI has not failed on ${n}` : `c fixes failed CI ${ownTab}`
         case 'm':
-          if (!pr || !mine.some((p) => p.url === pr.url)) return `m merges ${ownTab}`
-          return `${n} is not ready to merge: ${notReadyWhy(pr, now)}`
+          if (!pr || !mayMerge(pr)) return `m merges ${ownTab}, and the bots' PRs on To review (1)`
+          return `${n} is not ready to merge: ${notReadyWhy(pr, now)} · no auto-merge: ${noAutoMergeWhy(pr)}`
         case 'i':
           return `No AI review of ${n} yet · v: AI review`
         case 's':
@@ -5536,20 +5687,27 @@ export function register(on: On, options: PluginOptions) {
         const who = autoApproved.has(p.url) ? 'approved automatically by the AI review' : 'approved by you'
         const when = a ? `${who} ${elapsed(a.at, now)} ago${a.oid ? ` at ${a.oid.slice(0, 7)}` : ''}` : who
         const why = approvedWhy(p, now)
-        return [author, when, why, /\bCI\b/.test(why) ? '' : ciWord(p), size]
+        return [author, when, why, /\bCI\b/.test(why) ? '' : ciWord(p), size, mergeHint(p)]
       }
-      if (tab === 'review') return [author, `requested ${elapsed(requestedAt(p), now)} ago`, ciWord(p), size]
+      if (tab === 'review') return [author, `requested ${elapsed(requestedAt(p), now)} ago`, ciWord(p), size, mergeHint(p)]
       // Where it stands first: what needs you, ready, or what it waits on
       const { group, reasons } = classify(p, now)
       const again = askAgain(p)
+      const merge = mergeAction(p)
+      // Auto-merge: on, with its method (m turns it off), or the key that turns it on
+      const auto = p.autoMergeRequest
+        ? ` · auto-merge on (${autoMergeWord(p)})${merge === 'auto-merge off' ? ' · m: turn it off' : ''}`
+        : merge === 'auto-merge'
+          ? ' · m: auto-merge when ready'
+          : ''
       const state =
-        group === 'action'
+        (group === 'action'
           ? `needs you: ${reasons.join(', ')}${again.length > 0 ? ` · w: re-request ${again.map(atName).join(', ')}` : ''}`
           : group === 'ready'
-            ? 'ready to merge · m: merge'
+            ? 'ready to merge · m: merge now'
             : group === 'stale'
               ? `no update for ${cfg.stale_days}+ days`
-              : notReadyWhy(p, now)
+              : notReadyWhy(p, now)) + auto
       // The reviews so far, unless the state names who to ask again already
       return [
         state,
@@ -5967,7 +6125,10 @@ export function register(on: On, options: PluginOptions) {
         [
           'your PRs (2)',
           [
-            ['m', 'merge when ready, after picking a method (a stack: gh stack merge)'],
+            [
+              'm',
+              'ready: merge now, after picking a method (a stack: gh stack merge) · not ready: auto-merge when ready (⇢ AUTO), or off again · also on bot PRs (1)',
+            ],
             ['c', 'CI failed: Claude fixes it in a worktree (asks before push), or re-run'],
             ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · s in it sends'],
           ],
@@ -6030,7 +6191,7 @@ export function register(on: On, options: PluginOptions) {
         ['RISK', '▲ HIGH · ◆ MED · ○ LOW from the analysis · … analyzing · · not analyzed', NEON.yellow],
         [
           'STATE',
-          '✗ FIX needs you · ✓ RDY ready to merge · … REVW in review · ○ ASK nobody is asked to review it · ◇ OLD no update for a while · ⏸ SNZ snoozed',
+          '✗ FIX needs you · ✓ RDY ready to merge · … REVW in review · ⇢ AUTO auto-merge on, merges when ready · ○ ASK nobody is asked to review it · ◇ OLD no update for a while · ⏸ SNZ snoozed',
           NEON.green,
         ],
         ['', '⟳ WIP Claude is fixing its CI · ⇡ PUSH a fix waits for your push', NEON.cyan],

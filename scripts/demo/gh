@@ -144,6 +144,8 @@ const MINE = [
     additions: 132,
     deletions: 118,
     ...ci('PENDING'),
+    // Auto-merge is on: GitHub merges it once lena-park approves and CI passes
+    autoMergeRequest: { mergeMethod: 'SQUASH' },
   }),
   // Nobody asked to review it yet
   pr('infra', 88, 'Tune autoscaling thresholds for queue workers', 'you', { ...nobody, additions: 14, deletions: 8 }),
