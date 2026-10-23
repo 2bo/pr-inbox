@@ -23,7 +23,8 @@ type PR = {
   additions: number
   deletions: number
   // autoMergeAllowed: the repository's setting (Settings → Allow auto-merge); missing on a snapshot from before it was read
-  repository: { nameWithOwner: string; autoMergeAllowed?: boolean }
+  // defaultBranchRef: the branch the repository opens on, never the top of a stack made by hand
+  repository: { nameWithOwner: string; autoMergeAllowed?: boolean; defaultBranchRef?: { name: string } | null }
   author: { login: string; __typename: string } | null
   reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN'
@@ -31,6 +32,8 @@ type PR = {
   autoMergeRequest?: { mergeMethod: string } | null
   commits: { nodes: { commit: { statusCheckRollup: { state: string; contexts?: { nodes: (CheckContext | null)[] } } | null } }[] }
   headRefName?: string
+  // The branch it merges into
+  baseRefName?: string
   // How much is being said: comments, and threads on lines
   comments?: { totalCount: number }
   reviewThreads?: { totalCount: number }
@@ -215,9 +218,9 @@ ${REVIEWED_FRAGMENT}
 ${ASKED_FRAGMENT}
 fragment pr on PullRequest {
   number title url isDraft createdAt updatedAt headRefOid authorAssociation isCrossRepository additions deletions
-  repository { nameWithOwner autoMergeAllowed }
+  repository { nameWithOwner autoMergeAllowed defaultBranchRef { name } }
   author { login __typename }
-  reviewDecision mergeable headRefName
+  reviewDecision mergeable headRefName baseRefName
   autoMergeRequest { mergeMethod }
   comments { totalCount } reviewThreads { totalCount }
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
@@ -442,6 +445,9 @@ function cleanPr(pr: PR): PR {
     repository: {
       nameWithOwner: clean(pr.repository.nameWithOwner),
       ...(typeof pr.repository.autoMergeAllowed === 'boolean' ? { autoMergeAllowed: pr.repository.autoMergeAllowed } : {}),
+      ...(typeof pr.repository.defaultBranchRef?.name === 'string'
+        ? { defaultBranchRef: { name: pr.repository.defaultBranchRef.name } }
+        : {}),
     },
   }
 }
@@ -574,47 +580,117 @@ function groups(now: number): Record<Group, PR[]> {
   return g
 }
 
-// Stacks: which stack a PR is in (per repository), and where
+// Stacks made with gh stack: which stack a PR is in (per repository). Only these merge as a stack (m)
 function stackKey(pr: PR): string {
   return pr.stack && pr.stack.size > 1 ? `${pr.repository.nameWithOwner}#${pr.stack.number}` : ''
 }
 
-function stackPosition(pr: PR): number {
-  return pr.stackEntry?.position ?? 0
+// Stacks made by hand: a PR whose base branch is the head branch of another open PR in the same repository sits on
+// that PR. Found among the PRs fetched (yours, review requests, those you approved); position 1 is on a branch no
+// fetched PR opens, the next to merge into it. Branches from forks are left out: a fork's branch name says nothing
+const TRUNKS = new Set(['main', 'master', 'develop', 'development', 'dev', 'staging', 'production', 'trunk'])
+type HandStack = { key: string; position: number; size: number; below?: PR }
+let handStacks = new Map<string, HandStack>()
+function findHandStacks(): Map<string, HandStack> {
+  const all = new Map<string, PR>()
+  for (const p of [...mine, ...review, ...approved]) all.set(p.url, p)
+  const prs = [...all.values()].filter((p) => !stackKey(p))
+  // A PR from a long-lived branch (a release PR, develop into main) is no stack: what targets that branch merges into
+  // it, not on top of the release
+  const byHead = new Map<string, PR>()
+  for (const p of prs) {
+    const head = p.headRefName
+    if (p.isCrossRepository || !head || TRUNKS.has(head) || head === p.repository.defaultBranchRef?.name) continue
+    byHead.set(`${p.repository.nameWithOwner}:${head}`, p)
+  }
+  const parent = (p: PR): PR | undefined => {
+    const q = p.baseRefName ? byHead.get(`${p.repository.nameWithOwner}:${p.baseRefName}`) : undefined
+    return q && q.url !== p.url ? q : undefined
+  }
+  // Each PR's bottom and its depth above it; a loop of branches (should not happen) is no stack
+  const placed = new Map<string, { root: PR; position: number; below?: PR }>()
+  for (const p of prs) {
+    const chain: PR[] = [p]
+    let q = parent(p)
+    while (q && !chain.includes(q) && chain.length <= 50) {
+      chain.push(q)
+      q = parent(q)
+    }
+    if (q) continue
+    placed.set(p.url, { root: chain.at(-1) as PR, position: chain.length, ...(chain[1] ? { below: chain[1] } : {}) })
+  }
+  const sizes = new Map<string, { members: number; top: number }>()
+  for (const x of placed.values()) {
+    const s = sizes.get(x.root.url) ?? { members: 0, top: 0 }
+    sizes.set(x.root.url, { members: s.members + 1, top: Math.max(s.top, x.position) })
+  }
+  const out = new Map<string, HandStack>()
+  for (const [url, x] of placed) {
+    const s = sizes.get(x.root.url)
+    if (!s || s.members < 2) continue
+    out.set(url, {
+      key: `${x.root.repository.nameWithOwner}@${x.root.url}`,
+      position: x.position,
+      size: s.top,
+      ...(x.below ? { below: x.below } : {}),
+    })
+  }
+  return out
+}
+
+// Any stack a PR is in, as the list draws it: gh stack's first, else one made by hand
+function listStack(pr: PR): { key: string; position: number; size: number } | undefined {
+  const key = stackKey(pr)
+  if (key) return { key, position: pr.stackEntry?.position ?? 0, size: pr.stack?.size ?? 0 }
+  return handStacks.get(pr.url)
 }
 
 // The rail drawn left of a stacked PR: ┌ at the bottom of the stack (on the base branch), ├ in between, └ on top
 function stackRail(pr: PR): string {
-  if (!stackKey(pr)) return ' '
-  const at = stackPosition(pr)
-  return at <= 1 ? '┌' : at >= (pr.stack?.size ?? 0) ? '└' : '├'
+  const s = listStack(pr)
+  if (!s) return ' '
+  return s.position <= 1 ? '┌' : s.position >= s.size ? '└' : '├'
 }
 
-// "stack #18 · 2/3 on #101": where the PR sits and what it is stacked on
+// "stack #18 · 2/3 on #101": where the PR sits and what it is stacked on ("stack · 2/3 on #101" for one made by hand)
 function stackNote(pr: PR): string {
-  if (!stackKey(pr) || !pr.stack) return ''
-  const at = stackPosition(pr)
-  const below = pr.stack.entries?.nodes?.find((n) => n?.position === at - 1)?.pullRequest
-  const on = below ? ` on #${below.number}${below.state === 'OPEN' ? '' : ` (${below.state.toLowerCase()})`}` : ''
-  return `stack #${pr.stack.number} · ${at}/${pr.stack.size}${on}`
+  if (stackKey(pr) && pr.stack) {
+    const at = pr.stackEntry?.position ?? 0
+    const below = pr.stack.entries?.nodes?.find((n) => n?.position === at - 1)?.pullRequest
+    const on = below ? ` on #${below.number}${below.state === 'OPEN' ? '' : ` (${below.state.toLowerCase()})`}` : ''
+    return `stack #${pr.stack.number} · ${at}/${pr.stack.size}${on}`
+  }
+  const s = handStacks.get(pr.url)
+  if (!s) return ''
+  return `stack · ${s.position}/${s.size}${s.below ? ` on #${s.below.number}` : ''}`
 }
 
-// Each stack's PRs together, bottom first, where its first member stood (the most urgent one, as rows come sorted)
-// The heading a stacked PR goes under is its stack's: stackLead maps each member to the first one
+// The branches: "develop ← feature/login" (the fork's owner before a branch from a fork)
+function branchNote(pr: PR): string {
+  if (!pr.baseRefName || !pr.headRefName) return ''
+  const head = pr.isCrossRepository && pr.author?.login ? `${pr.author.login}:${pr.headRefName}` : pr.headRefName
+  return clean(`${pr.baseRefName} ← ${head}`)
+}
+
+// Each stack's PRs together, bottom first (the next to merge first), where its first member stood (the most urgent
+// one, as rows come sorted). The heading a stacked PR goes under is its stack's: stackLead maps each member to the
+// first one
 let stackLead = new Map<string, string>()
 function groupStacks(rows: PR[]): PR[] {
+  handStacks = findHandStacks()
   const out: PR[] = []
   const placed = new Set<string>()
   stackLead = new Map()
+  const position = (p: PR) => listStack(p)?.position ?? 0
   for (const p of rows) {
-    const key = stackKey(p)
+    const key = listStack(p)?.key
     if (!key) {
       out.push(p)
       continue
     }
     if (placed.has(key)) continue
     placed.add(key)
-    const members = rows.filter((x) => stackKey(x) === key).sort((a, b) => stackPosition(a) - stackPosition(b))
+    const members = rows.filter((x) => listStack(x)?.key === key).sort((a, b) => position(a) - position(b) || a.number - b.number)
     for (const m of members) stackLead.set(m.url, p.url)
     out.push(...members)
   }
@@ -3530,10 +3606,32 @@ async function readTalk($: EngineInterface, pr: PR): Promise<Talk[]> {
     $.process.run(['gh', 'pr', 'view', pr.url, '--json', 'comments,reviews']).catch(ghMissing),
     $.process.run(['gh', 'api', `repos/${pr.repository.nameWithOwner}/pulls/${pr.number}/comments`, '--paginate']).catch(ghMissing),
   ])
+  const out = talkOf(view.stdout)
+  const str = (x: unknown) => (typeof x === 'string' ? x : '')
+  try {
+    // --paginate writes one array per page
+    const pages = lines.stdout.trim() ? (JSON.parse(`[${lines.stdout.replace(/\]\s*\[/g, '],[')}]`) as unknown[][]) : []
+    for (const c of pages.flat() as Record<string, unknown>[])
+      out.push({
+        kind: 'line',
+        author: clean(str((c.user as { login?: unknown })?.login)),
+        at: str(c.created_at),
+        body: cleanBody(str(c.body)),
+        path: clean(str(c.path)),
+        ...(typeof c.line === 'number' ? { line: c.line } : typeof c.original_line === 'number' ? { line: c.original_line } : {}),
+      })
+  } catch {
+    // No line comments to show
+  }
+  return out.sort((a, b) => a.at.localeCompare(b.at))
+}
+
+// Comments and reviews from gh pr view --json comments,reviews, cleaned like the description, oldest first
+function talkOf(stdout: string): Talk[] {
   const out: Talk[] = []
   const str = (x: unknown) => (typeof x === 'string' ? x : '')
   try {
-    const v = JSON.parse(view.stdout) as { comments?: unknown[]; reviews?: unknown[] }
+    const v = JSON.parse(stdout) as { comments?: unknown[]; reviews?: unknown[] }
     for (const c of (v.comments ?? []) as Record<string, unknown>[])
       out.push({
         kind: 'comment',
@@ -3551,22 +3649,92 @@ async function readTalk($: EngineInterface, pr: PR): Promise<Talk[]> {
   } catch {
     // No comments to show
   }
-  try {
-    // --paginate writes one array per page
-    const pages = lines.stdout.trim() ? (JSON.parse(`[${lines.stdout.replace(/\]\s*\[/g, '],[')}]`) as unknown[][]) : []
-    for (const c of pages.flat() as Record<string, unknown>[])
-      out.push({
-        kind: 'line',
-        author: clean(str((c.user as { login?: unknown })?.login)),
-        at: str(c.created_at),
-        body: cleanBody(str(c.body)),
-        path: clean(str(c.path)),
-        ...(typeof c.line === 'number' ? { line: c.line } : typeof c.original_line === 'number' ? { line: c.original_line } : {}),
-      })
-  } catch {
-    // No line comments to show
-  }
   return out.sort((a, b) => a.at.localeCompare(b.at))
+}
+
+// The description and the conversation of the selected PR, for the details under the list: fetched once the selection
+// rests on a PR, again when it is updated. Drawn only, never sent to a model
+type About = { updatedAt: string; body: string; talk: Talk[]; error: string }
+const abouts = new Map<string, About>()
+const aboutLoading = new Set<string>()
+// How long the selection rests on a PR before its description is fetched, so j/k through the list fetches nothing
+const ABOUT_DELAY = 400
+
+// A timer, not a sleep: a wait inside the drawing would end with it. A new selection replaces the timer, so only the
+// PR the selection rests on is fetched
+let aboutTimer: { url: string; cancel: () => void } | undefined
+function loadAbout($: EngineInterface, pr: PR): void {
+  if (abouts.get(pr.url)?.updatedAt === pr.updatedAt || aboutLoading.has(pr.url) || aboutTimer?.url === pr.url) return
+  aboutTimer?.cancel()
+  const timer = $.clock.after(ABOUT_DELAY, () => {
+    aboutTimer = undefined
+    if (selected === pr.url) void fetchAbout($, pr)
+  })
+  aboutTimer = { url: pr.url, cancel: () => timer.cancel() }
+}
+
+async function fetchAbout($: EngineInterface, pr: PR): Promise<void> {
+  aboutLoading.add(pr.url)
+  const r = await $.process.run(['gh', 'pr', 'view', pr.url, '--json', 'body,comments,reviews']).catch(ghMissing)
+  aboutLoading.delete(pr.url)
+  let body = ''
+  let error = r.exitCode === 0 ? '' : clean(r.stderr) || `gh exited with code ${r.exitCode}`
+  try {
+    const v = r.exitCode === 0 ? (JSON.parse(r.stdout) as { body?: unknown }) : {}
+    body = typeof v.body === 'string' ? cleanBody(v.body) : ''
+  } catch {
+    error = 'unreadable answer from gh'
+  }
+  // Only PRs still listed are kept
+  for (const url of abouts.keys()) if (!findPr(url)) abouts.delete(url)
+  abouts.set(pr.url, { updatedAt: pr.updatedAt, body, talk: error ? [] : talkOf(r.stdout), error })
+  $.ui.invalidate('ui.render')
+}
+
+// y: markdown drawn as GitHub would, or the text as written (plain), in the details and the reader alike
+let plainText = false
+
+// Markdown cut into blocks of a few lines, so the details can page through it (n): at blank lines, and in a long
+// paragraph, list or code block after `max` lines (a code block is closed and opened again; a table stays whole)
+function markdownBlocks(text: string, max = 10): string[] {
+  const out: string[] = []
+  let cur: string[] = []
+  let fence = ''
+  const flush = () => {
+    if (cur.some((l) => l.trim())) out.push(cur.join('\n'))
+    cur = []
+  }
+  for (const line of text.split('\n')) {
+    const marker = line.trim().match(/^(`{3,}|~{3,})/)?.[1]
+    if (marker && !fence) fence = line.trim()
+    else if (marker && fence.startsWith(marker)) {
+      cur.push(line)
+      fence = ''
+      continue
+    }
+    if (!fence && !line.trim()) {
+      flush()
+      continue
+    }
+    if (cur.length >= max && !line.trimStart().startsWith('|')) {
+      const open = fence && !marker ? fence : ''
+      if (open) cur.push(open.match(/^(`{3,}|~{3,})/)?.[1] ?? '```')
+      flush()
+      if (open) cur.push(open)
+    }
+    cur.push(line)
+  }
+  flush()
+  return out
+}
+
+// What a comment or review says of the PR: its verdict, or where a comment on a line is
+function talkVerdict(t: Talk): { text: string; color: string } {
+  if (t.kind === 'line') return { text: `on ${t.path ?? ''}${t.line ? `:${t.line}` : ''}`, color: NEON.muted }
+  if (t.state === 'APPROVED') return { text: '✓ approved', color: NEON.green }
+  if (t.state === 'CHANGES_REQUESTED') return { text: '✗ requested changes', color: NEON.red }
+  if (t.state === 'DISMISSED') return { text: 'review dismissed', color: NEON.muted }
+  return { text: t.kind === 'review' ? 'reviewed' : 'commented', color: NEON.muted }
 }
 
 // Every key a pane does not use, caught so it neither reaches the prompt nor takes the focus there: pressing one says
@@ -4064,7 +4232,8 @@ async function mergeNow($: EngineInterface, pr: PR): Promise<void> {
   const title = fit(pr.title.replace(/["“”]/g, "'"), 80)
   let answer = ''
   try {
-    answer = await $.ui.ask(`Merge ${pr.repository.nameWithOwner}#${pr.number} now, at ${sha} (“${title}”)?`, {
+    const into = pr.baseRefName ? ` into ${clean(pr.baseRefName)}` : ''
+    answer = await $.ui.ask(`Merge ${pr.repository.nameWithOwner}#${pr.number}${into} now, at ${sha} (“${title}”)?`, {
       options: ['Cancel', ...Object.keys(MERGE_METHODS)],
       header: 'Merge now',
     })
@@ -4108,7 +4277,7 @@ async function enableAutoMerge($: EngineInterface, pr: PR): Promise<void> {
   let answer = ''
   try {
     answer = await $.ui.ask(
-      `Turn auto-merge on for ${pr.repository.nameWithOwner}#${pr.number} (“${title}”, now at ${sha}: ${why})? GitHub then merges it on its own once every review and check passes, at the commit it is at then; if it is ready already, it merges now.`,
+      `Turn auto-merge on for ${pr.repository.nameWithOwner}#${pr.number}${pr.baseRefName ? ` into ${clean(pr.baseRefName)}` : ''} (“${title}”, now at ${sha}: ${why})? GitHub then merges it on its own once every review and check passes, at the commit it is at then; if it is ready already, it merges now.`,
       { options: ['Cancel', ...Object.keys(MERGE_METHODS)], header: 'Auto-merge' },
     )
   } catch {
@@ -4174,7 +4343,7 @@ async function mergeStack($: EngineInterface, pr: PR): Promise<void> {
     })
     return
   }
-  const at = stackPosition(pr)
+  const at = pr.stackEntry?.position ?? 0
   const goes = (stack.entries?.nodes ?? [])
     .filter((n): n is { position: number; pullRequest: { number: number; state: string; isDraft: boolean } } =>
       Boolean(n?.pullRequest && n.position <= at && n.pullRequest.state === 'OPEN'),
@@ -4920,6 +5089,8 @@ export function register(on: On, options: PluginOptions) {
     ]
     const rule = Text({ color: focused ? NEON.violet : NEON.rule, children: ['━'.repeat(columns)] })
     const toast = (text: string) => $.ui.toast(text, { timeoutMs: 4000 })
+    // The description and comments as markdown, or as written (y)
+    const prose = (text: string) => (plainText ? Text({ wrap: 'wrap', children: [text] }) : Markdown({ text }))
     // n: the next PR in the list, read the same way
     const nextPr = () => {
       const rows = visibleRows(groups(fetchedAt || Date.now()))
@@ -5082,6 +5253,14 @@ export function register(on: On, options: PluginOptions) {
                 ]
               : []),
             ...toggleSince,
+            ...(at < FIRST_FILE
+              ? [
+                  key('diff-plain', plainText ? 'markdown' : 'plain text', 'y', () => {
+                    plainText = !plainText
+                    redraw()
+                  }),
+                ]
+              : []),
             ...actOnPr,
             key('diff-ask', askKeyLabel(pr), 'p', () => void toggleAsk($, pr)),
             key('diff-open', 'open on GitHub', 'o', async () => void (await $.process.run(['gh', 'pr', 'view', pr.url, '--web'])), true),
@@ -5197,23 +5376,16 @@ export function register(on: On, options: PluginOptions) {
         columnGap: 2,
         children: [
           Text({ bold: true, color: NEON.cyan, children: ['Description'] }),
-          Text({ dimColor: true, children: [author ? `by ${author}` : ''] }),
+          Text({ dimColor: true, children: [[author ? `by ${author}` : '', branchNote(pr)].filter(Boolean).join(' · ')] }),
         ],
       })
-      const text = v.body ? Markdown({ text: v.body }) : Text({ color: NEON.muted, children: ['No description'] })
+      const text = v.body ? prose(v.body) : Text({ color: NEON.muted, children: ['No description'] })
       return done([...head, keys, rule, ...sinceNote, title, text], notHere)
     }
     if (!file) {
       // Page 1: the conversation, oldest first: who, when, what they decided, what they wrote
-      const verdict = (t: Talk): { text: string; color: string } => {
-        if (t.kind === 'line') return { text: `on ${t.path ?? ''}${t.line ? `:${t.line}` : ''}`, color: NEON.muted }
-        if (t.state === 'APPROVED') return { text: '✓ approved', color: NEON.green }
-        if (t.state === 'CHANGES_REQUESTED') return { text: '✗ requested changes', color: NEON.red }
-        if (t.state === 'DISMISSED') return { text: 'review dismissed', color: NEON.muted }
-        return { text: t.kind === 'review' ? 'reviewed' : 'commented', color: NEON.muted }
-      }
       const items = v.talk.flatMap((t) => {
-        const vd = verdict(t)
+        const vd = talkVerdict(t)
         return [
           Box({
             flexDirection: 'row',
@@ -5224,7 +5396,7 @@ export function register(on: On, options: PluginOptions) {
               Text({ dimColor: true, children: [t.at ? `${elapsed(t.at, Date.now())} ago` : ''] }),
             ],
           }),
-          ...(t.body ? [Box({ paddingLeft: 2, children: [Markdown({ text: t.body })] })] : []),
+          ...(t.body ? [Box({ paddingLeft: 2, children: [prose(t.body)] })] : []),
         ]
       })
       const title = Box({
@@ -5332,7 +5504,7 @@ export function register(on: On, options: PluginOptions) {
       $.ui.invalidate('ui.render')
     }
     const kit = $.ui.resolve(e)
-    const { Box, Link } = kit
+    const { Box, Link, Markdown } = kit
     const { Text, Button } = glyphed(kit)
     // A text field, where the surface has one (not on mobile)
     const Input = 'Input' in kit ? kit.Input : undefined
@@ -5509,6 +5681,7 @@ export function register(on: On, options: PluginOptions) {
       redraw()
     }
     if (pr) void markSeen($, pr)
+    if (pr) loadAbout($, pr)
     if (pr && isApproved(pr) && approvalOutdated(pr)) void loadSinceStats($, pr)
     if (pr) {
       const isReview = review.some((p) => p.url === pr.url)
@@ -5570,6 +5743,16 @@ export function register(on: On, options: PluginOptions) {
           },
           true,
         ),
+        act(
+          'act-plain',
+          plainText ? 'markdown' : 'plain text',
+          'y',
+          () => {
+            plainText = !plainText
+            redraw()
+          },
+          true,
+        ),
         // j / k move: hidden keys, so the actions stand out
         Box({ display: 'none', children: [nav('nav-down', '↓', 'j', 1), nav('nav-up', '↑', 'k', -1)] }),
       )
@@ -5595,7 +5778,7 @@ export function register(on: On, options: PluginOptions) {
       const n = pr ? askLabel(pr) : 'this PR'
       const ownTab = 'on your PRs (2: My PRs)'
       // Keys that act on the selected PR, with none selected
-      if (!pr && 'adeimopsvcxw'.includes(k))
+      if (!pr && 'adeimopsvcxwy'.includes(k))
         return filterText ? `${k}: no PR matches the filter · f: change it` : `${k}: no PR is selected on this tab`
       switch (k) {
         case 'a':
@@ -5677,7 +5860,7 @@ export function register(on: On, options: PluginOptions) {
           : ready
             ? `⇡ fix ready: ${plural(ready.commits?.length ?? 0, 'commit')} not pushed · c: push it`
             : ''
-      return [fixing, stackNote(p), ...metaOf(p), talkNote(p)].filter(Boolean).join(' · ')
+      return [fixing, branchNote(p), stackNote(p), ...metaOf(p), talkNote(p)].filter(Boolean).join(' · ')
     }
     const metaOf = (p: PR): string[] => {
       const size = `+${p.additions} -${p.deletions}`
@@ -5817,7 +6000,9 @@ export function register(on: On, options: PluginOptions) {
     }
 
     // The selected PR's details, under the list: the PR in full, its analysis, the AI review, the failed checks
-    const panelOf = (p: PR, budget = Number.POSITIVE_INFINITY) => {
+    // budget: the most the panel may take; share: what it takes when what others wrote (the description and the
+    // conversation) would push the list below its share of the pane
+    const panelOf = (p: PR, budget = Number.POSITIVE_INFINITY, share = budget) => {
       const repo = p.repository.nameWithOwner.split('/')[1] ?? p.repository.nameWithOwner
       const label = shortLabel(`${repo}#${p.number}`, Math.max(8, Math.floor(columns / 3)))
       const prLink = safeHref(p.url)
@@ -5946,16 +6131,84 @@ export function register(on: On, options: PluginOptions) {
           )
         }
       }
-      // Too tall for what is left: the header stays, the rest goes by pages (n), so the keys stay on screen
+      // The description, then the latest of the conversation, as markdown (y: as written), last so that the facts and
+      // the AI review stay on the first page; each block of lines is a part, so n pages through them
+      const about = abouts.get(p.url)
+      const ownParts = children.length
+      // Each part opens after a blank line: what others wrote, apart from the facts above
+      const section = (name: string, note: string) =>
+        add(
+          Box({
+            paddingLeft: INDENT,
+            marginTop: 1,
+            flexDirection: 'row',
+            columnGap: 2,
+            children: [Text({ bold: true, color: NEON.cyan, children: [name] }), Text({ dimColor: true, wrap: 'wrap', children: [note] })],
+          }),
+          1 + wrappedLines(`${name}  ${note}`, bodyColumns),
+        )
+      // A blank line between blocks, as the reader draws them
+      const prose = (text: string, indent: number, most = Number.POSITIVE_INFINITY) => {
+        const blocks = markdownBlocks(text)
+        for (const [i, block] of blocks.slice(0, most).entries()) {
+          const width = bodyColumns - indent
+          add(
+            Box({
+              paddingLeft: INDENT + indent,
+              marginTop: i > 0 ? 1 : 0,
+              children: [plainText ? Text({ wrap: 'wrap', children: [block] }) : Markdown({ text: block })],
+            }),
+            (i > 0 ? 1 : 0) + block.split('\n').reduce((n, line) => n + wrappedLines(line, width), 0),
+          )
+        }
+        if (blocks.length > most) add(Box({ paddingLeft: INDENT + indent, children: [Text({ dimColor: true, children: ['…'] })] }), 1)
+      }
+      const view = plainText ? 'y: markdown' : 'y: plain text'
+      if (!about || about.updatedAt !== p.updatedAt) section('Description', about ? `updating… · ${view}` : 'fetching…')
+      if (about?.error) section('Description', `could not fetch it: ${fit(about.error, Math.max(10, bodyColumns - 40))} · d: read`)
+      else if (about) {
+        section('Description', view)
+        if (about.body) prose(about.body, 0)
+        else add(Box({ paddingLeft: INDENT, children: [Text({ color: NEON.muted, children: ['No description'] })] }), 1)
+        // The latest few comments and reviews, oldest of them first
+        const LATEST = 3
+        const talk = about.talk.slice(-LATEST)
+        if (talk.length > 0) {
+          const n = about.talk.length
+          section('Conversation', `${n > LATEST ? `latest ${LATEST} of ${n}` : plural(n, 'comment')} · d, 2: all, with comments on lines`)
+          for (const t of talk) {
+            const vd = talkVerdict(t)
+            const at = t.at ? `${elapsed(t.at, now)} ago` : ''
+            add(
+              Box({
+                paddingLeft: INDENT,
+                flexDirection: 'row',
+                columnGap: 1,
+                children: [
+                  Text({ color: NEON.cyan, bold: true, children: [`@${t.author || '?'}`] }),
+                  Text({ color: vd.color, children: [vd.text] }),
+                  Text({ dimColor: true, children: [at] }),
+                ],
+              }),
+              wrappedLines(`@${t.author || '?'} ${vd.text} ${at}`, bodyColumns),
+            )
+            if (t.body) prose(t.body, 2, 3)
+          }
+        }
+      }
+      // Too tall for what is left: the header stays, the rest goes by pages (n), so the keys stay on screen. The
+      // description and the conversation take only the panel's share; the parts before them, all they need
       const total = heights.reduce((n, h) => n + h, 0)
-      if (total <= budget) return { el: Box({ key: `panel-${p.url}`, flexDirection: 'column', children }), lines: total }
+      const own = heights.slice(0, ownParts).reduce((n, h) => n + h, 0)
+      const limit = Math.min(budget, Math.max(share, own + 1))
+      if (total <= limit) return { el: Box({ key: `panel-${p.url}`, flexDirection: 'column', children }), lines: total }
       if (panelPage.url !== p.url || panelPage.expanded !== expanded) panelPage = { url: p.url, expanded, from: 1 }
       const from = Math.min(Math.max(1, panelPage.from), children.length - 1)
       const linesOfParts = (a: number, b: number) => heights.slice(a, b).reduce((n, h) => n + h, 0)
       // Header, "above" when paged down, then the parts that fit, and the line with n
       let used = (heights[0] ?? 1) + (from > 1 ? 1 : 0)
       let k = from
-      while (k < children.length && used + (heights[k] ?? 1) <= budget - 1) used += heights[k++] ?? 1
+      while (k < children.length && used + (heights[k] ?? 1) <= limit - 1) used += heights[k++] ?? 1
       if (k === from) used += heights[k++] ?? 1
       const below = linesOfParts(k, children.length)
       const shownParts = [
@@ -6081,9 +6334,13 @@ export function register(on: On, options: PluginOptions) {
     }
     const headings = new Set(rows.map(sectionOf).filter(Boolean)).size
     const chrome = topLines + 2 + 1 + (selectedPr ? 1 : 0) + (folds.length > 0 ? 1 : 0) + headings + footerLines
-    // The list keeps at least three rows (and its "more" line); the panel gets the rest, and the keys stay on screen
+    // The list keeps at least three rows (and its "more" line); the panel gets the rest, and the keys stay on screen.
+    // Against the description and the conversation, the list keeps half the room, or all it needs when less
     const listMin = Math.min(rows.length, 3) + (rows.length > 3 ? 1 : 0)
-    const built = selectedPr ? panelOf(selectedPr, Math.max(2, paneLimit - chrome - listMin)) : undefined
+    const listShare = Math.max(listMin, Math.min(rows.length, Math.ceil((paneLimit - chrome) / 2)))
+    const built = selectedPr
+      ? panelOf(selectedPr, Math.max(2, paneLimit - chrome - listMin), Math.max(2, paneLimit - chrome - listShare))
+      : undefined
     const panel = built?.el
     const panelHeight = built?.lines ?? 0
     const room = Math.max(3, paneLimit - chrome - panelHeight)
@@ -6120,6 +6377,7 @@ export function register(on: On, options: PluginOptions) {
             ['i', "the AI review's findings, linked to their lines"],
             ['s', 'send findings to GitHub as review comments, after two dialogs'],
             ['x', 'snooze it until it is updated'],
+            ['y', 'its description and conversation as markdown, or as plain text (here and in the reader)'],
           ],
         ],
         [
@@ -6141,7 +6399,7 @@ export function register(on: On, options: PluginOptions) {
             ['b', 'AI review every bot PR not reviewed yet, then approve those that passed in one dialog · b again stops'],
             ['z', 'show or hide snoozed PRs'],
             ['f', 'filter by repository, number, title or @author · empty clears it'],
-            ['n', 'next page of the details, when they do not fit'],
+            ['n', 'next page of the details (the description and conversation come last), when they do not fit'],
             ['r', 'refresh: fetch again'],
           ],
         ],
@@ -6152,6 +6410,7 @@ export function register(on: On, options: PluginOptions) {
             ['h / l', 'previous / next page · j / k scroll'],
             ['f', 'file tree: j / k move, l or 1-9 open · » comments on lines'],
             ['t / g', 'since your approval / the whole PR · show a folded generated file'],
+            ['y', 'description and conversation: markdown or plain text'],
             ['n / q', 'read the next PR / back to the list'],
           ],
         ],
@@ -6187,7 +6446,11 @@ export function register(on: On, options: PluginOptions) {
         })
       // Every mark, column by column
       const legend: [string, string, string][] = [
-        ['▸ ● ⚙ ┌├└', 'selected · updated since you last selected it · a bot · a stack, bottom (on the base) to top', NEON.pink],
+        [
+          '▸ ● ⚙ ┌├└',
+          "selected · updated since you last selected it · a bot · a stack (gh stack, or a PR on another PR's branch), bottom (the next to merge) to top",
+          NEON.pink,
+        ],
         ['RISK', '▲ HIGH · ◆ MED · ○ LOW from the analysis · … analyzing · · not analyzed', NEON.yellow],
         [
           'STATE',

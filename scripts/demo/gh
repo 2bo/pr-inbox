@@ -33,6 +33,8 @@ const pr = (repo, number, title, author, extra) => ({
   updatedAt: ago(2),
   headRefOid: oid(number),
   headRefName: `feature/${repo}-${number}`,
+  // billing-api merges into develop first (git flow); the others into main
+  baseRefName: repo === 'billing-api' ? 'develop' : 'main',
   authorAssociation: author.endsWith('[bot]') ? 'NONE' : 'MEMBER',
   isCrossRepository: false,
   additions: 10,
@@ -137,6 +139,22 @@ const MINE = [
     deletions: 21,
     reviewDecision: 'APPROVED',
   }),
+  // A stack made by hand: each PR opened on the branch of the one before, so they merge into develop in this order
+  pr('billing-api', 1284, 'Show invoice pages in the dashboard', 'you', {
+    ...nobody,
+    ...asked(user('mtanaka')),
+    baseRefName: 'feature/billing-api-1281',
+    additions: 74,
+    deletions: 9,
+  }),
+  pr('billing-api', 1286, 'Remember the page size per user', 'you', {
+    ...nobody,
+    ...asked(user('mtanaka')),
+    baseRefName: 'feature/billing-api-1284',
+    additions: 38,
+    deletions: 4,
+    ...ci('PENDING'),
+  }),
   pr('storefront', 470, 'Extract feature flag helpers into a module', 'you', {
     ...nobody,
     ...asked(user('lena-park')),
@@ -166,6 +184,17 @@ const MINE = [
 // Bodies, files and diffs the analysis reads
 // The conversation on a PR: comments, reviews and comments on lines (all made up)
 const TALK = {
+  'billing-api/1281': {
+    comments: [{ author: { login: 'sofia-ito' }, createdAt: ago(9), body: 'Does the dashboard need `per_page` above 50?' }],
+    reviews: [
+      {
+        author: { login: 'mtanaka' },
+        submittedAt: ago(5),
+        state: 'APPROVED',
+        body: 'Looks good. One nit, not blocking:\n\n- say in the API guide that `per_page` stops at **100**',
+      },
+    ],
+  },
   'storefront/482': {
     comments: [
       { author: { login: 'mtanaka' }, createdAt: ago(50), body: 'Do we need the lockout at all? Rate limiting alone might be enough for now.' },
@@ -181,6 +210,38 @@ const LINE_TALK = {
 }
 
 const DETAILS = {
+  'billing-api/1281': {
+    body: [
+      '## What',
+      '',
+      '- `GET /v2/invoices` takes `page` and `per_page` (at most **100**)',
+      '- Each response carries a `Link` header with the next and previous pages',
+      '',
+      '## How to test',
+      '',
+      '```sh',
+      "curl -sI 'localhost:3000/v2/invoices?page=2&per_page=20'",
+      '```',
+      '',
+      'Part 1 of 3: the dashboard (#1284) and the page size setting (#1286) build on it.',
+    ].join('\n'),
+    files: [
+      ['app/controllers/v2/invoices_controller.rb', 22, 6],
+      ['spec/requests/v2/invoices_spec.rb', 75, 15],
+    ],
+    diff: `diff --git a/app/controllers/v2/invoices_controller.rb b/app/controllers/v2/invoices_controller.rb
+--- a/app/controllers/v2/invoices_controller.rb
++++ b/app/controllers/v2/invoices_controller.rb
+@@ -3,7 +3,9 @@ module V2
+     def index
+-      invoices = current_account.invoices.order(issued_on: :desc)
++      per_page = params.fetch(:per_page, 25).to_i.clamp(1, 100)
++      invoices = current_account.invoices.order(issued_on: :desc).page(params[:page]).per(per_page)
++      paginate_headers(invoices)
+       render json: InvoiceSerializer.new(invoices).serializable_hash
+     end
+`,
+  },
   'storefront/482': {
     body: 'Adds Rack::Attack throttles on POST /login: 5 attempts per account per minute and 20 per IP. Blocked requests get 429 and the login form shows "Too many attempts, try again in a minute".',
     files: [
@@ -555,12 +616,13 @@ if (args[0] === 'api' && args[1] === 'graphql') {
   else if (args.includes('--web')) out('')
   else if (fields === 'headRefOid') out({ headRefOid: p.headRefOid })
   else if (fields.startsWith('comments')) out(TALK[key(p)] ?? { comments: [], reviews: [] })
+  else if (fields === 'body,comments,reviews') out({ body: d.body, ...(TALK[key(p)] ?? { comments: [], reviews: [] }) })
   else
     out({
       title: p.title,
       body: d.body,
       author: p.author,
-      baseRefName: 'main',
+      baseRefName: p.baseRefName,
       headRefName: p.headRefName ?? `feature/${p.number}`,
       labels: [],
       files,

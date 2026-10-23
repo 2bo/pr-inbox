@@ -130,8 +130,10 @@ type StubOptions = {
   // What gh pr view --json title,body,files and gh pr diff return
   view?: unknown
   diff?: string
-  // The PR description `d` shows
+  // The PR description `d` and the details under the list show
   body?: string
+  // The comments and reviews gh pr view returns (the conversation)
+  talk?: { comments?: unknown[]; reviews?: unknown[] }
   // What git and ghq answer, by argv (stdout and exit code); unanswered, they print nothing and succeed
   git?: (argv: readonly string[]) => { stdout?: string; exitCode?: number } | undefined
   // The same for particular gh calls
@@ -201,6 +203,10 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
       stdout = JSON.stringify(opts.view ?? { title: 't', body: 'b', files: [] })
     if (e.argv[2] === 'diff') stdout = opts.diff ?? 'diff --git a/x b/x'
     if (e.argv[2] === 'view' && e.argv.at(-1) === 'body') stdout = JSON.stringify({ body: opts.body ?? '' })
+    if (e.argv[2] === 'view' && e.argv.at(-1) === 'comments,reviews')
+      stdout = JSON.stringify({ comments: opts.talk?.comments ?? [], reviews: opts.talk?.reviews ?? [] })
+    if (e.argv[2] === 'view' && e.argv.at(-1) === 'body,comments,reviews')
+      stdout = JSON.stringify({ body: opts.body ?? '', comments: opts.talk?.comments ?? [], reviews: opts.talk?.reviews ?? [] })
     if (e.argv[2] === 'view' && e.argv.some((a) => a.includes('closingIssuesReferences')))
       stdout = JSON.stringify({
         title: 't',
@@ -2129,7 +2135,7 @@ test('m merges a bot review request you approved, offers auto-merge on one still
   await ui.press({ key: 'nav-down' })
   expect(await isSelected(ui, 14)).toBe(true)
   expect((await ui.find({ key: 'act-merge' }))?.props.label).toBe('merge now')
-  expect(await hotkeysOf(ui, 'footer')).toEqual(['d', 'a', 'm', 'v', 'e', 'p', 'o', 'i', 'x'])
+  expect(await hotkeysOf(ui, 'footer')).toEqual(['d', 'a', 'm', 'v', 'e', 'p', 'o', 'i', 'x', 'y'])
   await ui.press({ key: 'act-merge' })
   expect(s.questions.at(-1)).toContain('Merge acme/app#14 now, at aaaaaaa')
   expect(s.calls).toContainEqual(['gh', 'pr', 'merge', readyBot.url, '--squash', '--match-head-commit', HEAD])
@@ -2744,6 +2750,226 @@ test('review requests in a stack are listed together too, bottom first, with the
   await ui.unmount()
 })
 
+// ---- Stacks made by hand, the branches, the description under the list ----
+
+// A PR from head into base, in this repository
+const onBranch = (number: number, base: string, head: string, over: Record<string, unknown> = {}) =>
+  pr({
+    number,
+    title: `PR ${number}`,
+    url: `https://github.com/acme/app/pull/${number}`,
+    baseRefName: base,
+    headRefName: head,
+    isCrossRepository: false,
+    ...over,
+  })
+const graphqlOf = (review: unknown[], mine: unknown[]) =>
+  JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: review }, mine: { nodes: mine } } })
+
+test("PRs on each other's branches are listed as a stack, the next to merge first, with their branches", async ($, on) => {
+  // Fetched top first; the top needs action, so the stack stands first
+  const top = onBranch(93, 'feat-b', 'feat-c', { reviewDecision: 'CHANGES_REQUESTED' })
+  const middle = onBranch(92, 'feat-a', 'feat-b', { reviewDecision: 'APPROVED' })
+  const bottom = onBranch(91, 'develop', 'feat-a', { reviewDecision: 'APPROVED' })
+  const lone = onBranch(94, 'develop', 'other', { reviewDecision: 'APPROVED' })
+  // A branch of a fork is not the one a PR here is on, even by the same name
+  const fork = onBranch(95, 'develop', 'feat-x', {
+    isCrossRepository: true,
+    author: { login: 'mallory', __typename: 'User' },
+    ...requested('2026-10-02T00:00:00Z', 'me'),
+  })
+  const onFork = onBranch(96, 'feat-x', 'feat-y')
+  const s = stubs(on, { graphql: graphqlOf([fork], [top, lone, middle, onFork, bottom]) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await isSelected(ui, 91)).toBe(true)
+  expect(await lineOf(ui, 91)).toContain('"┌"')
+  expect(await lineOf(ui, 91)).toContain('develop ← feat-a · stack · 1/3')
+  for (const [n, rail, note] of [
+    [92, '├', 'feat-a ← feat-b · stack · 2/3 on #91'],
+    [93, '└', 'feat-b ← feat-c · stack · 3/3 on #92'],
+    [94, ' ', 'develop ← other'],
+    [96, ' ', 'feat-x ← feat-y'],
+  ] as const) {
+    await ui.press({ key: 'nav-down' })
+    expect(await isSelected(ui, n)).toBe(true)
+    expect(await lineOf(ui, n)).toContain(`"${rail}"`)
+    expect(await lineOf(ui, n)).toContain(note)
+  }
+  expect(await lineOf(ui, 96)).not.toContain('stack ·')
+  // A PR from a fork names the fork's owner before its branch
+  await ui.press({ key: 'tab-review' })
+  expect(await lineOf(ui, 95)).toContain('develop ← mallory:feat-x')
+  await ui.unmount()
+})
+
+test('a review request on the branch of your PR says where it sits', async ($, on) => {
+  const yours = onBranch(91, 'develop', 'feat-a')
+  const theirs = onBranch(97, 'feat-a', 'feat-r', requested('2026-10-02T00:00:00Z', 'me'))
+  const s = stubs(on, { graphql: graphqlOf([theirs], [yours]) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect(await isSelected(ui, 97)).toBe(true)
+  expect(await lineOf(ui, 97)).toContain('"└"')
+  expect(await lineOf(ui, 97)).toContain('feat-a ← feat-r · stack · 2/2 on #91')
+  await ui.unmount()
+})
+
+test('a PR from a long-lived branch is no stack: PRs into develop do not sit on the release PR', async ($, on) => {
+  // develop into main, and a repository whose default branch is next
+  const release = onBranch(98, 'main', 'develop')
+  const feature = onBranch(91, 'develop', 'feat-a')
+  const promote = onBranch(99, 'stable', 'next', { repository: { nameWithOwner: 'acme/app', defaultBranchRef: { name: 'next' } } })
+  const onNext = onBranch(92, 'next', 'feat-n')
+  const s = stubs(on, { graphql: graphqlOf([], [release, feature, promote, onNext]) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  for (const n of [98, 91, 99, 92]) {
+    expect(await lineOf(ui, n)).not.toContain('stack ·')
+    expect(await lineOf(ui, n)).not.toMatch(/"[┌├└]"/)
+  }
+  await ui.unmount()
+})
+
+test('m on a PR stacked by hand merges it alone into its base branch, which the dialog names', async ($, on) => {
+  const bottom = onBranch(91, 'develop', 'feat-a', { reviewDecision: 'APPROVED' })
+  const middle = onBranch(92, 'feat-a', 'feat-b', { reviewDecision: 'APPROVED' })
+  const s = stubs(on, { graphql: graphqlOf([], [bottom, middle]), answer: 'Squash and merge' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'nav-down' })
+  expect(await isSelected(ui, 92)).toBe(true)
+  expect((await ui.find({ key: 'act-merge' }))?.props.label).toBe('merge now')
+  await ui.press({ key: 'act-merge' })
+  expect(s.questions.at(-1)).toContain('Merge acme/app#92 into feat-a now, at aaaaaaa')
+  expect(s.calls).toContainEqual(['gh', 'pr', 'merge', middle.url, '--squash', '--match-head-commit', HEAD])
+  expect(s.calls.some((c) => c[1] === 'stack')).toBe(false)
+  await ui.unmount()
+})
+
+// The markdown drawn in a part of the pane
+const markdownIn = (json: string) => {
+  const out: string[] = []
+  const walk = (n: unknown): void => {
+    if (Array.isArray(n)) {
+      for (const x of n) walk(x)
+      return
+    }
+    if (!n || typeof n !== 'object') return
+    const el = n as Node
+    if (el.type === 'Markdown') out.push(String(el.props?.text))
+    for (const c of el.children ?? []) walk(c)
+  }
+  walk(JSON.parse(json))
+  return out
+}
+const aboutFetches = (s: Stubs) => s.calls.filter((c) => c.at(-1) === 'body,comments,reviews')
+
+test('the details show the description and the latest comments as markdown; y shows them as written', async ($, on) => {
+  const s = stubs(on, {
+    body: '## Why\n\nLogin **fails** \u001b[2Jon empty passwords.\n\n- see [notes](file:///etc/passwd)',
+    talk: {
+      comments: [1, 2, 3, 4].map((i) => ({ author: { login: `c${i}` }, createdAt: `2026-10-02T0${i}:00:00Z`, body: `comment ${i}` })),
+      reviews: [{ author: { login: 'rev' }, submittedAt: '2026-10-02T09:00:00Z', state: 'APPROVED', body: 'ship it' }],
+    },
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  // Nothing is fetched until the selection rests on the PR
+  expect(aboutFetches(s)).toHaveLength(0)
+  expect(await lineOf(ui, 11)).toContain('fetching…')
+  await s.clock.advance(500)
+  expect(aboutFetches(s)).toEqual([['gh', 'pr', 'view', HUMAN.url, '--json', 'body,comments,reviews']])
+  const md = markdownIn(await lineOf(ui, 11)).join('\n')
+  expect(md).toContain('## Why')
+  expect(md).toContain('Login **fails** on empty passwords.')
+  expect(md).not.toContain('\u001b')
+  expect(md).not.toContain('](file:')
+  // The latest three, the oldest of them first
+  expect(await lineOf(ui, 11)).toContain('latest 3 of 5')
+  expect(md).not.toContain('comment 2')
+  expect(md.indexOf('comment 3')).toBeLessThan(md.indexOf('comment 4'))
+  expect(md.indexOf('comment 4')).toBeLessThan(md.indexOf('ship it'))
+  expect(await lineOf(ui, 11)).toContain('✓ approved')
+  // y: as written, here and in the reader
+  expect((await ui.find({ key: 'act-plain' }))?.props.label).toBe('plain text')
+  await ui.press({ key: 'act-plain' })
+  expect(markdownIn(await lineOf(ui, 11))).toEqual([])
+  expect(await lineOf(ui, 11)).toContain('## Why')
+  expect((await ui.find({ key: 'act-plain' }))?.props.label).toBe('markdown')
+  await ui.press({ key: 'act-diff' })
+  expect(await ui.find({ type: 'Markdown' })).toBeUndefined()
+  expect((await ui.find({ key: 'diff-plain' }))?.props.label).toBe('markdown')
+  await ui.press({ key: 'diff-plain' })
+  expect(await ui.find({ type: 'Markdown' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('j/k through the list fetches the description only where the selection rests', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'nav-down' })
+  await s.clock.advance(100)
+  await ui.press({ key: 'nav-down' })
+  expect(await isSelected(ui, 12)).toBe(true)
+  await s.clock.advance(500)
+  expect(aboutFetches(s)).toEqual([['gh', 'pr', 'view', BOT.url, '--json', 'body,comments,reviews']])
+  // Fetched once while the PR stays the same
+  await ui.press({ key: 'nav-up' })
+  await ui.press({ key: 'nav-down' })
+  await s.clock.advance(500)
+  expect(aboutFetches(s).filter((c) => c[3] === BOT.url)).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a long description takes no room from the list beyond the details share; n pages through it', async ($, on) => {
+  const many = Array.from({ length: 12 }, (_, i) =>
+    pr({ number: 40 + i, title: `PR ${40 + i}`, url: `https://github.com/acme/app/pull/${40 + i}`, isCrossRepository: false }),
+  )
+  const body = Array.from({ length: 30 }, (_, i) => `Paragraph ${i}.`).join('\n\n')
+  const s = stubs(on, { graphql: graphqlOf([], many), body })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await s.clock.advance(500)
+  // Every row is still drawn, and the description waits behind n
+  for (const p of many) expect(await ui.find({ key: `line-${p.url}` })).toBeDefined()
+  expect(((await ui.find({ key: 'panel-more' })) as { props: { label: string } } | undefined)?.props.label).toMatch(/^↓ \d+ more lines$/)
+  await ui.unmount()
+})
+
+test('a long code block in the details is cut into blocks that each open and close it', async ($, on) => {
+  const code = Array.from({ length: 12 }, (_, i) => `line ${i}`).join('\n')
+  const s = stubs(on, { body: `Intro\n\n\`\`\`ts\n${code}\n\`\`\`\n\nAfter` })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await s.clock.advance(500)
+  // Every block, page by page (n)
+  const blocks = new Set<string>()
+  for (let i = 0; i < 10; i++) {
+    for (const b of markdownIn(await lineOf(ui, 11))) blocks.add(b)
+    const more = (await ui.find({ key: 'panel-more' })) as { props: { label: string } } | undefined
+    if (!more || more.props.label.startsWith('↑')) break
+    await ui.press({ key: 'panel-more' })
+  }
+  const all = [...blocks]
+  expect(all[0]).toBe('Intro')
+  expect(all.at(-1)).toBe('After')
+  const fenced = all.filter((b) => b.includes('line '))
+  expect(fenced.length).toBeGreaterThan(1)
+  for (const b of fenced) {
+    expect(b.startsWith('```ts\n')).toBe(true)
+    expect(b.endsWith('\n```')).toBe(true)
+  }
+  expect(fenced.join('\n')).toContain('line 0')
+  expect(fenced.join('\n')).toContain('line 11')
+  await ui.unmount()
+})
+
 // ---- Keys that do nothing here, the reader's keys, re-review, the fix waiting to be pushed ----
 
 test('a key the list does not use says why, instead of falling through to the prompt', async ($, on) => {
@@ -2755,8 +2981,8 @@ test('a key the list does not use says why, instead of falling through to the pr
   expect(s.toasts.at(-1)).toContain('c fixes failed CI on your PRs')
   await ui.press({ key: 'unbound-m' })
   expect(s.toasts.at(-1)).toContain('m merges on your PRs')
-  await ui.press({ key: 'unbound-y' })
-  expect(s.toasts.at(-1)).toContain('y: no such key · u: help')
+  await ui.press({ key: 'unbound-g' })
+  expect(s.toasts.at(-1)).toContain('g: no such key · u: help')
   // Keys in use are not caught
   expect(await ui.find({ key: 'unbound-a' })).toBeUndefined()
   expect(await ui.find({ key: 'unbound-j' })).toBeUndefined()
@@ -2790,7 +3016,7 @@ test('every key says what pressing it does, the most used first', async ($, on) 
   expect((await ui.find({ key: 'help' }))?.props.label).toBe('?')
   expect((await ui.find({ key: 'tab-mine' }))?.props.label).toBe('my PRs 4')
   // A review request: read, decide, ask, then the quieter keys
-  expect(await hotkeysOf(ui, 'footer')).toEqual(['d', 'a', 'v', 'e', 'p', 'o', 'i', 'x'])
+  expect(await hotkeysOf(ui, 'footer')).toEqual(['d', 'a', 'v', 'e', 'p', 'o', 'i', 'x', 'y'])
   expect((await ui.find({ key: 'act-ai-review' }))?.props.label).toBe('AI review')
   expect((await ui.find({ key: 'act-details' }))?.props.label).toBe('findings')
   expect((await ui.find({ key: 'act-open' }))?.props.label).toBe('open on GitHub')
@@ -2798,7 +3024,7 @@ test('every key says what pressing it does, the most used first', async ($, on) 
   expect((await ui.find({ key: 'act-details' }))?.props.label).toBe('hide findings')
   // Your PR with failed CI: read, then fixing it and its reviewers, then auto-merge, before asking
   await ui.press({ key: 'tab-mine' })
-  expect(await hotkeysOf(ui, 'footer')).toEqual(['d', 'c', 'w', 'm', 'v', 'e', 'p', 'o', 'x'])
+  expect(await hotkeysOf(ui, 'footer')).toEqual(['d', 'c', 'w', 'm', 'v', 'e', 'p', 'o', 'x', 'y'])
   expect((await ui.find({ key: 'act-ci' }))?.props.label).toBe('fix CI')
   // e says what it asked, and where the answer comes
   await ui.press({ key: 'act-explain' })
