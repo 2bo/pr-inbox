@@ -2534,7 +2534,17 @@ test('the latest run decides: a pass then a failure is a failure, and a run in p
 })
 
 test('the description shown loses escape sequences, and local file links do not open', async ($, on) => {
-  const s = stubs(on, { body: 'see [notes](file:///etc/passwd)\n\u001b[2Jcleared \u202eevil' })
+  const links = [
+    'see [notes](file:///etc/passwd)',
+    '<file:///etc/a>',
+    '[r]: file:///etc/b',
+    '[c](<file:///etc/c>)',
+    '[d](&#102;ile:///etc/d)',
+    '[e](file&colon;///etc/e)',
+    '[f](FILE:///etc/f)',
+    '[g](&#x66;ile:///etc/g)',
+  ]
+  const s = stubs(on, { body: `${links.join('\n')}\n\u001b[2Jcleared \u202eevil &#99999999; x` })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-diff' })
@@ -2542,6 +2552,10 @@ test('the description shown loses escape sequences, and local file links do not 
   expect(text).not.toContain('\u001b')
   expect(text).not.toContain('\u202e')
   expect(text).not.toContain('](file:')
+  // No form of a file: link is left, written plainly, in brackets or as an entity
+  expect(text).not.toMatch(/(?<![\w+.-])file:/i)
+  expect(text).not.toContain('&#102;')
+  expect(text).toContain('&#99999999;')
   expect(text).toContain('cleared')
   await ui.unmount()
 })
@@ -2905,6 +2919,45 @@ test('the details show the description and the latest comments as markdown; y sh
   expect((await ui.find({ key: 'diff-plain' }))?.props.label).toBe('markdown')
   await ui.press({ key: 'diff-plain' })
   expect(await ui.find({ type: 'Markdown' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a description that could not be fetched says so under one heading, and the next refresh tries again', async ($, on) => {
+  let tries = 0
+  const s = stubs(on, {
+    body: 'Fixed at last',
+    gh: (argv) => (argv.at(-1) === 'body,comments,reviews' && ++tries === 1 ? { exitCode: 1 } : undefined),
+    stderr: 'network down',
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await s.clock.advance(500)
+  expect(await lineOf(ui, 11)).toContain('could not fetch it: network down')
+  expect((await lineOf(ui, 11)).match(/"Description"/g)).toHaveLength(1)
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  await s.clock.advance(500)
+  expect(aboutFetches(s)).toHaveLength(2)
+  expect(markdownIn(await lineOf(ui, 11))).toEqual(['Fixed at last'])
+  expect((await lineOf(ui, 11)).match(/"Description"/g)).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('comments on lines keep brackets in their text, across pages', async ($, on) => {
+  const line = (body: string, at: string) => JSON.stringify({ user: { login: 'rev' }, created_at: at, path: 'app/x.rb', line: 3, body })
+  const s = stubs(on, {
+    gh: (argv) =>
+      argv.includes('repos/acme/app/pulls/11/comments')
+        ? { stdout: `${line('use x[i][j] here', '2026-10-02T01:00:00Z')}\n${line('[x] [ ] done', '2026-10-02T02:00:00Z')}\n` }
+        : undefined,
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-diff' })
+  expect(s.calls).toContainEqual(['gh', 'api', 'repos/acme/app/pulls/11/comments', '--paginate', '--jq', '.[]'])
+  await ui.press({ key: 'diff-tab-2' })
+  const said = (await ui.findAll({ type: 'Markdown' })).map((m) => String(m.props.text))
+  expect(said).toEqual(['use x[i][j] here', '[x] [ ] done'])
   await ui.unmount()
 })
 

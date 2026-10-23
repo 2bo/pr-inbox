@@ -588,7 +588,9 @@ if (args[0] === 'api' && args[1] === 'graphql') {
     if (args.includes('--jq')) out({ c: 2, a: 12, d: 3, by: [p?.author.login ?? 'someone'] })
     else out((p && DETAILS[key(p)]?.diff) || 'diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,1 +1,1 @@\n-old\n+new\n')
   } else if ((m = path.match(/^repos\/[^/]+\/([^/]+)\/pulls\/(\d+)\/comments$/))) {
-    out(LINE_TALK[`${m[1]}/${m[2]}`] ?? [])
+    const comments = LINE_TALK[`${m[1]}/${m[2]}`] ?? []
+    // --jq '.[]': one comment per line, as gh writes it
+    out(args.includes('--jq') ? comments.map((c) => `${JSON.stringify(c)}\n`).join('') : comments)
   } else fail(`fake gh: unsupported: gh ${args.join(' ')}`)
 } else if (args[0] === 'pr' && args[1] === 'merge') {
   out('')

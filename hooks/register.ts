@@ -1010,6 +1010,8 @@ async function fetchAll($: EngineInterface): Promise<void> {
       .filter((n): n is PR => Boolean(n?.url))
       .map(cleanPr)
       .filter((p) => myApproval(p) !== undefined && !review.some((r) => r.url === p.url))
+    // A description that could not be fetched is tried again after each fetch of the list
+    for (const [url, a] of abouts) if (a.error) abouts.delete(url)
     fetchedAt = await $.clock.now()
     error = ''
     await loadInboxState($)
@@ -3343,7 +3345,15 @@ function cleanBody(text: string): string {
     .split(/\r?\n/)
     .map(cleanCodeLine)
     .join('\n')
-    .replace(/\]\(\s*file:/gi, '](blocked-file:')
+    // Entities a link may be written in (&#102;ile:, file&colon;) are read first, so no form of file: is missed:
+    // inline, <autolink>, [ref]: definition or <destination>
+    .replace(/&#(x[0-9a-f]+|\d+);?/gi, (entity, code: string) => {
+      const n = code[0]?.toLowerCase() === 'x' ? Number.parseInt(code.slice(1), 16) : Number(code)
+      const ch = n <= 0x7f ? String.fromCharCode(n) : ''
+      return /^[\w:/.-]$/.test(ch) ? ch : entity
+    })
+    .replace(/&colon;/gi, ':')
+    .replace(/(?<![\w+.-])file:/gi, 'blocked-file:')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
   return body.length > 9000 ? `${body.slice(0, 9000)}\n\n…` : body
@@ -3604,24 +3614,30 @@ async function readTalk($: EngineInterface, pr: PR): Promise<Talk[]> {
   if (!REPO_NAME.test(pr.repository.nameWithOwner)) return []
   const [view, lines] = await Promise.all([
     $.process.run(['gh', 'pr', 'view', pr.url, '--json', 'comments,reviews']).catch(ghMissing),
-    $.process.run(['gh', 'api', `repos/${pr.repository.nameWithOwner}/pulls/${pr.number}/comments`, '--paginate']).catch(ghMissing),
+    // One comment per line, so pages need no joining (a join by pattern would reach into the comments' text)
+    $.process
+      .run(['gh', 'api', `repos/${pr.repository.nameWithOwner}/pulls/${pr.number}/comments`, '--paginate', '--jq', '.[]'])
+      .catch(ghMissing),
   ])
   const out = talkOf(view.stdout)
   const str = (x: unknown) => (typeof x === 'string' ? x : '')
-  try {
-    // --paginate writes one array per page
-    const pages = lines.stdout.trim() ? (JSON.parse(`[${lines.stdout.replace(/\]\s*\[/g, '],[')}]`) as unknown[][]) : []
-    for (const c of pages.flat() as Record<string, unknown>[])
-      out.push({
-        kind: 'line',
-        author: clean(str((c.user as { login?: unknown })?.login)),
-        at: str(c.created_at),
-        body: cleanBody(str(c.body)),
-        path: clean(str(c.path)),
-        ...(typeof c.line === 'number' ? { line: c.line } : typeof c.original_line === 'number' ? { line: c.original_line } : {}),
-      })
-  } catch {
-    // No line comments to show
+  for (const line of lines.stdout.split('\n')) {
+    if (!line.trim()) continue
+    let c: Record<string, unknown>
+    try {
+      c = JSON.parse(line) as Record<string, unknown>
+    } catch {
+      // Not a comment: left out
+      continue
+    }
+    out.push({
+      kind: 'line',
+      author: clean(str((c.user as { login?: unknown })?.login)),
+      at: str(c.created_at),
+      body: cleanBody(str(c.body)),
+      path: clean(str(c.path)),
+      ...(typeof c.line === 'number' ? { line: c.line } : typeof c.original_line === 'number' ? { line: c.original_line } : {}),
+    })
   }
   return out.sort((a, b) => a.at.localeCompare(b.at))
 }
@@ -6164,10 +6180,10 @@ export function register(on: On, options: PluginOptions) {
         if (blocks.length > most) add(Box({ paddingLeft: INDENT + indent, children: [Text({ dimColor: true, children: ['…'] })] }), 1)
       }
       const view = plainText ? 'y: markdown' : 'y: plain text'
-      if (!about || about.updatedAt !== p.updatedAt) section('Description', about ? `updating… · ${view}` : 'fetching…')
-      if (about?.error) section('Description', `could not fetch it: ${fit(about.error, Math.max(10, bodyColumns - 40))} · d: read`)
-      else if (about) {
-        section('Description', view)
+      if (!about) section('Description', 'fetching…')
+      else if (about.error) section('Description', `could not fetch it: ${fit(about.error, Math.max(10, bodyColumns - 40))} · d: read`)
+      else {
+        section('Description', about.updatedAt !== p.updatedAt ? `updating… · ${view}` : view)
         if (about.body) prose(about.body, 0)
         else add(Box({ paddingLeft: INDENT, children: [Text({ color: NEON.muted, children: ['No description'] })] }), 1)
         // The latest few comments and reviews, oldest of them first
