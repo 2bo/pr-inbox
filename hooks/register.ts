@@ -3,7 +3,7 @@
 // - A status line under the prompt always shows the counts; /pr-inbox opens the pane
 // - Review requests are listed longest-waiting first, each with an automatic summary, risk and release impact
 // - Select a PR in the pane (j/k), then e: ask Claude to explain / a: approve / o: open in the browser
-// - Approve runs only when a person presses the button and confirms in the dialog
+// - Approve runs only when a person presses a, then y in the approve panel that names the commit
 // - Menus are in English. The AI output and its labels follow the language setting (mod setting → Claude Code's language → LANG)
 
 import type { EngineInterface, On, PluginOptions } from 'claude-code'
@@ -1333,56 +1333,74 @@ async function analyze($: EngineInterface, pr: PR): Promise<void> {
 
 const REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 
-// Approve the commit that was on screen, after the person confirms it in a dialog that names that commit
-async function approve($: EngineInterface, pr: PR): Promise<void> {
+// a, or b for the bot PRs that passed, opens the approve panel over the list or the reader: each PR at the commit its
+// approval is pinned to, and what is known about it. Only y in the panel approves, exactly those commits; q or n
+// leaves, and every other key only says so. Pane keys come from the person's keyboard, so no model can press y
+type ApprovalNote = { text: string; color?: 'red' | 'yellow' | 'green' }
+type Approval = {
+  // As they were when it opened: each approval is pinned to the commit shown
+  prs: PR[]
+  notes: ApprovalNote[]
+  // How the transcript says it was decided
+  how: string
+  sending: boolean
+}
+let approval: Approval | undefined
+
+function openApproval($: EngineInterface, prs: PR[], notes: ApprovalNote[], how: string): void {
+  approval = { prs, notes, how, sending: false }
+  $.ui.invalidate('ui.render')
+}
+
+// a: the commit that is on screen, with its analysis, its AI review and what changed since your approval
+function approve($: EngineInterface, pr: PR): void {
   const a = analysisOf(pr)
-  const outdated = !a || 'failed' in a || a.updatedAt !== pr.updatedAt ? ' The analysis does not cover the latest update.' : ''
   const r = reviewOfHead(pr)
   const an = a && 'risk' in a ? a : undefined
+  const notes: ApprovalNote[] = []
+  if (isApproved(pr) && approvalOutdated(pr))
+    notes.push({ text: `You approved it before; ${sinceText(pr)} · q, then d shows them`, color: 'yellow' })
   const facts = [
     an ? `Risk: ${an.risk.toUpperCase()}` : 'Risk: not analyzed',
     an ? `on release: ${{ yes: 'user-visible change', no: 'no visible change', unknown: 'impact unclear' }[an.impact]}` : '',
     r ? '' : 'AI review: none',
   ].filter(Boolean)
-  const ai =
-    r?.state === 'blocked'
-      ? ` ⚠ The AI review blocked it: ${r.problems[0] ?? 'see the details'}.`
-      : r && (r.state === 'passed' || r.state === 'approved')
-        ? passedNote(r)
-        : ''
-  // A passed review's notes open beside the dialog, with links to the lines
-  if (r?.state === 'passed' && (r.findings.some((f) => f.severity !== 'pre-existing') || r.warnings.length > 0)) {
-    expanded = pr.url
+  notes.push({ text: facts.join(' · '), ...(an?.risk === 'high' ? { color: 'red' as const } : {}) })
+  if (!a || 'failed' in a || a.updatedAt !== pr.updatedAt)
+    notes.push({ text: 'The analysis does not cover the latest update', color: 'yellow' })
+  if (r?.state === 'blocked') {
+    notes.push({ text: '⚠ The AI review blocked it:', color: 'red' })
+    for (const p of r.problems.length ? r.problems : ['see the details']) notes.push({ text: `  ${p}`, color: 'red' })
+  } else if (r && (r.state === 'passed' || r.state === 'approved')) {
+    notes.push({ text: passedNote(r), color: 'green' })
+    for (const w of r.warnings) notes.push({ text: `⚠ Check before approving: ${w}`, color: 'yellow' })
+    for (const f of r.findings.filter((f) => f.severity !== 'pre-existing'))
+      notes.push({ text: `  ${findingMark(f)} [${f.perspective}] ${f.location} ${f.summary}` })
+  }
+  openApproval($, [pr], notes, 'you pressed y in the approve panel of a')
+}
+
+// y: approve exactly the commits the panel shows, one by one; postApproval reads each head again right before
+async function sendApproval($: EngineInterface, a: Approval): Promise<void> {
+  if (a.sending || approval !== a) return
+  a.sending = true
+  $.ui.invalidate('ui.render')
+  try {
+    for (const pr of a.prs) {
+      const run = reviewOfHead(pr)
+      if ((await postApproval($, pr, a.how)) && run?.state === 'passed') run.state = 'approved'
+    }
+  } finally {
+    // Closed even when a call throws, so the panel never stays stuck on sending
+    if (approval === a) approval = undefined
     $.ui.invalidate('ui.render')
   }
-  const again = isApproved(pr) && approvalOutdated(pr) ? ` You approved it before; ${sinceText(pr)} · d shows them.` : ''
-  const ok = await confirmApproval($, pr, `${again}${ai}${outdated} ${facts.join(' · ')}.`)
-  // The dialog took the keys: give them back to the pane either way
-  await focusPane($)
-  if (ok && (await postApproval($, pr, 'you chose Approve in the dialog of a')) && r?.state === 'passed') r.state = 'approved'
 }
 
 // The finished AI review of the PR's current commit, if there is one
 function reviewOfHead(pr: PR): ReviewRun | undefined {
   const r = reviews.get(pr.url)
   return r && r.pr.headRefOid === pr.headRefOid && ['passed', 'approved', 'blocked'].includes(r.state) ? r : undefined
-}
-
-// The confirmation dialog: repository, number, commit and a defused title, then a note
-async function confirmApproval($: EngineInterface, pr: PR, note: string): Promise<boolean> {
-  const sha = pr.headRefOid.slice(0, 7)
-  const title = fit(pr.title.replace(/["“”]/g, "'"), 80)
-  try {
-    const answer = await $.ui.ask(`Approve ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (“${title}”)?${note}`, {
-      // Cancel comes first, so it is the one selected: approving takes a deliberate ↓ then Enter
-      options: ['Cancel', 'Approve'],
-      header: 'Approve',
-    })
-    return answer === 'Approve'
-  } catch {
-    // The dialog was dismissed
-    return false
-  }
 }
 
 // The PR head as GitHub reports it now ('' when it cannot be read)
@@ -2381,7 +2399,7 @@ async function aiReview($: EngineInterface, pr: PR, auto = false): Promise<void>
         redraw()
         run.state = (await postApproval($, pr, AUTO_HOW)) ? 'approved' : 'passed'
       } else {
-        // No dialog breaking in on what you do next: the row says it passed, and a approves, its dialog with the notes
+        // No dialog breaking in on what you do next: the row says it passed, and a approves, its panel with the notes
         run.state = 'passed'
         if (!auto) $.ui.toast(`✓ AI review passed ${askLabel(pr)} at ${pr.headRefOid.slice(0, 7)} · a: approve`, { timeoutMs: 8000 })
       }
@@ -2491,9 +2509,7 @@ function blockedWhy(r: ReviewRun): string {
   return plural(r.problems.length, 'problem')
 }
 
-// The approval dialog after a passed review. A mod's dialog carries only a question and labels, so the question
-// says where the notes are: the pane opens them beside it, and the transcript gets them in full first
-// What a passed AI review says in the approve dialog: how many reviewers passed it, what it left, what to check
+// What a passed AI review says in the approve panel: how many reviewers passed it and what it left (listed under it)
 function passedNote(run: ReviewRun): string {
   const n = enabledPerspectives(run.pr).length
   const nits = run.findings.filter((f) => f.severity === 'nit').length
@@ -2504,9 +2520,8 @@ function passedNote(run: ReviewRun): string {
     ...count('low-confidence finding', run.findings.filter((f) => f.severity === 'important' && !isCandidate(f)).length),
     ...count('refuted finding', run.findings.filter((f) => f.confirmed === false).length),
   ]
-  const notes = kinds.length ? ` It left ${kinds.join(', ')}, listed under the PR in the pane and in the transcript.` : ''
-  const warn = run.warnings.length ? ` ⚠ Check before approving: ${run.warnings.join('; ')}.` : ''
-  return ` All ${n} AI reviewer${n === 1 ? '' : 's'} passed it with no important findings.${notes}${warn}`
+  const notes = kinds.length ? ` It left ${kinds.join(', ')}:` : ''
+  return `All ${n} AI reviewer${n === 1 ? '' : 's'} passed it with no important findings.${notes}`
 }
 
 // The review in a sentence or two: the decision first, then the reasons that matter, in plain words. The input is the
@@ -4124,7 +4139,7 @@ async function claimAutoReview($: EngineInterface, pr: PR, now: number): Promise
 }
 
 // Reviews the review requests auto_review takes up, one at a time, after each fetch. The outcome is the same as v:
-// approving still takes a and its dialog, unless ai_approve auto applies to the PR. Cancelling one (v) pauses them
+// approving still takes a and y in its panel, unless ai_approve auto applies to the PR. Cancelling one (v) pauses them
 // for an hour
 async function scheduleAutoReviews($: EngineInterface): Promise<void> {
   if (autoReviewing || cfg.auto_review === 'off' || !interactive) return
@@ -4227,7 +4242,7 @@ function autoWhy(p: PR, now: number): string | undefined {
 // ---- Bulk review of bot PRs (b) ----
 
 // Reviews each bot PR on To review in turn, one at a time to keep the cost down. PRs already reviewed at their current
-// commit are skipped. Then one dialog approves those that passed, these and any passed before (auto_review's too).
+// commit are skipped. Then one approve panel approves those that passed, these and any passed before (auto_review's too).
 // Pressing b again stops after cancelling the running review
 async function reviewAllBots($: EngineInterface): Promise<void> {
   if (botBatch) {
@@ -4252,26 +4267,19 @@ async function reviewAllBots($: EngineInterface): Promise<void> {
   }
   const stopped = botBatch.stop
   botBatch = undefined
-  // Those that passed and wait for you: one dialog for all, naming each commit; each approval is pinned to it
+  // Those that passed and wait for you: one approve panel for all, naming each commit; each approval is pinned to it
   const passed = waitsForYou()
-  if (passed.length > 0) {
-    const list = passed.map((p) => `${p.repository.nameWithOwner.split('/')[1]}#${p.number} @${p.headRefOid.slice(0, 7)}`).join(', ')
-    let answer = ''
-    try {
-      answer = await $.ui.ask(`Approve ${plural(passed.length, 'bot PR')} that passed the AI review? ${list}`, {
-        options: ['Cancel', `Approve all ${passed.length}`],
-        header: 'Approve bots',
-      })
-    } catch {
-      // Dismissed
-    }
-    await focusPane($)
-    if (answer.startsWith('Approve all'))
-      for (const p of passed) {
-        const run = reviews.get(p.url)
-        if (run && (await postApproval($, p, 'you chose Approve all in the dialog after b'))) run.state = 'approved'
-      }
-  }
+  if (passed.length > 0)
+    openApproval(
+      $,
+      passed,
+      // Each PR, then its review's warnings: the panel covers the rows that show them
+      passed.flatMap((p) => [
+        { text: `${askLabel(p)} @${p.headRefOid.slice(0, 7)} ${p.title}` },
+        ...(reviewOfHead(p)?.warnings ?? []).map((w) => ({ text: `  ⚠ Check before approving: ${w}`, color: 'yellow' as const })),
+      ]),
+      'you pressed y in the approve panel after b',
+    )
   const touched = [...targets, ...before.filter((p) => !targets.includes(p))]
   const outcome = (state: ReviewRun['state']) => touched.filter((p) => reviews.get(p.url)?.state === state).length
   $.ui.toast(
@@ -5067,6 +5075,7 @@ export function register(on: On, options: PluginOptions) {
     if (e.id === PANE) {
       diffView = undefined
       picker = undefined
+      approval = undefined
       paneOpen = false
       paneFocused = false
       $.ui.invalidate('ui.render')
@@ -5105,10 +5114,106 @@ export function register(on: On, options: PluginOptions) {
     })
   })
 
+  // The approve panel (a, b), over the list, the reader or the picker: each PR at its commit and what is known about
+  // it. y approves exactly those commits, q or n leaves, and any other key only says so
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    if (e.requestId !== PANE || !approval) return next(e)
+    const kit = $.ui.resolve(e)
+    const { Box, Link } = kit
+    const { Text, Button } = glyphed(kit)
+    type El = ReturnType<typeof Box>
+    const redraw = () => $.ui.invalidate('ui.render')
+    const columns = Math.max(40, (e.props.bodyColumns ?? 80) - 1)
+    const focused = e.props.isFocused === true
+    const a = approval
+    const toast = (text: string) => $.ui.toast(text, { timeoutMs: 4000 })
+    const key = (k: string, label: string, hotkey: string, onPress: () => void, dim = false) =>
+      Button({ key: k, label, hotkey, plain: true, dimColor: dim, onPress })
+    const leave = () => {
+      if (a.sending) return
+      approval = undefined
+      redraw()
+    }
+    const only = a.prs.length === 1 ? a.prs[0] : undefined
+    const label = (p: PR) => `${p.repository.nameWithOwner.split('/')[1] ?? p.repository.nameWithOwner}#${p.number}`
+    // New commits since it opened: the approval would be refused, so the panel says so first
+    const moved = (p: PR) => (findPr(p.url)?.headRefOid ?? p.headRefOid) !== p.headRefOid
+    const prLink = only ? safeHref(only.url) : undefined
+    const head = Box({
+      flexDirection: 'row',
+      columnGap: 1,
+      children: [
+        Text({ color: focused ? NEON.pink : NEON.rule, children: ['▍'] }),
+        Text({ color: NEON.pink, bold: true, children: ['approve'] }),
+        ...(only
+          ? [
+              prLink
+                ? Link({ href: prLink, children: [Text({ color: NEON.cyan, underline: true, children: [label(only)] })] })
+                : Text({ children: [label(only)] }),
+              Text({ color: NEON.yellow, bold: true, children: [`@${only.headRefOid.slice(0, 7)}`] }),
+              Text({
+                bold: true,
+                wrap: 'truncate-end',
+                children: [fit(clean(only.title), Math.max(10, columns - textWidth(label(only)) - 22))],
+              }),
+            ]
+          : [Text({ bold: true, children: [`${plural(a.prs.length, 'bot PR')} that passed the AI review`] })]),
+      ],
+    })
+    const rule = (heavy = false) => Text({ color: focused ? NEON.violet : NEON.rule, children: [(heavy ? '━' : '─').repeat(columns)] })
+    const color = (c: ApprovalNote['color']) => (c ? { color: { red: NEON.red, yellow: NEON.yellow, green: NEON.green }[c] } : {})
+    const body: El[] = a.notes.map((n) => Text({ ...color(n.color), wrap: 'wrap', children: [clean(n.text)] }))
+    const gone = a.prs.filter(moved)
+    for (const p of gone)
+      body.push(
+        Text({ color: NEON.red, wrap: 'wrap', children: [`✗ ${label(p)} has new commits since it opened: it will not be approved`] }),
+      )
+    // In full, owner too: exactly what y sends
+    const commits = a.prs.map((p) => `${p.repository.nameWithOwner}#${p.number} at ${p.headRefOid.slice(0, 7)}`).join(', ')
+    const status = a.sending
+      ? Text({ color: NEON.cyan, children: ['⟳ approving…'] })
+      : Box({
+          flexDirection: 'row',
+          children: [
+            Text({ color: NEON.muted, children: ['y approves: '] }),
+            Text({ color: NEON.cyan, bold: true, wrap: 'wrap', children: [commits] }),
+          ],
+        })
+    const keys = Box({
+      key: 'approval-keys',
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      columnGap: 2,
+      children: [
+        // Cancel first; n is a hidden second way out
+        key('approval-cancel', 'cancel', 'q', leave),
+        Box({ display: 'none', children: [key('approval-no', 'cancel', 'n', leave)] }),
+        key('approval-yes', a.prs.length === 1 ? 'approve' : `approve all ${a.prs.length}`, 'y', () => void sendApproval($, a)),
+        ...(only
+          ? [
+              key(
+                'approval-open',
+                'open on GitHub',
+                'o',
+                async () => void (await $.process.run(['gh', 'pr', 'view', only.url, '--web'])),
+                true,
+              ),
+            ]
+          : []),
+      ],
+    })
+    const tree: El[] = [head, rule(true), ...body, rule(), status, keys]
+    return Box({
+      key: 'approval',
+      flexDirection: 'column',
+      children: [...tree, keyCatcher(kit, tree, (k) => `${k}: no such key here · y approve · q cancel`, toast)],
+    })
+  })
+
   // The reviewers picker (w), in the pane over the list or the reader: who is asked and who reviewed, then people
   // and teams to suggest or found by name. x checks or unchecks, s sends exactly the line above the keys
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
-    if (e.requestId !== PANE || !picker) return next(e)
+    if (e.requestId !== PANE || !picker || approval) return next(e)
     const kit = $.ui.resolve(e)
     const { Box, Link } = kit
     const { Text, Button } = glyphed(kit)
@@ -5292,7 +5397,7 @@ export function register(on: On, options: PluginOptions) {
   // The reader, in the pane while one is open (d): the description, then one file at a time, drawn by Claude Code's
   // own highlighter (the Code element). j/k scroll it by a block of lines, h/l turn the page
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
-    if (e.requestId !== PANE || !diffView || picker) return next(e)
+    if (e.requestId !== PANE || !diffView || picker || approval) return next(e)
     const kit = $.ui.resolve(e)
     const { Box, Link, Code, Markdown } = kit
     const { Text, Button } = glyphed(kit)
@@ -5733,7 +5838,7 @@ export function register(on: On, options: PluginOptions) {
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     // The diff draws itself (above) while one is open
-    if (e.requestId !== PANE || diffView || picker) return next(e)
+    if (e.requestId !== PANE || diffView || picker || approval) return next(e)
     // Follow the focus, so the hint under the prompt can say where Esc and ctrl+x tab go
     const focused = e.props.isFocused === true
     if (!paneOpen || focused !== paneFocused) {
@@ -6537,7 +6642,7 @@ export function register(on: On, options: PluginOptions) {
     // AI review every bot PR in turn: those with no review of their current commit yet
     const unreviewedBots = g.bots.filter((p) => !reviewOfHead(p) && reviews.get(p.url)?.state !== 'running').length
     // b sits on the bots heading
-    // With none to review, b approves those that passed (auto_review's, say) in one dialog
+    // With none to review, b approves those that passed (auto_review's, say) in one approve panel
     const passedBots = g.bots.filter((p) => reviewOfHead(p)?.state === 'passed').length
     const reviewBotsLabel = botBatch
       ? `stop AI review (${botBatch.done}/${botBatch.total})`
@@ -6616,7 +6721,7 @@ export function register(on: On, options: PluginOptions) {
           'the selected PR',
           [
             ['d', 'read it: description, conversation and files, in tabs 1 / 2 / 3'],
-            ['a', 'approve, after a dialog naming the commit · on ↻ RE: approve again'],
+            ['a', 'approve: a panel naming the commit, then y · on ↻ RE: approve again'],
             ['v', 'AI review; on your own PR it never approves · v again cancels'],
             ['e', 'Claude explains it (read-only), or diagnoses what blocks your own'],
             [
@@ -6646,7 +6751,7 @@ export function register(on: On, options: PluginOptions) {
           [
             ['j / k', 'next / previous PR'],
             ['1 / 2', 'To review / My PRs · h / l: the tab to the left / right'],
-            ['b', 'AI review every bot PR not reviewed yet, then approve those that passed in one dialog · b again stops'],
+            ['b', 'AI review every bot PR not reviewed yet, then approve those that passed in one panel (y) · b again stops'],
             ['z', 'show or hide snoozed PRs'],
             ['f', 'filter by repository, number, title or @author · empty clears it'],
             ['n', 'next page of the details (the description and conversation come last), when they do not fit'],

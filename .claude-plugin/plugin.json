@@ -1,6 +1,6 @@
 {
   "name": "pr-inbox",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "An inbox for review requests and your own PRs: AI summary and risk, an AI review that can approve, a reader for the description and diff, asking reviewers (teams that assign too), merging (gh stack too) and CI fixes with Claude",
   "author": {
     "name": "2bo"
@@ -103,7 +103,7 @@
     "ai_approve": {
       "type": "string",
       "title": "AI review: approve",
-      "description": "What happens when the AI review (v) passes: confirm (the row says so and a approves, after its dialog) or auto (approve without asking, for PRs from members and collaborators of the repository and for Dependabot or Renovate; others are left to a)",
+      "description": "What happens when the AI review (v) passes: confirm (the row says so and a approves, after y in its panel) or auto (approve without asking, for PRs from members and collaborators of the repository and for Dependabot or Renovate; others are left to a)",
       "default": "confirm",
       "options": ["confirm", "auto"]
     },
