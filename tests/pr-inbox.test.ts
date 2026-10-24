@@ -439,7 +439,7 @@ test('approves only when y is pressed in the approve panel', async ($, on) => {
   expect(s.calls).toContainEqual(APPROVE_11)
   expect(s.panels.at(-1)).toContain(`y approves: acme/app#11 at ${HEAD.slice(0, 7)}`)
   // The panel closed, and the list is back
-  expect(await ui.find({ key: 'approval' })).toBeUndefined()
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -458,7 +458,7 @@ test('the approve panel takes the pane keys: a again or any other key does not a
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-approve' })
-  expect(await ui.find({ key: 'approval' })).toBeDefined()
+  expect(await ui.find({ key: 'panel' })).toBeDefined()
   // The list's keys are not there while it is open
   expect(await ui.find({ key: 'act-approve' })).toBeUndefined()
   await ui.press({ key: 'unbound-a' })
@@ -466,13 +466,13 @@ test('the approve panel takes the pane keys: a again or any other key does not a
   expect(s.toasts.at(-1)).toBe('m: no such key here · y approve · q cancel')
   expect(approved(s.calls)).toBe(false)
   // Cancel comes before approve
-  const keys = JSON.stringify(await ui.find({ key: 'approval-keys' }))
-  expect(keys.indexOf('approval-cancel')).toBeLessThan(keys.indexOf('approval-yes'))
-  await ui.press({ key: 'approval-no' })
-  expect(await ui.find({ key: 'approval' })).toBeUndefined()
+  const keys = JSON.stringify(await ui.find({ key: 'panel-keys' }))
+  expect(keys.indexOf('panel-cancel')).toBeLessThan(keys.indexOf('panel-yes'))
+  await ui.press({ key: 'panel-no' })
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
   await ui.press({ key: 'act-approve' })
-  await ui.press({ key: 'approval-cancel' })
-  expect(await ui.find({ key: 'approval' })).toBeUndefined()
+  await ui.press({ key: 'panel-cancel' })
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
   expect(approved(s.calls)).toBe(false)
   await ui.unmount()
 })
@@ -1178,10 +1178,10 @@ type Pressable = Finder & { press: (q: { key: string }) => Promise<unknown> }
 
 // The approve panel, if one is open: what it says goes to s.panels, then y or q as the stubs say
 async function answerPanel(ui: Pressable, s: Stubs) {
-  const panel = await ui.find({ key: 'approval' })
+  const panel = await ui.find({ key: 'panel' })
   if (!panel) return
   s.panels.push((panel as { text?: string }).text ?? '')
-  await ui.press({ key: s.approves() ? 'approval-yes' : 'approval-cancel' })
+  await ui.press({ key: s.approves() ? 'panel-yes' : 'panel-cancel' })
   await settleReview(s)
 }
 
@@ -3891,7 +3891,7 @@ test('a passed AI review does not open the approve panel by itself: the row says
   await ui.press({ key: 'act-ai-review' })
   await settleReview(s)
   expect(s.questions).toEqual([])
-  expect(await ui.find({ key: 'approval' })).toBeUndefined()
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
   expect(approvedAt(s)).toEqual([])
   expect(s.toasts.some((t) => t.includes('✓ AI review passed app#11') && t.includes('a: approve'))).toBe(true)
   await pressApprove(ui, s)
