@@ -43,8 +43,21 @@ command -v jq >/dev/null 2>&1 || exit 0
 input=$(cat)
 cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
 # Only a real call: a command (after ; && || | or a newline, env assignments allowed) that is gh … pr … create, so
-# gh -R owner/repo pr create counts and echo 'gh pr create' does not
-printf '%s\n' "$cmd" | tr ';&|' '\n\n\n' |
+# gh -R owner/repo pr create counts and echo 'gh pr create' does not. Quoted text is blanked first (to Q), so a
+# separator or a gh inside quotes is never taken for a command
+printf '%s\n' "$cmd" |
+  awk '{
+    out = ""
+    for (i = 1; i <= length($0); i++) {
+      c = substr($0, i, 1)
+      if (q != "") { if (c == q) { q = ""; out = out "Q" }; continue }
+      if (c == "\\") { i++; out = out "Q"; continue }
+      if (c == "\047" || c == "\"") { q = c; continue }
+      if (c == ";" || c == "&" || c == "|") c = "\n"
+      out = out c
+    }
+    print out
+  }' |
   grep -Eq '^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr([[:space:]]+[^[:space:]]+)*[[:space:]]+create([[:space:]]|$)' ||
   exit 0
 
