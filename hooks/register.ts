@@ -2399,7 +2399,8 @@ function linkedIssues(pr: PR, overview: string | undefined): { reqs: ReadReq[]; 
   const refs: { repo: string; number: number }[] = []
   const prose = body
     .replace(/<!--[\s\S]*?(?:-->|$)/g, '')
-    .replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^ {0,3}\1[^\n]*$|(?![\s\S]))/gm, '')
+    // A fence closes only with its own character, at least as long, and nothing but spaces after it (CommonMark)
+    .replace(/^ {0,3}(([`~])\2{2,})[^\n]*\n[\s\S]*?(?:^ {0,3}\1\2*[ \t\r]*$|(?![\s\S]))/gm, '')
     .replace(/`[^`\n]*`/g, '')
   for (const m of prose.matchAll(ISSUE_REF)) refs.push({ repo: m[1] ?? m[3] ?? here, number: Number(m[2] ?? m[4]) })
   for (const c of closing) {
@@ -2443,6 +2444,8 @@ async function baseContext($: EngineInterface, run: ReviewRun): Promise<ContentI
   const unread = [
     ...(skipped > 0 ? [`${skipped} more beyond the first ${MAX_LINKED_ISSUES}`] : []),
     ...(elsewhere > 0 ? [`${elsewhere} in repositories of other owners`] : []),
+    // A cut overview is not JSON: its links could not be read at all
+    ...(overview?.truncated ? ['the PR overview was cut off, so its links may be missing'] : []),
   ]
   if (unread.length > 0)
     linked.push({

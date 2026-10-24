@@ -1261,6 +1261,7 @@ test('the AI review reads the issues and PRs the description links to, in reposi
         'This PR is https://github.com/acme/app/pull/11; not a ref: a.b/c#9, page.html#12, #12abc.',
         '<!-- Fixes #20 --> Not links either: `#21` and',
         '```',
+        '```js',
         'see #22',
         '```',
         'Related: https://github.com/acme/app/issues/4, acme/app#5, #6, #8',
@@ -1303,6 +1304,15 @@ test('the AI review also reads the issues a PR closes from the sidebar, when the
   expect(prompt).toContain('GitHub issue or PR acme/app#3, closed by acme/app#11')
   expect(prompt).toContain('GitHub issue or PR acme/lib#2, closed by acme/app#11')
   expect(prompt).not.toContain('"source":"pr-inbox"')
+  await ui.unmount()
+})
+
+test('a PR overview too long to read whole tells the reviewers its links may be missing', async ($, on) => {
+  const s = stubs(on, { answer: 'Cancel', overview: { body: `Fixes #3 ${'x'.repeat(40_000)}` } })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  expect(s.calls.filter((c) => c[1] === 'issue' && c[2] === 'view')).toEqual([])
+  expect(reviewsOf(s)[0]?.prompt).toContain('the PR overview was cut off, so its links may be missing')
   await ui.unmount()
 })
 
