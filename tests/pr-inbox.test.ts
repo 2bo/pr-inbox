@@ -3926,6 +3926,21 @@ test('after a push, w asks again whoever requested changes, to them and not to t
   await ui.unmount()
 })
 
+test('w sends with y; s still sends the same, and says y is the key now', async ($, on) => {
+  const s = stubs(on, { graphql: reviewersGraphql(PUSHED), gh: reviewersGh([PUSHED]) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-reviewers' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect((await ui.find({ key: 'pick-send' }))?.props.hotkey).toBe('y')
+  expect(JSON.stringify(await ui.find({ key: 'picker-keys' }))).toContain('send')
+  await ui.press({ key: 'pick-send-s' })
+  expect(s.stdins[s.calls.findIndex((c) => c.includes('POST'))]).toBe('{"reviewers":["mika"],"team_reviewers":[]}')
+  expect(s.toasts.at(-1)).toBe('Re-requested @mika on app#27 · y sends from now on (s stops in a later version)')
+  await ui.unmount()
+})
+
 test('w takes a request back when you uncheck it; q leaves without sending anything', async ($, on) => {
   const s = stubs(on, { graphql: reviewersGraphql(ASSIGNED), gh: reviewersGh([ASSIGNED]) })
   await start($, s.clock)

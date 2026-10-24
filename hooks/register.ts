@@ -2862,7 +2862,7 @@ function logReview($: EngineInterface, run: ReviewRun): void {
 // again), then people and teams to suggest, from GitHub's suggestions, who reviewed your recent PRs in the repository,
 // who reviews there often, and who you asked last time. A team that assigns its members on its own (GitHub's code
 // review assignment) is suggested as the team, and after a request the picker waits to say whom it picked.
-// Requests go out only when the person presses s in the picker, as exactly the list under it
+// Requests go out only when the person presses y in the picker, as exactly the list under it
 
 // A GitHub login, and a team as "org/slug": anything else (bots, odd names) is never drawn nor sent
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/
@@ -3075,7 +3075,7 @@ function onPrRows(pr: PR): PickRow[] {
 }
 
 // Everything the picker lists, in order: the PR's own rows, those you checked that a search hides, then the found or
-// the suggested ones. A checked row never leaves the list, so what s sends is always on screen
+// the suggested ones. A checked row never leaves the list, so what y sends is always on screen
 function pickerRows(p: Picker): PickRow[] {
   const own = onPrRows(p.pr)
   const listed = p.found ?? p.candidates?.rows ?? []
@@ -3093,7 +3093,7 @@ function isChecked(p: Picker, row: PickRow): boolean {
   return p.want.get(row.id) ?? row.asked
 }
 
-// What s sends: people and teams to ask, those asked again, and requests to take back
+// What y sends: people and teams to ask, those asked again, and requests to take back
 function pickerPlan(p: Picker): { add: string[]; again: string[]; remove: string[] } {
   const add: string[] = []
   const again: string[] = []
@@ -3480,10 +3480,10 @@ async function searchReviewers($: EngineInterface, p: Picker, query: string): Pr
   $.ui.invalidate('ui.render')
 }
 
-// s: send exactly the list under the picker. Asking (and asking again) is one POST, taking back one DELETE, each to
+// y: send exactly the list under the picker (s too, for now, saying y is the key: it was until 1.8.0). Asking (and asking again) is one POST, taking back one DELETE, each to
 // requested_reviewers with the ids on stdin. Then the picker closes and the PR's reviews are fetched again; a team
 // that assigns its members is watched until it has picked them
-async function sendReviewers($: EngineInterface, p: Picker): Promise<void> {
+async function sendReviewers($: EngineInterface, p: Picker, viaS = false): Promise<void> {
   const plan = pickerPlan(p)
   const asking = [...plan.add, ...plan.again]
   if (asking.length === 0 && plan.remove.length === 0) {
@@ -3538,12 +3538,13 @@ async function sendReviewers($: EngineInterface, p: Picker): Promise<void> {
     plan.remove.length ? `removed ${plan.remove.map(atName).join(', ')}` : '',
   ].filter(Boolean)
   const teams = plan.add.filter(isTeamId).filter((id) => p.candidates?.teams.get(id)?.assigns !== false)
+  const moved = viaS ? ' · y sends from now on (s stops in a later version)' : ''
   if (teams.length === 0) {
-    $.ui.toast(`${capitalize(said.join(' · '))} on ${label}`, { timeoutMs: 6000 })
+    $.ui.toast(`${capitalize(said.join(' · '))} on ${label}${moved}`, { timeoutMs: 6000 })
     await fetchReviewState($, pr)
     return
   }
-  $.ui.toast(`${capitalize(said.join(' · '))} on ${label} · ⟳ waiting for ${teams.map(atName).join(', ')} to pick a reviewer…`, {
+  $.ui.toast(`${capitalize(said.join(' · '))} on ${label} · ⟳ waiting for ${teams.map(atName).join(', ')} to pick a reviewer…${moved}`, {
     timeoutMs: 6000,
   })
   void watchAssignment($, pr, teams, new Set([...before, ...asking]))
@@ -5741,7 +5742,7 @@ export function register(on: On, options: PluginOptions) {
   })
 
   // The reviewers picker (w), in the pane over the list or the reader: who is asked and who reviewed, then people
-  // and teams to suggest or found by name. x checks or unchecks, s sends exactly the line above the keys
+  // and teams to suggest or found by name. x checks or unchecks, y sends exactly the line above the keys
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE || !picker || writePanel) return next(e)
     const kit = $.ui.resolve(e)
@@ -5826,7 +5827,7 @@ export function register(on: On, options: PluginOptions) {
     else if (!p.found && more.length === 0)
       body.push(Text({ color: NEON.muted, children: ['  no one to suggest · f: find a person or team'] }))
     for (const [i, row] of more.entries()) body.push(line(row, own.length + i))
-    // What s sends, and how it went
+    // What y sends, and how it went
     const plan = pickerPlan(p)
     const planned = planText(plan)
     const status = p.sending
@@ -5837,7 +5838,7 @@ export function register(on: On, options: PluginOptions) {
           ? Box({
               flexDirection: 'row',
               children: [
-                Text({ color: NEON.muted, children: ['s sends: '] }),
+                Text({ color: NEON.muted, children: ['y sends: '] }),
                 Text({ color: NEON.cyan, bold: true, wrap: 'wrap', children: [planned] }),
               ],
             })
@@ -5891,6 +5892,8 @@ export function register(on: On, options: PluginOptions) {
                 toggle(row)
               }),
             ),
+            // s sent until 1.8.0: it still does, and the toast says y is the key now
+            key('pick-send-s', 'send', 's', () => void sendReviewers($, p, true)),
           ],
         }),
         key('pick-toggle', 'check / uncheck', 'x', () => toggle(rows[p.cursor])),
@@ -5898,7 +5901,7 @@ export function register(on: On, options: PluginOptions) {
           p.searching = true
           redraw()
         }),
-        key('pick-send', 'send', 's', () => void sendReviewers($, p)),
+        key('pick-send', 'send', 'y', () => void sendReviewers($, p)),
         key('pick-open', 'open on GitHub', 'o', async () => void (await $.process.run(['gh', 'pr', 'view', pr.url, '--web'])), true),
         key('pick-back', p.fromReader ? 'back to the PR' : 'back to list', 'q', back),
       ],
@@ -5919,7 +5922,7 @@ export function register(on: On, options: PluginOptions) {
         ...tree,
         ...(p.searching
           ? []
-          : [keyCatcher(kit, tree, (k) => `${k}: no such key here · j/k move · x check · f find · s send · q back`, toast)]),
+          : [keyCatcher(kit, tree, (k) => `${k}: no such key here · j/k move · x check · f find · y send · q back`, toast)]),
       ],
     })
   })
@@ -7273,7 +7276,7 @@ export function register(on: On, options: PluginOptions) {
               'ready: merge now in the merge panel: 1/2/3 picks the method, then y (a stack: gh stack merge) · not ready: auto-merge when ready (⇢ AUTO), or off again · also on bot PRs (1)',
             ],
             ['c', 'CI failed: 1 Claude fixes it in a worktree, 2 re-run, then y · a fix ready: the push panel (y push, d diff, x forget)'],
-            ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · s in it sends'],
+            ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · y in it sends'],
           ],
         ],
         [
