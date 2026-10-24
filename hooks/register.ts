@@ -1341,7 +1341,8 @@ const REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 // or by taking focus, and pane keys come only from the keyboard, so no model can press y
 type PanelNote = { text: string; color?: 'red' | 'yellow' | 'green' }
 // Data, not a callback: the write runs through runWrite, a named function per kind
-type PanelWrite = { kind: 'approve'; how: string }
+// bulk: the panel after b, whose header and notes list the PRs (rebuilt from those left as each is approved)
+type PanelWrite = { kind: 'approve'; how: string; bulk: boolean }
 type WritePanel = {
   // What y does, in a word: the header's first word and y's label
   verb: string
@@ -1409,12 +1410,24 @@ async function approveAll($: EngineInterface, p: WritePanel, how: string): Promi
     const run = reviewOfHead(pr)
     const ok = await postApproval($, pr, how, quiet)
     p.prs = p.prs.filter((x) => x !== pr)
-    Object.assign(p, approveLines(p.prs))
+    Object.assign(p, approveLines(p.prs), p.write.kind === 'approve' && p.write.bulk ? bulkLines(p.prs) : {})
     if (ok) done.push(`${pr.repository.nameWithOwner}#${pr.number}`)
     if (ok && run?.state === 'passed') run.state = 'approved'
   }
   if (quiet && done.length > 0) $.ui.toast(`✦ approved ${done.length}: ${done.join(', ')} · moved to approved by you`, { timeoutMs: 8000 })
   return ''
+}
+
+// The header and notes of the approve panel after b: each PR, then its review's warnings (the panel covers the rows
+// that show them)
+function bulkLines(prs: PR[]): { title: string; notes: PanelNote[] } {
+  return {
+    title: prs.length > 1 ? `${plural(prs.length, 'bot PR')} that passed the AI review` : '',
+    notes: prs.flatMap((p) => [
+      { text: `${askLabel(p)} @${p.headRefOid.slice(0, 7)} ${p.title}` },
+      ...(reviewOfHead(p)?.warnings ?? []).map((w) => ({ text: `  ⚠ Check before approving: ${w}`, color: 'yellow' as const })),
+    ]),
+  }
 }
 
 // What the approve panel says y sends, and y's label
@@ -1427,17 +1440,18 @@ function approveLines(prs: PR[]): { sends: string; yes: string } {
 }
 
 // The approve panel (a, b)
-function openApproval($: EngineInterface, prs: PR[], notes: PanelNote[], how: string, title = ''): void {
+function openApproval($: EngineInterface, prs: PR[], notes: PanelNote[], how: string, bulk = false): void {
   openPanel($, {
     verb: 'approve',
     prs,
-    title,
+    title: '',
     notes,
+    ...(bulk ? bulkLines(prs) : {}),
     sendsLead: 'y approves: ',
     ...approveLines(prs),
     movedNote: 'it will not be approved',
     progress: '⟳ approving…',
-    write: { kind: 'approve', how },
+    write: { kind: 'approve', how, bulk },
   })
 }
 
@@ -4354,17 +4368,8 @@ async function reviewAllBots($: EngineInterface): Promise<void> {
   // Those that passed and wait for you: one approve panel for all, naming each commit; each approval is pinned to it
   const passed = waitsForYou()
   if (passed.length > 0)
-    openApproval(
-      $,
-      passed,
-      // Each PR, then its review's warnings: the panel covers the rows that show them
-      passed.flatMap((p) => [
-        { text: `${askLabel(p)} @${p.headRefOid.slice(0, 7)} ${p.title}` },
-        ...(reviewOfHead(p)?.warnings ?? []).map((w) => ({ text: `  ⚠ Check before approving: ${w}`, color: 'yellow' as const })),
-      ]),
-      'you pressed y in the approve panel after b',
-      passed.length > 1 ? `${plural(passed.length, 'bot PR')} that passed the AI review` : '',
-    )
+    // The header and notes come from bulkLines, rebuilt from the PRs left as each one is approved
+    openApproval($, passed, [], 'you pressed y in the approve panel after b', true)
   const touched = [...targets, ...before.filter((p) => !targets.includes(p))]
   const outcome = (state: ReviewRun['state']) => touched.filter((p) => reviews.get(p.url)?.state === state).length
   $.ui.toast(
