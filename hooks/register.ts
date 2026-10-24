@@ -65,6 +65,28 @@ type PR = {
   requestEvents?: { nodes: (RequestEvent | null)[] }
 }
 
+// An open issue assigned to you. Drawn only, never sent to a model; the pane writes to it only to close or reopen it,
+// after y in its write panel (c)
+type Issue = {
+  number: number
+  title: string
+  url: string
+  createdAt: string
+  updatedAt: string
+  // OPEN, or CLOSED on one closed from the pane (closedHere), with the reason picked
+  state?: string
+  stateReason?: string
+  repository: { nameWithOwner: string }
+  author: { login: string } | null
+  labels?: { nodes: ({ name: string } | null)[] }
+  comments?: { totalCount: number }
+  // The issue it is a sub-issue of, and how many sub-issues it has and how many of them are closed
+  parent?: IssueRef | null
+  subIssuesSummary?: { total: number; completed: number }
+}
+// An issue named beside another: a parent or a sub-issue
+type IssueRef = { number: number; title: string; url: string; state?: string; repository: { nameWithOwner: string } }
+
 // Someone asked to review: a person (login) or a team (combinedSlug, "org/slug")
 type Reviewer = { __typename: string; login?: string; combinedSlug?: string }
 type RequestEvent = { __typename: string; createdAt: string; requestedReviewer: Reviewer | null }
@@ -123,7 +145,7 @@ type Config = {
 }
 
 // The previous fetch, kept in $.store to spot new review requests and state changes
-type Snapshot = { review: string[]; mine: Record<string, string> }
+type Snapshot = { review: string[]; mine: Record<string, string>; assigned?: string[] }
 
 type Risk = 'low' | 'medium' | 'high'
 
@@ -218,11 +240,21 @@ const ASKED_FRAGMENT = `fragment asked on PullRequest {
 }
 fragment who on RequestedReviewer { __typename ... on User { login } ... on Team { combinedSlug } }`
 
-const QUERY = `query($review: String!, $mine: String!, $approved: String!) {
+const QUERY = `query($review: String!, $mine: String!, $approved: String!, $assigned: String!) {
   viewer { login }
   review: search(query: $review, type: ISSUE, first: 50) { nodes { ...pr ...checks ...requested } }
   mine: search(query: $mine, type: ISSUE, first: 50) { nodes { ...pr ...checks ...reviewed ...asked } }
   approved: search(query: $approved, type: ISSUE, first: 50) { nodes { ...pr ...checks ...reviewed } }
+  assigned: search(query: $assigned, type: ISSUE, first: 50) { issueCount nodes { ...issue } }
+}
+fragment issue on Issue {
+  number title url createdAt updatedAt state
+  repository { nameWithOwner }
+  author { login }
+  labels(first: 20) { nodes { name } }
+  comments { totalCount }
+  parent { number title url state repository { nameWithOwner } }
+  subIssuesSummary { total completed }
 }
 ${REVIEWED_FRAGMENT}
 ${ASKED_FRAGMENT}
@@ -361,11 +393,13 @@ function labels(): Labels {
 }
 
 // Pane state
-let tab: 'review' | 'mine' = 'review'
+let tab: 'review' | 'mine' | 'issues' = 'review'
 // The PR whose details (the AI review's findings) are open, the key help, and snoozed PRs shown
 let expanded = ''
 // How far the details panel is paged down (n), for which PR and which view; another PR or view starts at the top
 let panelPage = { url: '', expanded: '', from: 0 }
+// The same for the details of the selected issue
+let issuePage = { url: '', from: 1 }
 // The filter typed after f (matched against repository, number, title and author), and whether its field is open
 let filterText = ''
 let filtering = false
@@ -384,6 +418,12 @@ let review: PR[] = []
 // Open PRs by others whose latest review from you is an approval: not merged yet, and why
 let approved: PR[] = []
 let mine: PR[] = []
+// Open issues assigned to you, most recently updated first
+let assigned: Issue[] = []
+// How many the search found: more than it returns when over its 50
+let assignedTotal = 0
+// Issues closed from the pane in this session, so c can reopen them
+let closedHere: Issue[] = []
 let fetchedAt = 0
 let loading = false
 let error = ''
@@ -441,6 +481,44 @@ function safeHref(url: string | null | undefined): string | undefined {
     return u.href.length <= 2048 && /^[\x21-\x7e]+$/.test(u.href) ? u.href : undefined
   } catch {
     return undefined
+  }
+}
+
+// Sanitize every string of an issue named beside another
+function cleanIssueRef(ref: IssueRef | null | undefined): IssueRef | null {
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  if (!ref || typeof ref !== 'object') return null
+  return {
+    number: Number(ref.number) || 0,
+    title: clean(str(ref.title)),
+    url: str(ref.url),
+    state: str(ref.state),
+    repository: { nameWithOwner: clean(str(ref.repository?.nameWithOwner)) },
+  }
+}
+
+// Sanitize every string of an issue that gets drawn
+function cleanIssue(issue: Issue): Issue {
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  const subs = issue.subIssuesSummary
+  return {
+    state: str(issue.state) || 'OPEN',
+    parent: cleanIssueRef(issue.parent),
+    subIssuesSummary: { total: Number(subs?.total) || 0, completed: Number(subs?.completed) || 0 },
+    number: Number(issue.number) || 0,
+    title: clean(str(issue.title)),
+    url: str(issue.url),
+    createdAt: str(issue.createdAt),
+    updatedAt: str(issue.updatedAt),
+    repository: { nameWithOwner: clean(str(issue.repository?.nameWithOwner)) },
+    author: issue.author ? { login: clean(str(issue.author.login)) } : null,
+    labels: {
+      nodes: (issue.labels?.nodes ?? [])
+        .map((l) => clean(str(l?.name)))
+        .filter(Boolean)
+        .map((name) => ({ name })),
+    },
+    comments: { totalCount: Number(issue.comments?.totalCount) || 0 },
   }
 }
 
@@ -847,7 +925,7 @@ function summary(g: Record<Group, PR[]>): string {
     ...part(g.ready.length, `✓${g.ready.length} ready`),
     ...part(g.waiting.length, `…${g.waiting.length} in review`),
   ]
-  return `${left.join(' · ')} │ my PRs ${right.length ? right.join(' · ') : mine.length}`
+  return `${left.join(' · ')} │ my PRs ${right.length ? right.join(' · ') : mine.length}${assigned.length ? ` │ issues ${issuesCount()}` : ''}`
 }
 
 // Time since the request
@@ -943,6 +1021,7 @@ function findPr(url: string): PR | undefined {
 
 // PRs visible on the current tab, in screen order (what j/k move through)
 function visibleRows(g: Record<Group, PR[]>): PR[] {
+  if (tab === 'issues') return []
   const rows =
     tab === 'review'
       ? [...g.humans, ...g.bots, ...g.approved, ...(showSnoozed ? g.snoozedReview : [])]
@@ -950,24 +1029,30 @@ function visibleRows(g: Record<Group, PR[]>): PR[] {
   return groupStacks(rows.filter(matchesFilter))
 }
 
-// Every word of the filter must appear in the PR's repository, number, title or author
-function matchesFilter(pr: PR): boolean {
+// "50+" when the search found more issues than it returned
+function issuesCount(): string {
+  return `${assigned.length}${assignedTotal > assigned.length ? '+' : ''}`
+}
+
+// Every word of the filter must appear in the PR's (or issue's) repository, number, title or author, or an issue's labels
+function matchesFilter(item: PR | Issue): boolean {
   const words = filterText.toLowerCase().split(/\s+/).filter(Boolean)
   if (words.length === 0) return true
-  const hay = `${pr.repository.nameWithOwner}#${pr.number} ${pr.title} @${pr.author?.login ?? ''}`.toLowerCase()
+  const labels = 'labels' in item ? (item.labels?.nodes ?? []).map((l) => l?.name ?? '').join(' ') : ''
+  const hay = `${item.repository.nameWithOwner}#${item.number} ${item.title} @${item.author?.login ?? ''} ${labels}`.toLowerCase()
   return words.every((w) => hay.includes(w))
 }
 
 // Where the selection last stood, so a PR that leaves the list (approved, merged, snoozed, gone on a refresh) hands
 // the selection to the one that takes its place, not to the top
 let selectedAt = 0
-function ensureSelection(rows: PR[]): void {
+function ensureSelection(rows: { url: string }[]): void {
   const i = rows.findIndex((p) => p.url === selected)
   if (i >= 0) selectedAt = i
   else selected = rows[Math.min(selectedAt, rows.length - 1)]?.url ?? ''
 }
 
-function moveSelection(rows: PR[], delta: number): void {
+function moveSelection(rows: { url: string }[], delta: number): void {
   if (rows.length === 0) return
   const i = rows.findIndex((p) => p.url === selected)
   selected = rows[Math.min(rows.length - 1, Math.max(0, i + delta))]?.url ?? ''
@@ -978,10 +1063,10 @@ function moveSelection(rows: PR[], delta: number): void {
 // A GitHub organization name, so the setting cannot add other search qualifiers
 const ORG_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
 
-function searchQuery(filter: string): string {
+function searchQuery(filter: string, kind: 'pr' | 'issue' = 'pr'): string {
   const org = cfg.org_filter.trim()
   if (org && !ORG_NAME.test(org)) throw new Error(`org_filter is not an organization name: ${org}`)
-  return `is:pr is:open archived:false ${filter}${org ? ` org:${org}` : ''}`
+  return `is:${kind} is:open archived:false ${filter}${org ? ` org:${org}` : ''}`
 }
 
 // Called during a fetch, wait for that fetch instead of starting another
@@ -999,6 +1084,8 @@ async function fetchAll($: EngineInterface): Promise<void> {
     const reviewQuery = searchQuery('review-requested:@me')
     const mineQuery = searchQuery('author:@me')
     const approvedQuery = searchQuery('reviewed-by:@me -author:@me')
+    // Newest updates first, so the 50 the search returns are the 50 most recently updated
+    const assignedQuery = searchQuery('assignee:@me sort:updated-desc', 'issue')
     const r = await $.process.run([
       'gh',
       'api',
@@ -1011,6 +1098,8 @@ async function fetchAll($: EngineInterface): Promise<void> {
       `mine=${mineQuery}`,
       '-f',
       `approved=${approvedQuery}`,
+      '-f',
+      `assigned=${assignedQuery}`,
     ])
     if (r.exitCode !== 0) throw new Error(r.stderr.trim() || `gh exited with code ${r.exitCode}`)
     const data = JSON.parse(r.stdout).data as {
@@ -1018,6 +1107,7 @@ async function fetchAll($: EngineInterface): Promise<void> {
       review: { nodes: (PR | null)[] }
       mine: { nodes: (PR | null)[] }
       approved?: { nodes: (PR | null)[] }
+      assigned?: { issueCount?: number; nodes: (Issue | null)[] }
     }
     viewer = data.viewer?.login ?? ''
     // Search results can contain nulls for PRs we have no access to
@@ -1028,8 +1118,16 @@ async function fetchAll($: EngineInterface): Promise<void> {
       .filter((n): n is PR => Boolean(n?.url))
       .map(cleanPr)
       .filter((p) => myApproval(p) !== undefined && !review.some((r) => r.url === p.url))
+    assignedTotal = Number(data.assigned?.issueCount) || 0
+    assigned = (data.assigned?.nodes ?? [])
+      .filter((n): n is Issue => Boolean(n?.url))
+      .map(cleanIssue)
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    // Reopened (here or elsewhere): listed again as assigned
+    closedHere = closedHere.filter((i) => !assigned.some((a) => a.url === i.url))
     // A description that could not be fetched is tried again after each fetch of the list
     for (const [url, a] of abouts) if (a.error) abouts.delete(url)
+    for (const [url, a] of issueAbouts) if (a.error) issueAbouts.delete(url)
     fetchedAt = await $.clock.now()
     error = ''
     await loadInboxState($)
@@ -1110,6 +1208,8 @@ async function notifyChanges($: EngineInterface): Promise<void> {
   const snapshot: Snapshot = {
     review: review.filter((p) => !isBot(p)).map((p) => p.url),
     mine: Object.fromEntries(mine.map((p) => [p.url, `${p.reviewDecision ?? ''}|${ciState(p)}`])),
+    // Closed from the pane while it is open: still known, so reopening one here is not a new assignment
+    assigned: [...assigned, ...closedHere].map((i) => i.url),
   }
   await $.store.set('snapshot', snapshot)
   // The first fetch only sets the baseline
@@ -1128,7 +1228,11 @@ async function notifyChanges($: EngineInterface): Promise<void> {
     if ((ci === 'FAILURE' || ci === 'ERROR') && !/\|(FAILURE|ERROR)$/.test(prev))
       changed.push(`✗ CI failed: ${p.repository.nameWithOwner}#${p.number}`)
   }
-  const messages = [...requested, ...changed]
+  // A snapshot from before issues were listed has none: those already assigned are not new
+  const newlyAssigned = before.assigned
+    ? assigned.filter((i) => !before.assigned?.includes(i.url)).map((i) => `📌 Assigned: ${i.repository.nameWithOwner}#${i.number}`)
+    : []
+  const messages = [...requested, ...changed, ...newlyAssigned]
   if (messages.length > 0) {
     const rest = messages.length > 3 ? ` and ${messages.length - 3} more` : ''
     $.ui.toast(messages.slice(0, 3).join('  ') + rest, { timeoutMs: 8000 })
@@ -1142,7 +1246,7 @@ async function notifyChanges($: EngineInterface): Promise<void> {
     : requested.length > 0
       ? [`${fresh.length} review requests: ${fresh.map((p) => `${p.repository.nameWithOwner}#${p.number}`).join(', ')}`]
       : []
-  if (cfg.desktop_notify === 'all') lines.push(...changed)
+  if (cfg.desktop_notify === 'all') lines.push(...changed, ...newlyAssigned)
   if (lines.length > 0) await desktopNotify($, 'PR Inbox', fit(lines.join(' · '), 200))
 }
 
@@ -1371,6 +1475,8 @@ type PanelWrite =
   | { kind: 'clone' }
   | { kind: 'worktree' }
   | { kind: 'push'; job: FixJob; head: string }
+  // c on the issues tab: close (the reason is the choice picked) or reopen
+  | { kind: 'issue'; issue: Issue; to: 'close' | 'reopen' }
 // A row to check or uncheck (x, or its number key), such as an AI review finding; note is said after it, dim
 type PanelItem = { text: string; note: string; checked: boolean }
 // A choice y needs first (the merge method), picked with its number key; refused says why a key is not offered here
@@ -1514,6 +1620,11 @@ async function runWrite($: EngineInterface, p: WritePanel): Promise<string> {
   const pr = p.prs[0]
   const method = METHODS.find((m) => m.key === p.chosen)
   if (p.write.kind === 'approve') return approveAll($, p, p.write.how)
+  if (p.write.kind === 'issue') {
+    const reason = CLOSE_REASONS.find((r) => r.key === p.chosen)?.flag ?? ''
+    if (p.write.to === 'close' && !reason) return ''
+    return setIssueState($, p.write.issue, p.write.to, reason)
+  }
   if (!pr) return ''
   if (p.write.kind === 'findings') {
     const event = p.chosen === 'r' ? 'REQUEST_CHANGES' : 'COMMENT'
@@ -4072,6 +4183,197 @@ async function fetchAbout($: EngineInterface, pr: PR): Promise<void> {
   $.ui.invalidate('ui.render')
 }
 
+// The description, conversation and sub-issues of the selected issue, for the details under the list: fetched once
+// the selection rests on it, again when it is updated. Drawn only, never sent to a model
+type IssueAbout = {
+  updatedAt: string
+  body: string
+  stateReason: string
+  talk: Talk[]
+  comments: number
+  subs: IssueRef[]
+  error: string
+}
+const issueAbouts = new Map<string, IssueAbout>()
+const issueAboutLoading = new Set<string>()
+// The latest comments fetched
+const ISSUE_COMMENTS = 30
+const ISSUE_QUERY = `query($url: URI!) {
+  resource(url: $url) {
+    ... on Issue {
+      body stateReason
+      comments(last: ${ISSUE_COMMENTS}) { totalCount nodes { author { login } createdAt body } }
+      subIssues(first: 50) { nodes { number title url state repository { nameWithOwner } } }
+    }
+  }
+}`
+
+let issueTimer: { url: string; cancel: () => void } | undefined
+function loadIssueAbout($: EngineInterface, issue: Issue): void {
+  const url = issue.url
+  if (issueAbouts.get(url)?.updatedAt === issue.updatedAt || issueAboutLoading.has(url) || issueTimer?.url === url) return
+  issueTimer?.cancel()
+  const timer = $.clock.after(ABOUT_DELAY, () => {
+    issueTimer = undefined
+    if (selected === url) void fetchIssueAbout($, issue)
+  })
+  issueTimer = { url, cancel: () => timer.cancel() }
+}
+
+async function fetchIssueAbout($: EngineInterface, issue: Issue): Promise<void> {
+  issueAboutLoading.add(issue.url)
+  const r = await $.process.run(['gh', 'api', 'graphql', '-f', `query=${ISSUE_QUERY}`, '-f', `url=${issue.url}`]).catch(ghMissing)
+  issueAboutLoading.delete(issue.url)
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  const about: IssueAbout = { updatedAt: issue.updatedAt, body: '', stateReason: '', talk: [], comments: 0, subs: [], error: '' }
+  if (r.exitCode !== 0) about.error = clean(r.stderr) || `gh exited with code ${r.exitCode}`
+  else
+    try {
+      const v = (JSON.parse(r.stdout) as { data?: { resource?: Record<string, unknown> | null } }).data?.resource
+      if (!v || typeof v.body !== 'string') throw new Error('not an issue')
+      const comments = v.comments as { totalCount?: unknown; nodes?: unknown } | undefined
+      const subs = v.subIssues as { nodes?: unknown } | undefined
+      about.body = cleanBody(v.body)
+      about.stateReason = clean(str(v.stateReason))
+      about.comments = Number(comments?.totalCount) || 0
+      about.talk = (Array.isArray(comments?.nodes) ? (comments.nodes as Record<string, unknown>[]) : [])
+        .filter((c) => c && typeof c === 'object')
+        .map((c) => ({
+          kind: 'comment' as const,
+          author: clean(str((c.author as { login?: unknown } | null)?.login)),
+          at: str(c.createdAt),
+          body: cleanBody(str(c.body)),
+        }))
+      about.subs = (Array.isArray(subs?.nodes) ? (subs.nodes as IssueRef[]) : [])
+        .map(cleanIssueRef)
+        .filter((x): x is IssueRef => x !== null)
+    } catch {
+      about.error = 'unreadable answer from gh'
+    }
+  // Only issues still listed are kept
+  for (const url of issueAbouts.keys()) if (!findIssue(url)) issueAbouts.delete(url)
+  issueAbouts.set(issue.url, about)
+  $.ui.invalidate('ui.render')
+}
+
+// The issues tab in screen order (what j/k move through): a sub-issue right under its parent when the parent is listed
+// too, in the parent's place; then those closed here. depth and last draw the rail
+function issueRows(): Issue[] & { depth?: Map<string, number>; last?: Set<string> } {
+  const listed = assigned.filter(matchesFilter)
+  const listedUrls = new Set(listed.map((i) => i.url))
+  const depth = new Map<string, number>()
+  const last = new Set<string>()
+  const ordered: Issue[] = []
+  const place = (i: Issue, d: number) => {
+    if (depth.has(i.url)) return
+    depth.set(i.url, d)
+    ordered.push(i)
+    const kids = listed.filter((c) => c.parent?.url === i.url && !depth.has(c.url))
+    const end = kids.at(-1)
+    if (end) last.add(end.url)
+    for (const c of kids) place(c, d + 1)
+  }
+  for (const i of listed) if (!(i.parent && listedUrls.has(i.parent.url))) place(i, 0)
+  // Parents that loop (GitHub does not allow it) are still listed, each once
+  for (const i of listed) place(i, 0)
+  return Object.assign([...ordered, ...closedHere.filter(matchesFilter)], { depth, last })
+}
+
+// An issue on the issues tab: assigned to you, or closed from the pane in this session
+function findIssue(url: string): Issue | undefined {
+  return assigned.find((i) => i.url === url) ?? closedHere.find((i) => i.url === url)
+}
+
+// c on the issues tab: close the issue (as completed or not planned, picked with its number key, never one picked for
+// you) or reopen one closed here. The panel names the issue in full and what y sends
+const CLOSE_REASONS = [
+  { key: '1', word: 'completed', flag: 'completed' },
+  { key: '2', word: 'not planned', flag: 'not planned' },
+] as const
+
+// The repository and number an issue's writes go to, as the panel names them: only when its URL is that issue's
+// canonical one on github.com, so what y sends is always what the panel says
+function issueTarget(issue: Issue): { repo: string; number: string } | undefined {
+  const repo = issue.repository.nameWithOwner
+  if (!REPO_NAME.test(repo) || !Number.isInteger(issue.number) || issue.number < 1) return undefined
+  return safeHref(issue.url) === `https://github.com/${repo}/issues/${issue.number}` ? { repo, number: String(issue.number) } : undefined
+}
+
+function openIssueState($: EngineInterface, issue: Issue): void {
+  const to = issue.state === 'CLOSED' ? 'reopen' : 'close'
+  const full = `${issue.repository.nameWithOwner}#${issue.number}`
+  if (!issueTarget(issue)) {
+    $.ui.toast(`c: ${full} is not at its own github.com address, so the pane does not ${to} it · o: open it on GitHub`, { timeoutMs: 6000 })
+    return
+  }
+  const subs = issue.subIssuesSummary ?? { total: 0, completed: 0 }
+  const notes: PanelNote[] = [{ text: `${full} ${issue.title}` }]
+  if (to === 'close' && subs.total > subs.completed)
+    notes.push({
+      text: `⚠ ${subs.total - subs.completed} of its ${plural(subs.total, 'sub-issue')} still open: closing it leaves them open`,
+      color: 'yellow',
+    })
+  if (to === 'close') notes.push({ text: 'It stays under closed here until the pane closes, so c can reopen it' })
+  openPanel($, {
+    verb: to,
+    prs: [],
+    title: `${issue.repository.nameWithOwner.split('/')[1] ?? issue.repository.nameWithOwner}#${issue.number} ${issue.title}`,
+    notes,
+    sendsLead: to === 'close' ? 'y closes: ' : 'y reopens: ',
+    sends: to === 'close' ? `${full} as {choice}` : full,
+    ...(to === 'close'
+      ? {
+          choices: CLOSE_REASONS.map((r) => ({ key: r.key, word: r.word, refused: '', yes: `close as ${r.word}` })),
+          choiceWhat: 'a reason',
+        }
+      : {}),
+    yes: to === 'close' ? 'close issue' : 'reopen issue',
+    movedNote: '',
+    progress: to === 'close' ? '⟳ closing…' : '⟳ reopening…',
+    write: { kind: 'issue', issue, to },
+    failLead: to === 'close' ? 'Not closed' : 'Not reopened',
+  })
+}
+
+// y in the close or reopen panel. Already so on GitHub: nothing is sent, and the panel closes saying so
+async function setIssueState($: EngineInterface, issue: Issue, to: 'close' | 'reopen', reason: string): Promise<string> {
+  const full = `${issue.repository.nameWithOwner}#${issue.number}`
+  const target = issueTarget(issue)
+  if (!target) return `${full} is not at its own github.com address`
+  const at = ['-R', target.repo]
+  const now = await $.process.run(['gh', 'issue', 'view', target.number, ...at, '--json', 'state']).catch(ghMissing)
+  let state = ''
+  try {
+    state = now.exitCode === 0 ? String((JSON.parse(now.stdout) as { state?: unknown }).state ?? '') : ''
+  } catch {
+    // Read below as unknown
+  }
+  if (now.exitCode !== 0 || !state) return `could not read its state: ${fit(clean(now.stderr) || 'unreadable answer from gh', 160)}`
+  if (state === (to === 'close' ? 'CLOSED' : 'OPEN')) {
+    $.ui.toast(`${full} was already ${to === 'close' ? 'closed' : 'open'} on GitHub · nothing sent`)
+    if (to === 'reopen') closedHere = closedHere.filter((i) => i.url !== issue.url)
+    await refresh($)
+    return ''
+  }
+  const argv =
+    to === 'close' ? ['gh', 'issue', 'close', target.number, ...at, '--reason', reason] : ['gh', 'issue', 'reopen', target.number, ...at]
+  const r = await $.process.run(argv).catch(ghMissing)
+  if (r.exitCode !== 0) return fit(clean(r.stderr) || 'GitHub refused it', 160)
+  if (to === 'close') {
+    // The selection stays where it was: the row that takes the closed one's place
+    if (selected === issue.url) {
+      const rows = issueRows()
+      const i = rows.findIndex((x) => x.url === issue.url)
+      selected = rows.filter((x) => x.state !== 'CLOSED' && x.url !== issue.url)[i]?.url ?? rows[i - 1]?.url ?? ''
+    }
+    closedHere = [{ ...issue, state: 'CLOSED', stateReason: reason }, ...closedHere.filter((i) => i.url !== issue.url)]
+  } else closedHere = closedHere.filter((i) => i.url !== issue.url)
+  $.ui.toast(to === 'close' ? `✦ closed ${full} as ${reason} · c: reopen it (under closed here)` : `✦ reopened ${full}`)
+  $.ui.log(`pr-inbox ${to === 'close' ? `closed ${full} as ${reason}` : `reopened ${full}`}: you pressed y in the panel of c`)
+  await refresh($)
+  return ''
+}
+
 // y: markdown drawn as GitHub would, or the text as written (plain), in the details and the reader alike
 let plainText = false
 
@@ -5535,6 +5837,8 @@ export function register(on: On, options: PluginOptions) {
       diffView = undefined
       picker = undefined
       writePanel = undefined
+      // Issues closed here are listed only while the pane stays open
+      closedHere = []
       paneOpen = false
       paneFocused = false
       $.ui.invalidate('ui.render')
@@ -5598,7 +5902,7 @@ export function register(on: On, options: PluginOptions) {
       Button({ key: k, label, hotkey, plain: true, dimColor: dim, onPress })
     const leave = () => {
       if (p.sending) {
-        const named = ['approve', 'merge', 'auto-merge on', 'auto-merge off', 'merge stack', 'findings'].includes(p.write.kind)
+        const named = ['approve', 'merge', 'auto-merge on', 'auto-merge off', 'merge stack', 'findings', 'issue'].includes(p.write.kind)
         toast(`q: wait, ${p.progress.replace(/^⟳ /, '').replace(/…$/, '')}${named ? ` ${sendsText(p)}` : ''}…`)
         return
       }
@@ -6466,7 +6770,8 @@ export function register(on: On, options: PluginOptions) {
     const now = fetchedAt || Date.now()
     const g = groups(now)
     const rows = visibleRows(g)
-    ensureSelection(rows)
+    // The issues tab keeps its own rows (below)
+    if (tab !== 'issues') ensureSelection(rows)
 
     // Learn the pane height. Docked beside the conversation, bodyRows is the height.
     // Above the prompt, the bodyRows seen when the previous render overflowed is the limit
@@ -6512,6 +6817,7 @@ export function register(on: On, options: PluginOptions) {
     const helpLabel = showHelp ? 'close help' : '?'
     const reviewTabLabel = `${tab === 'review' ? '◉ ' : ''}to review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`
     const mineTabLabel = `${tab === 'mine' ? '◉ ' : ''}my PRs ${mine.length}`
+    const issuesTabLabel = `${tab === 'issues' ? '◉ ' : ''}issues ${issuesCount()}`
     const tabButton = (name: typeof tab, label: string, hotkey: string) =>
       Button({
         key: `tab-${name}`,
@@ -6525,7 +6831,7 @@ export function register(on: On, options: PluginOptions) {
           redraw()
         },
       })
-    const TABS: (typeof tab)[] = ['review', 'mine']
+    const TABS: (typeof tab)[] = ['review', 'mine', 'issues']
     const switchTab = (by: number) => {
       const i = TABS.indexOf(tab)
       const to = TABS[Math.min(TABS.length - 1, Math.max(0, i + by))] ?? tab
@@ -6535,7 +6841,15 @@ export function register(on: On, options: PluginOptions) {
       redraw()
     }
     // Widths of the top rows' items, to know how many lines they take once wrapped
-    const row1 = [LOGO, `1: ${reviewTabLabel}`, `2: ${mineTabLabel}`, `r: ${refreshLabel}`, `f: ${filterLabel}`, `u: ${helpLabel}`]
+    const row1 = [
+      LOGO,
+      `1: ${reviewTabLabel}`,
+      `2: ${mineTabLabel}`,
+      `3: ${issuesTabLabel}`,
+      `r: ${refreshLabel}`,
+      `f: ${filterLabel}`,
+      `u: ${helpLabel}`,
+    ]
     let topLines = wrappedRowLines(row1.map(textWidth), 2, columns)
     const top: El[] = [
       // Rows wrap as whole buttons on a narrow pane instead of breaking words
@@ -6557,6 +6871,7 @@ export function register(on: On, options: PluginOptions) {
           }),
           tabButton('review', reviewTabLabel, '1'),
           tabButton('mine', mineTabLabel, '2'),
+          tabButton('issues', issuesTabLabel, '3'),
           small('refresh', refreshLabel, 'r', () => refresh($)),
           small('filter', filterLabel, 'f', () => {
             filtering = !filtering
@@ -6573,6 +6888,8 @@ export function register(on: On, options: PluginOptions) {
               small('tab-prev', '◂', 'h', () => switchTab(-1)),
               small('tab-next', '▸', 'l', () => switchTab(1)),
               small('close', '✕', 'q', () => {
+                // Also on ui.close, for a close the engine makes; here for q, as the pane's own close may not reach it
+                closedHere = []
                 void $.ui.close({ id: PANE })
               }),
             ],
@@ -6598,7 +6915,7 @@ export function register(on: On, options: PluginOptions) {
         Input({
           key: 'filter-input',
           label: 'Filter',
-          placeholder: 'repository, number, title or @author',
+          placeholder: tab === 'issues' ? 'repository, number, title, @author or label' : 'repository, number, title or @author',
           value: filterText,
           submitLabel: 'done',
           autoFocus: true,
@@ -6726,6 +7043,21 @@ export function register(on: On, options: PluginOptions) {
 
     // Keys that do nothing for this PR or tab say why, instead of falling through to the prompt
     const whyNot = (k: string): string => {
+      // On the issues tab only o (and j / k) act on the selected issue; the PR keys say where they work
+      if (tab === 'issues') {
+        const none = !fetchedAt
+          ? 'still fetching your issues'
+          : filterText
+            ? 'no issue matches the filter · f: change it'
+            : 'no issues assigned to you'
+        if (k === 'o')
+          return selected && findIssue(selected)
+            ? "o: this issue's link is not a plain https:// GitHub link, so it does not open"
+            : `o: ${none}`
+        if (k === 'j' || k === 'k' || k === 'c' || k === 'y') return `${k}: ${none}`
+        if ('abdeimpsvwxz'.includes(k))
+          return `${k} acts on PRs (1: To review, 2: My PRs) · on issues: c closes or reopens, o opens, y plain text`
+      }
       const n = pr ? askLabel(pr) : 'this PR'
       const ownTab = 'on your PRs (2: My PRs)'
       // Keys that act on the selected PR, with none selected
@@ -7264,7 +7596,7 @@ export function register(on: On, options: PluginOptions) {
             redraw()
           })
         : undefined
-    const snoozedHere = tab === 'review' ? g.snoozedReview : g.snoozedMine
+    const snoozedHere = tab === 'review' ? g.snoozedReview : tab === 'mine' ? g.snoozedMine : []
     if (snoozedHere.length > 0) {
       folds.push(
         small(
@@ -7357,13 +7689,24 @@ export function register(on: On, options: PluginOptions) {
         [
           'the list',
           [
-            ['j / k', 'next / previous PR'],
-            ['1 / 2', 'To review / My PRs · h / l: the tab to the left / right'],
+            ['j / k', 'next / previous row'],
+            ['1 / 2 / 3', 'To review / My PRs / Issues (assigned to you) · h / l: the tab to the left / right'],
             ['b', 'AI review every bot PR not reviewed yet, then approve those that passed in one panel (y) · b again stops'],
             ['z', 'show or hide snoozed PRs'],
-            ['f', 'filter by repository, number, title or @author · empty clears it'],
+            ['f', 'filter by repository, number, title or @author (and label on issues) · empty clears it'],
             ['n', 'next page of the details (the description and conversation come last), when they do not fit'],
             ['r', 'refresh: fetch again'],
+          ],
+        ],
+        [
+          'the selected issue (3)',
+          [
+            ['o', 'open on GitHub'],
+            ['c', 'close it (1 completed / 2 not planned, then y) · on one closed here: reopen it (y) · no model sees issues'],
+            ['y', 'its description and comments as markdown, or as plain text'],
+            ['n', 'next page of its details, when they do not fit'],
+            ['SUB', 'sub-issues closed / all · ├ └ under a listed parent · ↑#12 the parent, not listed'],
+            ['TALK / UPD', 'comments · time since the last update'],
           ],
         ],
         [
@@ -7443,6 +7786,370 @@ export function register(on: On, options: PluginOptions) {
         legend.reduce((n, [, what]) => n + wrappedLines(what, textColumns), 0)
       const helpTree = [...top, rule(), ...helpRows]
       return Box({ flexDirection: 'column', children: [...helpTree, ...catcher(helpTree)] })
+    }
+
+    if (tab === 'issues') {
+      const issues = issueRows()
+      const depthOf = issues.depth ?? new Map<string, number>()
+      const lastChild = issues.last ?? new Set<string>()
+      const closed = issues.filter((i) => i.state === 'CLOSED')
+      ensureSelection(issues)
+      const issue = issues.find((i) => i.url === selected)
+      if (issue) loadIssueAbout($, issue)
+      const isClosed = (i: Issue) => i.state === 'CLOSED'
+      const issueKeys: El[] = []
+      if (issue) {
+        const href = safeHref(issue.url)
+        issueKeys.push(
+          Button({
+            key: 'issue-state',
+            label: isClosed(issue) ? 'reopen issue' : 'close issue',
+            hotkey: 'c',
+            plain: true,
+            onPress: () => openIssueState($, issue),
+          }),
+          ...(href
+            ? [
+                Button({
+                  key: 'issue-open',
+                  label: 'open on GitHub',
+                  hotkey: 'o',
+                  plain: true,
+                  onPress: () => void $.process.run(['gh', 'issue', 'view', href, '--web']),
+                }),
+              ]
+            : []),
+          small('issue-plain', plainText ? 'markdown' : 'plain text', 'y', () => {
+            plainText = !plainText
+            redraw()
+          }),
+          Box({
+            display: 'none',
+            children: [
+              small('nav-down', '↓', 'j', () => {
+                moveSelection(issues, 1)
+                redraw()
+              }),
+              small('nav-up', '↑', 'k', () => {
+                moveSelection(issues, -1)
+                redraw()
+              }),
+            ],
+          }),
+        )
+      }
+      const issueFooter = !issue
+        ? []
+        : focused
+          ? [Box({ key: 'footer', flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: issueKeys })]
+          : [Text({ color: NEON.muted, children: ['ctrl+x tab: use the keys'] })]
+      const labelWidth = Math.min(
+        24,
+        Math.max(5, ...issues.map((i) => textWidth(`${i.repository.nameWithOwner.split('/')[1] ?? ''}#${i.number}`))),
+      )
+      // SUB, TALK and UPD on the right
+      const RIGHT = 16
+      const issueWidth = Math.max(5, Math.min(labelWidth, columns - 3 - RIGHT - 28))
+      // "#12" for a parent in the same repository, "repo#12" for one elsewhere
+      const refLabel = (ref: IssueRef, from: Issue) =>
+        ref.repository.nameWithOwner === from.repository.nameWithOwner
+          ? `#${ref.number}`
+          : `${ref.repository.nameWithOwner.split('/')[1] ?? ref.repository.nameWithOwner}#${ref.number}`
+      const issueRow = (i: Issue) => {
+        const isSelected = selected === i.url
+        const repo = i.repository.nameWithOwner.split('/')[1] ?? i.repository.nameWithOwner
+        const label = shortLabel(`${repo}#${i.number}`, issueWidth)
+        const href = safeHref(i.url)
+        const talk = i.comments?.totalCount ?? 0
+        const subs = i.subIssuesSummary ?? { total: 0, completed: 0 }
+        const sub = subs.total > 0 ? `${subs.completed}/${subs.total}` : ''
+        const done = subs.total > 0 && subs.completed >= subs.total
+        const lead = `${isSelected ? '▸' : ' '}${isClosed(i) ? '✓' : ' '} `
+        const width = Math.max(8, columns - 1 - textWidth(lead) - issueWidth - 1 - RIGHT)
+        // Under a listed parent: the rail; with a parent that is not listed: which one it belongs to
+        const depth = depthOf.get(i.url) ?? 0
+        const rail = depth > 0 ? `${'  '.repeat(depth - 1)}${lastChild.has(i.url) ? '└' : '├'} ` : ''
+        const parentNote = depth === 0 && i.parent ? `↑${refLabel(i.parent, i)} ` : ''
+        const names = (i.labels?.nodes ?? []).map((l) => l?.name ?? '').filter(Boolean)
+        const tags = names.length ? `  ${names.join(' · ')}` : ''
+        const lead2 = fit(`${rail}${parentNote}`, Math.max(0, Math.floor(width / 3)))
+        const titleRoom = Math.max(8, width - textWidth(lead2) - Math.min(textWidth(tags), Math.floor(width / 3)))
+        const title = fit(i.title, titleRoom)
+        const tagText = tags ? fit(tags, Math.max(0, width - textWidth(lead2) - textWidth(title))) : ''
+        const pad = ' '.repeat(Math.max(0, width - textWidth(lead2) - textWidth(title) - textWidth(tagText)))
+        return Box({
+          key: `line-${i.url}`,
+          flexDirection: 'row',
+          ...(isSelected && focused ? { backgroundColor: NEON.selection } : {}),
+          children: [
+            Text({ color: focused ? NEON.pink : NEON.muted, bold: true, children: [lead] }),
+            href ? (isSelected ? link(href, label, true) : quietLink(href, label)) : Text({ children: [label] }),
+            Text({ children: [' '.repeat(Math.max(0, issueWidth - textWidth(label)) + 1)] }),
+            Text({ color: NEON.muted, children: [lead2] }),
+            Text({
+              bold: isSelected,
+              ...(isSelected && focused ? { backgroundColor: NEON.selection, color: NEON.onSelection } : {}),
+              ...(isSelected && !focused ? { underline: true } : {}),
+              dimColor: !focused || isClosed(i),
+              wrap: 'truncate-end',
+              children: [title],
+            }),
+            Text({ color: NEON.muted, wrap: 'truncate-end', children: [`${tagText}${pad}`] }),
+            Text({ ...(sub && done ? { color: NEON.green } : { dimColor: true }), children: [` ${sub.padStart(5)}`] }),
+            Text({ dimColor: true, children: [` ${(talk > 0 ? `${talk}` : '').padStart(4)} ${short(i.updatedAt, now).padStart(4)}`] }),
+          ],
+        })
+      }
+      const closedHeading = (n: number) =>
+        Box({
+          flexDirection: 'row',
+          children: [
+            Text({ color: NEON.rule, children: ['── '] }),
+            Text({ color: NEON.violet, bold: true, children: [`✓ closed here ${n} `] }),
+            Text({ color: NEON.muted, children: ['· c: reopen '] }),
+            Text({ color: NEON.rule, children: ['─'.repeat(Math.max(0, columns - textWidth(`── ✓ closed here ${n} · c: reopen `)))] }),
+          ],
+        })
+
+      // The details of the selected issue: what it is, its parent and sub-issues, its description, then the latest
+      // comments, as markdown (y: as written). Paged with n when they do not fit
+      const issuePanel = (i: Issue, budget: number) => {
+        const about = issueAbouts.get(i.url)
+        const children: El[] = []
+        const heights: number[] = []
+        const add = (el: El, lines: number) => {
+          children.push(el)
+          heights.push(lines)
+        }
+        const reason = i.stateReason || about?.stateReason || ''
+        const state = isClosed(i) ? `closed${reason ? ` as ${reason.toLowerCase().replace(/_/g, ' ')}` : ''}` : 'open'
+        const facts = [
+          state,
+          `@${i.author?.login ?? '?'}`,
+          `opened ${elapsed(i.createdAt, now)} ago`,
+          `updated ${elapsed(i.updatedAt, now)} ago`,
+        ]
+        add(
+          Box({
+            paddingLeft: INDENT,
+            flexDirection: 'row',
+            columnGap: 2,
+            children: [
+              Text({ color: isClosed(i) ? NEON.muted : NEON.green, bold: true, children: [facts[0] ?? ''] }),
+              Text({ dimColor: true, wrap: 'wrap', children: [facts.slice(1).join(' · ')] }),
+            ],
+          }),
+          wrappedLines(facts.join('  '), bodyColumns),
+        )
+        const refRow = (mark: string, color: string, ref: IssueRef, note = '') => {
+          const href = safeHref(ref.url)
+          const lbl = refLabel(ref, i)
+          return Box({
+            paddingLeft: INDENT,
+            flexDirection: 'row',
+            columnGap: 1,
+            children: [
+              Text({ color, children: [mark] }),
+              href ? quietLink(href, lbl) : Text({ children: [lbl] }),
+              Text({ wrap: 'truncate-end', children: [fit(ref.title, Math.max(10, bodyColumns - textWidth(lbl) - textWidth(note) - 6))] }),
+              ...(note ? [Text({ color: NEON.muted, children: [note] })] : []),
+            ],
+          })
+        }
+        if (i.parent) add(refRow('↑', NEON.violet, i.parent, '(parent)'), 1)
+        const section = (name: string, note: string) =>
+          add(
+            Box({
+              paddingLeft: INDENT,
+              marginTop: 1,
+              flexDirection: 'row',
+              columnGap: 2,
+              children: [
+                Text({ bold: true, color: NEON.cyan, children: [name] }),
+                Text({ dimColor: true, wrap: 'wrap', children: [note] }),
+              ],
+            }),
+            1 + wrappedLines(`${name}  ${note}`, bodyColumns),
+          )
+        const prose = (text: string, indent: number) => {
+          for (const [k, block] of markdownBlocks(text).entries()) {
+            add(
+              Box({
+                paddingLeft: INDENT + indent,
+                marginTop: k > 0 ? 1 : 0,
+                children: [plainText ? Text({ wrap: 'wrap', children: [block] }) : Markdown({ text: block })],
+              }),
+              (k > 0 ? 1 : 0) + block.split('\n').reduce((n, line) => n + wrappedLines(line, bodyColumns - indent), 0),
+            )
+          }
+        }
+        const view = plainText ? 'y: markdown' : 'y: plain text'
+        const subs = i.subIssuesSummary ?? { total: 0, completed: 0 }
+        if (!about) section(subs.total > 0 ? 'Sub-issues and description' : 'Description', 'fetching…')
+        else if (about.error)
+          section(
+            'Description',
+            `could not fetch it: ${fit(about.error, Math.max(10, bodyColumns - 50))} · r: try again · o: open on GitHub`,
+          )
+        else {
+          if (about.subs.length > 0) {
+            const open = about.subs.filter((x) => x.state !== 'CLOSED').length
+            const more = subs.total > about.subs.length ? ` · first ${about.subs.length} of ${subs.total}` : ''
+            section('Sub-issues', `${about.subs.length - open} of ${about.subs.length} closed${more}`)
+            // Open ones first, as they are what is left
+            for (const x of [...about.subs].sort((a, b) => Number(a.state === 'CLOSED') - Number(b.state === 'CLOSED')))
+              add(
+                refRow(
+                  x.state === 'CLOSED' ? '✓' : '○',
+                  x.state === 'CLOSED' ? NEON.green : NEON.muted,
+                  x,
+                  assigned.some((a) => a.url === x.url) ? '(assigned to you)' : '',
+                ),
+                1,
+              )
+          }
+          section('Description', about.updatedAt !== i.updatedAt ? `updating… · ${view}` : view)
+          if (about.body) prose(about.body, 0)
+          else add(Box({ paddingLeft: INDENT, children: [Text({ color: NEON.muted, children: ['No description'] })] }), 1)
+          if (about.talk.length > 0) {
+            const n = about.comments
+            section('Conversation', n > about.talk.length ? `latest ${about.talk.length} of ${n} · o: all on GitHub` : plural(n, 'comment'))
+            for (const t of about.talk) {
+              const at = t.at ? `${elapsed(t.at, now)} ago` : ''
+              add(
+                Box({
+                  paddingLeft: INDENT,
+                  flexDirection: 'row',
+                  columnGap: 1,
+                  children: [
+                    Text({ color: NEON.cyan, bold: true, children: [`@${t.author || '?'}`] }),
+                    Text({ dimColor: true, children: [at] }),
+                  ],
+                }),
+                1,
+              )
+              if (t.body) prose(t.body, 2)
+            }
+          }
+        }
+        const total = heights.reduce((n, h) => n + h, 0)
+        if (total <= budget) return { el: Box({ key: `panel-${i.url}`, flexDirection: 'column', children }), lines: total }
+        if (issuePage.url !== i.url) issuePage = { url: i.url, from: 1 }
+        const from = Math.min(Math.max(1, issuePage.from), children.length - 1)
+        const linesOfParts = (a: number, b: number) => heights.slice(a, b).reduce((n, h) => n + h, 0)
+        let used = (heights[0] ?? 1) + (from > 1 ? 1 : 0)
+        let k = from
+        while (k < children.length && used + (heights[k] ?? 1) <= budget - 1) used += heights[k++] ?? 1
+        if (k === from) used += heights[k++] ?? 1
+        const below = linesOfParts(k, children.length)
+        const shownParts = [
+          children[0] as El,
+          ...(from > 1 ? [Text({ color: NEON.muted, children: [`  ↑ ${linesOfParts(1, from)} lines above`] })] : []),
+          ...children.slice(from, k),
+          Button({
+            key: 'panel-more',
+            label: below > 0 ? `↓ ${below} more lines` : '↑ back to the top',
+            hotkey: 'n',
+            plain: true,
+            dimColor: true,
+            onPress: () => {
+              issuePage = { url: i.url, from: below > 0 ? k : 1 }
+              redraw()
+            },
+          }),
+        ]
+        return { el: Box({ key: `panel-${i.url}`, flexDirection: 'column', children: shownParts }), lines: used + 1 }
+      }
+
+      // The list keeps at least three rows, or half the pane when it needs it; the details get the rest
+      const keyWidth = (b: El) => {
+        const props = (b as { props?: { label?: unknown; hotkey?: unknown } }).props
+        return typeof props?.hotkey === 'string' ? textWidth(`${props.hotkey}: ${String(props.label ?? '')}`) : 0
+      }
+      const issueFooterLines =
+        issue && focused
+          ? wrappedRowLines(
+              issueKeys.map(keyWidth).filter((w) => w > 0),
+              2,
+              columns,
+            )
+          : issue
+            ? 1
+            : 0
+      const headingLines = closed.length > 0 ? 1 : 0
+      const capLines = assignedTotal > assigned.length ? 1 : 0
+      const issueChrome = topLines + 2 + 1 + (issue ? 1 : 0) + headingLines + capLines + issueFooterLines
+      const listMin = Math.min(issues.length, 3) + (issues.length > 3 ? 1 : 0)
+      const listShare = Math.max(listMin, Math.min(issues.length, Math.ceil((paneLimit - issueChrome) / 2)))
+      const builtIssue = issue ? issuePanel(issue, Math.max(2, paneLimit - issueChrome - listShare)) : undefined
+      const issueRoom = Math.max(3, paneLimit - issueChrome - (builtIssue?.lines ?? 0))
+      let shownIssues = issues
+      const issueMore: El[] = []
+      if (issues.length > issueRoom) {
+        const at = Math.max(
+          0,
+          issues.findIndex((i) => i.url === selected),
+        )
+        const lo = Math.max(0, Math.min(at - Math.floor((issueRoom - 1) / 2), issues.length - (issueRoom - 1)))
+        shownIssues = issues.slice(lo, lo + issueRoom - 1)
+        const below = issues.length - lo - shownIssues.length
+        const parts = [lo > 0 ? `↑ ${lo} more` : '', below > 0 ? `↓ ${below} more` : ''].filter(Boolean)
+        issueMore.push(Text({ dimColor: true, children: [`  ${parts.join('  ')} · j/k: move`] }))
+      }
+      const org = cfg.org_filter.trim()
+      const empty = !fetchedAt
+        ? loading
+          ? `  ${SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]} fetching your issues…`
+          : error
+            ? '  Nothing to show until GitHub answers · r: retry'
+            : '  not fetched yet · r: refresh'
+        : filterText
+          ? `  No issues match "${filterText}" · f: change or clear the filter`
+          : error
+            ? '  Nothing to show until GitHub answers · r: retry'
+            : org
+              ? `  No open issues assigned to you in ${org} · org_filter in /config`
+              : '  No open issues are assigned to you'
+      const issueList: El[] = []
+      for (const i of shownIssues) {
+        if (isClosed(i) && (issueList.length === 0 || !isClosed(shownIssues[shownIssues.indexOf(i) - 1] as Issue)))
+          issueList.push(closedHeading(closed.length))
+        issueList.push(issueRow(i))
+      }
+      if (issues.length === 0) issueList.push(Text({ dimColor: true, children: [empty] }))
+      // Over the search's 50: say how many are left out, and where to see them
+      if (assignedTotal > assigned.length)
+        issueMore.push(
+          Text({
+            dimColor: true,
+            children: [
+              `  ${assigned.length} of ${assignedTotal} shown, most recently updated first · org_filter or github.com for the rest`,
+            ],
+          }),
+        )
+      const issueHead = Text({
+        color: NEON.muted,
+        children: [`   ${'ISSUE'.padEnd(issueWidth)} TITLE`.padEnd(Math.max(0, columns - 1 - RIGHT)) + `   SUB TALK  UPD`],
+      })
+      const issueTree = [
+        ...top,
+        focusRule(),
+        ...(issues.length > 0 ? [issueHead] : []),
+        ...issueList,
+        ...issueMore,
+        ...(builtIssue ? [rule(), builtIssue.el] : []),
+        rule(),
+        ...issueFooter,
+      ]
+      lastHeight =
+        topLines +
+        2 +
+        (issues.length > 0 ? 1 : 0) +
+        issueList.length +
+        issueMore.length +
+        (builtIssue ? 1 + builtIssue.lines : 0) +
+        issueFooterLines
+      return Box({ flexDirection: 'column', children: [...issueTree, ...catcher(issueTree)] })
     }
 
     const list: El[] = []
