@@ -3958,6 +3958,20 @@ test(
   },
 )
 
+test('the approve panel after b names the PR in its header when only one passed', async ($, on) => {
+  const s = stubs(on, {
+    graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [renovate()] }, mine: { nodes: [] } } }),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'review-bots' })
+  await settleReview(s)
+  const header = JSON.stringify(await ui.find({ key: 'panel' }))
+  expect(linksIn(header).map((l) => l.text)).toContain('app#12')
+  expect(header).not.toContain('bot PR that passed')
+  await ui.unmount()
+})
+
 test('the approve panel after b shows each bot PR with its review warnings', async ($, on) => {
   const red = renovate(failing([{ __typename: 'CheckRun', name: 'rspec', conclusion: 'FAILURE', detailsUrl: null }]))
   const s = stubs(on, {

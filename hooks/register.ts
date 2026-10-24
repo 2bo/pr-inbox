@@ -1394,18 +1394,31 @@ async function sendPanel($: EngineInterface, p: WritePanel): Promise<void> {
 
 // The panel's write. A message it returns keeps the panel open with it; '' closes the panel
 async function runWrite($: EngineInterface, p: WritePanel): Promise<string> {
-  if (p.write.kind === 'approve') return approveAll($, p.prs, p.write.how)
+  if (p.write.kind === 'approve') return approveAll($, p, p.write.how)
   return ''
 }
 
 // y in the approve panel: exactly the commits it shows, one by one; postApproval reads each head again right before.
-// A failed approval says so in its own toast, and the panel closes
-async function approveAll($: EngineInterface, prs: PR[], how: string): Promise<string> {
-  for (const pr of prs) {
+// A failed approval says so in its own toast. Each one done leaves the panel as it goes, so if something throws
+// midway, the panel stays open naming only what is left, and y again never approves one twice
+async function approveAll($: EngineInterface, p: WritePanel, how: string): Promise<string> {
+  for (const pr of [...p.prs]) {
     const run = reviewOfHead(pr)
-    if ((await postApproval($, pr, how)) && run?.state === 'passed') run.state = 'approved'
+    const ok = await postApproval($, pr, how)
+    p.prs = p.prs.filter((x) => x !== pr)
+    Object.assign(p, approveLines(p.prs))
+    if (ok && run?.state === 'passed') run.state = 'approved'
   }
   return ''
+}
+
+// What the approve panel says y sends, and y's label
+function approveLines(prs: PR[]): { sends: string; yes: string } {
+  return {
+    // In full, owner too
+    sends: prs.map((p) => `${p.repository.nameWithOwner}#${p.number} at ${p.headRefOid.slice(0, 7)}`).join(', '),
+    yes: prs.length === 1 ? 'approve' : `approve all ${prs.length}`,
+  }
 }
 
 // The approve panel (a, b)
@@ -1416,9 +1429,7 @@ function openApproval($: EngineInterface, prs: PR[], notes: PanelNote[], how: st
     title,
     notes,
     sendsLead: 'y approves: ',
-    // In full, owner too
-    sends: prs.map((p) => `${p.repository.nameWithOwner}#${p.number} at ${p.headRefOid.slice(0, 7)}`).join(', '),
-    yes: prs.length === 1 ? 'approve' : `approve all ${prs.length}`,
+    ...approveLines(prs),
     movedNote: 'it will not be approved',
     progress: '⟳ approving…',
     write: { kind: 'approve', how },
@@ -1515,33 +1526,38 @@ async function postApproval($: EngineInterface, pr: PR, how: string): Promise<bo
     fail(r.stderr)
     return false
   }
-  const repoLabel = `${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number}`
-  $.ui.toast(
-    auto
-      ? `✦ the AI review approved ${repoLabel} @${sha} as you (ai_approve auto)`
-      : `✦ approved ${repoLabel} @${sha} · moved to approved by you`,
-    { timeoutMs: 6000 },
-  )
-  if (auto) autoApproved.add(pr.url)
-  // Into the approved section now; the next fetch confirms it from GitHub
-  const at = new Date(await $.clock.now()).toISOString()
-  const others = (pr.latestReviews?.nodes ?? []).filter((r) => r?.author?.login !== viewer)
-  const nowApproved: PR = {
-    ...pr,
-    latestReviews: {
-      nodes: [...others, { author: { login: viewer }, state: 'APPROVED', submittedAt: at, commit: { oid: pr.headRefOid } }],
-    },
+  // GitHub took it: from here on it is approved, whatever the bookkeeping below does, so no caller approves it twice
+  try {
+    const repoLabel = `${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number}`
+    $.ui.toast(
+      auto
+        ? `✦ the AI review approved ${repoLabel} @${sha} as you (ai_approve auto)`
+        : `✦ approved ${repoLabel} @${sha} · moved to approved by you`,
+      { timeoutMs: 6000 },
+    )
+    if (auto) autoApproved.add(pr.url)
+    // Into the approved section now; the next fetch confirms it from GitHub
+    const at = new Date(await $.clock.now()).toISOString()
+    const others = (pr.latestReviews?.nodes ?? []).filter((r) => r?.author?.login !== viewer)
+    const nowApproved: PR = {
+      ...pr,
+      latestReviews: {
+        nodes: [...others, { author: { login: viewer }, state: 'APPROVED', submittedAt: at, commit: { oid: pr.headRefOid } }],
+      },
+    }
+    const rows = visibleRows(groups(fetchedAt || Date.now()))
+    const i = rows.findIndex((p) => p.url === pr.url)
+    const nextAfterApproval = rows[i + 1]?.url ?? rows[i - 1]?.url ?? ''
+    review = review.filter((p) => p.url !== pr.url)
+    approved = [nowApproved, ...approved.filter((p) => p.url !== pr.url)]
+    // On to the next review request: the one after it in the list (computed before it moved), else the one before
+    if (selected === pr.url) selected = nextAfterApproval
+    // Who decided, and how, stays in the transcript
+    $.ui.log(`pr-inbox approved ${pr.repository.nameWithOwner}#${pr.number} at ${sha}: ${how}`)
+    await refresh($)
+  } catch {
+    // The list catches up on the next fetch
   }
-  const rows = visibleRows(groups(fetchedAt || Date.now()))
-  const i = rows.findIndex((p) => p.url === pr.url)
-  const nextAfterApproval = rows[i + 1]?.url ?? rows[i - 1]?.url ?? ''
-  review = review.filter((p) => p.url !== pr.url)
-  approved = [nowApproved, ...approved.filter((p) => p.url !== pr.url)]
-  // On to the next review request: the one after it in the list (computed before it moved), else the one before
-  if (selected === pr.url) selected = nextAfterApproval
-  // Who decided, and how, stays in the transcript
-  $.ui.log(`pr-inbox approved ${pr.repository.nameWithOwner}#${pr.number} at ${sha}: ${how}`)
-  await refresh($)
   return true
 }
 
@@ -4335,7 +4351,7 @@ async function reviewAllBots($: EngineInterface): Promise<void> {
         ...(reviewOfHead(p)?.warnings ?? []).map((w) => ({ text: `  ⚠ Check before approving: ${w}`, color: 'yellow' as const })),
       ]),
       'you pressed y in the approve panel after b',
-      `${plural(passed.length, 'bot PR')} that passed the AI review`,
+      passed.length > 1 ? `${plural(passed.length, 'bot PR')} that passed the AI review` : '',
     )
   const touched = [...targets, ...before.filter((p) => !targets.includes(p))]
   const outcome = (state: ReviewRun['state']) => touched.filter((p) => reviews.get(p.url)?.state === state).length
@@ -5187,7 +5203,10 @@ export function register(on: On, options: PluginOptions) {
     const key = (k: string, label: string, hotkey: string, onPress: () => void, dim = false) =>
       Button({ key: k, label, hotkey, plain: true, dimColor: dim, onPress })
     const leave = () => {
-      if (p.sending) return
+      if (p.sending) {
+        toast(`q: wait, ${p.progress.replace(/^⟳ /, '')}`)
+        return
+      }
       writePanel = undefined
       redraw()
     }
@@ -5232,7 +5251,7 @@ export function register(on: On, options: PluginOptions) {
     const status = p.sending
       ? [Text({ color: NEON.cyan, children: [p.progress] })]
       : p.error
-        ? [Text({ color: NEON.red, wrap: 'wrap', children: [`✗ ${clean(p.error)}`] }), sends]
+        ? [Text({ color: NEON.red, wrap: 'wrap', children: [`✗ Not sent: ${clean(p.error)} · y: try again · q: cancel`] }), sends]
         : [sends]
     const keys = Box({
       key: 'panel-keys',
@@ -5241,9 +5260,9 @@ export function register(on: On, options: PluginOptions) {
       columnGap: 2,
       children: [
         // Cancel first; n is a hidden second way out
-        key('panel-cancel', 'cancel', 'q', leave),
+        key('panel-cancel', 'cancel', 'q', leave, p.sending),
         Box({ display: 'none', children: [key('panel-no', 'cancel', 'n', leave)] }),
-        key('panel-yes', p.yes, 'y', () => void sendPanel($, p)),
+        key('panel-yes', p.error ? 'try again' : p.yes, 'y', () => void sendPanel($, p)),
         ...(only
           ? [
               key(
