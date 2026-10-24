@@ -2162,8 +2162,17 @@ const READ_KINDS = [
 ] as const
 type ReadKind = (typeof READ_KINDS)[number]
 // A validated read request. repo and ref are for an upstream (dependency) repository on GitHub; repo alone, for a
-// linked issue or PR in another repository, and closes for one the PR closes rather than only mentions
-type ReadReq = { kind: ReadKind; number?: number; path?: string; query?: string; repo?: string; ref?: string; closes?: boolean }
+// linked issue or PR in another repository. linked marks an issue the PR links to, closes one it closes
+type ReadReq = {
+  kind: ReadKind
+  number?: number
+  path?: string
+  query?: string
+  repo?: string
+  ref?: string
+  linked?: boolean
+  closes?: boolean
+}
 
 const reviews = new Map<string, ReviewRun>()
 
@@ -2328,7 +2337,7 @@ function readForReview($: EngineInterface, run: ReviewRun, req: ReadReq): Promis
     const item: ContentItem = {
       source:
         req.kind === 'issue'
-          ? `GitHub issue or PR ${req.repo ?? run.pr.repository.nameWithOwner}#${req.number}, ${req.closes ? 'closed by' : 'mentioned in the description of'} ${run.pr.repository.nameWithOwner}#${run.pr.number}`
+          ? `GitHub issue or PR ${req.repo ?? run.pr.repository.nameWithOwner}#${req.number}, ${req.closes ? 'closed by' : req.linked ? 'mentioned in the description of' : 'read for the review of'} ${run.pr.repository.nameWithOwner}#${run.pr.number}`
           : req.repo
             ? `GitHub ${req.kind.replace('_', ' ')} of the upstream repository ${req.repo}${req.path ? ` ${req.path}` : ''}${req.ref ? ` at ${req.ref}` : ''}`
             : `GitHub ${req.kind.replace('_', ' ')}${req.number ? ` #${req.number}` : ''}${req.path ? ` ${req.path}` : ''}${req.query ? ` for "${req.query}"` : ''} of ${run.pr.repository.nameWithOwner}#${run.pr.number}`,
@@ -2415,6 +2424,7 @@ function linkedIssues(pr: PR, overview: string | undefined): { reqs: ReadReq[]; 
       reqs.push({
         kind: 'issue',
         number,
+        linked: true,
         ...(repo.toLowerCase() === here.toLowerCase() ? {} : { repo }),
         ...(closes.has(key) ? { closes: true } : {}),
       })
