@@ -1385,12 +1385,16 @@ async function sendApproval($: EngineInterface, a: Approval): Promise<void> {
   if (a.sending || approval !== a) return
   a.sending = true
   $.ui.invalidate('ui.render')
-  for (const pr of a.prs) {
-    const run = reviewOfHead(pr)
-    if ((await postApproval($, pr, a.how)) && run?.state === 'passed') run.state = 'approved'
+  try {
+    for (const pr of a.prs) {
+      const run = reviewOfHead(pr)
+      if ((await postApproval($, pr, a.how)) && run?.state === 'passed') run.state = 'approved'
+    }
+  } finally {
+    // Closed even when a call throws, so the panel never stays stuck on sending
+    if (approval === a) approval = undefined
+    $.ui.invalidate('ui.render')
   }
-  if (approval === a) approval = undefined
-  $.ui.invalidate('ui.render')
 }
 
 // The finished AI review of the PR's current commit, if there is one
@@ -4269,7 +4273,11 @@ async function reviewAllBots($: EngineInterface): Promise<void> {
     openApproval(
       $,
       passed,
-      passed.map((p) => ({ text: `${askLabel(p)} @${p.headRefOid.slice(0, 7)} ${p.title}` })),
+      // Each PR, then its review's warnings: the panel covers the rows that show them
+      passed.flatMap((p) => [
+        { text: `${askLabel(p)} @${p.headRefOid.slice(0, 7)} ${p.title}` },
+        ...(reviewOfHead(p)?.warnings ?? []).map((w) => ({ text: `  ⚠ Check before approving: ${w}`, color: 'yellow' as const })),
+      ]),
       'you pressed y in the approve panel after b',
     )
   const touched = [...targets, ...before.filter((p) => !targets.includes(p))]

@@ -3958,6 +3958,22 @@ test(
   },
 )
 
+test('the approve panel after b shows each bot PR with its review warnings', async ($, on) => {
+  const red = renovate(failing([{ __typename: 'CheckRun', name: 'rspec', conclusion: 'FAILURE', detailsUrl: null }]))
+  const s = stubs(on, {
+    graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [red] }, mine: { nodes: [] } } }),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'review-bots' })
+  await settleReview(s)
+  await answerPanel(ui, s)
+  expect(s.panels.at(-1)).toContain('app#12 @aaaaaaa')
+  expect(s.panels.at(-1)).toContain("⚠ Check before approving: CI is failing (rspec): approve only if that is not this change's fault")
+  expect(approved(s.calls)).toBe(false)
+  await ui.unmount()
+})
+
 test('a merge refused because the PR moved says so and fetches again', async ($, on) => {
   const s = stubs(on, {
     answer: 'Squash and merge',
