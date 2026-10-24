@@ -1555,8 +1555,13 @@ async function postApproval($: EngineInterface, pr: PR, how: string): Promise<bo
     // Who decided, and how, stays in the transcript
     $.ui.log(`pr-inbox approved ${pr.repository.nameWithOwner}#${pr.number} at ${sha}: ${how}`)
     await refresh($)
-  } catch {
-    // The list catches up on the next fetch
+  } catch (err) {
+    // The list catches up on the next fetch. Why, off screen; a log that fails too must not undo the true below
+    try {
+      $.ui.log(`pr-inbox: after approving ${pr.repository.nameWithOwner}#${pr.number}: ${messageOf(err)}`, { to: 'debug' })
+    } catch {
+      // Nothing more to do
+    }
   }
   return true
 }
