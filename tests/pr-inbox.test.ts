@@ -3863,7 +3863,7 @@ test('w suggests the team this repository is reviewed by, checked; s asks it and
   expect(await ui.find({ key: 'pick-kai' })).toBeUndefined()
   expect(await ui.find({ key: 'pick-me' })).toBeUndefined()
   expect(JSON.stringify(await ui.find({ key: 'picker-keys' }))).not.toContain('evil')
-  // Nothing goes out before s
+  // Nothing goes out before y
   expect(requestCalls(s.calls)).toEqual([])
   await ui.press({ key: 'pick-send' })
   expect(requestCalls(s.calls)).toEqual([['gh', 'api', '-X', 'POST', 'repos/acme/app/pulls/25/requested_reviewers', '--input', '-']])
@@ -3912,7 +3912,7 @@ test('after a push, w asks again whoever requested changes, to them and not to t
   expect((await ui.find({ key: 'act-reviewers' }))?.props.label).toBe('re-request review')
   await ui.press({ key: 'act-reviewers' })
   for (let i = 0; i < 5; i++) await s.clock.settle()
-  // Checked already: w then s asks them again
+  // Checked already: w then y asks them again
   const row = await pickText(ui, 'mika')
   expect(row).toContain('[x]')
   expect(row).toContain('✗ changes')
@@ -3923,6 +3923,21 @@ test('after a push, w asks again whoever requested changes, to them and not to t
   await ui.press({ key: 'pick-send' })
   expect(s.stdins[s.calls.findIndex((c) => c.includes('POST'))]).toBe('{"reviewers":["mika"],"team_reviewers":[]}')
   expect(s.toasts.at(-1)).toBe('Re-requested @mika on app#27')
+  await ui.unmount()
+})
+
+test('w sends with y; s still sends the same, and says y is the key now', async ($, on) => {
+  const s = stubs(on, { graphql: reviewersGraphql(PUSHED), gh: reviewersGh([PUSHED]) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-reviewers' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect((await ui.find({ key: 'pick-send' }))?.props.hotkey).toBe('y')
+  expect(JSON.stringify(await ui.find({ key: 'picker-keys' }))).toContain('send')
+  await ui.press({ key: 'pick-send-s' })
+  expect(s.stdins[s.calls.findIndex((c) => c.includes('POST'))]).toBe('{"reviewers":["mika"],"team_reviewers":[]}')
+  expect(s.toasts.at(-1)).toBe('Re-requested @mika on app#27 · use y to send (s stops working in a later version)')
   await ui.unmount()
 })
 
