@@ -2372,9 +2372,11 @@ const MAX_LINKED_ISSUES = 5
 const ISSUE_REF =
   /https:\/\/github\.com\/([A-Za-z0-9-]+\/[\w.-]+)\/(?:issues|pull)\/(\d+)\b|(?<![\w/.-])([A-Za-z0-9-]+\/[\w.-]+)?#(\d+)\b(?![\w/-])/g
 
-// The issues and PRs a PR links to, wherever they live: those its description mentions from the top, then those it closes
-// without saying so (linked in GitHub's sidebar), at most MAX_LINKED_ISSUES, never the PR itself; skipped counts the rest
-function linkedIssues(pr: PR, overview: string | undefined): { reqs: ReadReq[]; skipped: number } {
+// The issues and PRs a PR links to: those its description mentions from the top, then those it closes without saying so
+// (linked in GitHub's sidebar), at most MAX_LINKED_ISSUES, never the PR itself. Only in repositories of the PR's own
+// owner: the PR's author picks the links, and must not get another owner's private issue read with your token and sent.
+// skipped counts the rest, elsewhere those of other owners
+function linkedIssues(pr: PR, overview: string | undefined): { reqs: ReadReq[]; skipped: number; elsewhere: number } {
   let body = ''
   let closing: unknown[] = []
   try {
@@ -2400,12 +2402,15 @@ function linkedIssues(pr: PR, overview: string | undefined): { reqs: ReadReq[]; 
   const closes = new Set(refs.slice(refs.length - closing.length).map(({ repo, number }) => `${repo.toLowerCase()}#${number}`))
   const reqs: ReadReq[] = []
   let skipped = 0
+  let elsewhere = 0
+  const owner = `${here.split('/')[0]?.toLowerCase()}/`
   for (const { repo, number } of refs) {
     const key = `${repo.toLowerCase()}#${number}`
     if (seen.has(key)) continue
     if (!REPO_NAME.test(repo) || repo.length > 100 || !Number.isInteger(number) || number < 1 || number > 10_000_000) continue
     seen.add(key)
-    if (reqs.length >= MAX_LINKED_ISSUES) skipped += 1
+    if (!key.startsWith(owner)) elsewhere += 1
+    else if (reqs.length >= MAX_LINKED_ISSUES) skipped += 1
     else
       reqs.push({
         kind: 'issue',
@@ -2414,7 +2419,7 @@ function linkedIssues(pr: PR, overview: string | undefined): { reqs: ReadReq[]; 
         ...(closes.has(key) ? { closes: true } : {}),
       })
   }
-  return { reqs, skipped }
+  return { reqs, skipped, elsewhere }
 }
 
 // What every perspective starts from: the PR, its discussion, the issues and PRs it links to and the repository's guides
@@ -2422,14 +2427,18 @@ async function baseContext($: EngineInterface, run: ReviewRun): Promise<ContentI
   const [overview, ...rest] = await Promise.all(
     (['overview', 'diff', 'comments', 'review_comments'] as const).map((kind) => readForReview($, run, { kind })),
   )
-  const { reqs, skipped } = linkedIssues(run.pr, overview?.content)
+  const { reqs, skipped, elsewhere } = linkedIssues(run.pr, overview?.content)
   const linked = await Promise.all(reqs.map((req) => readForReview($, run, req)))
   // So a reviewer does not judge the PR by an issue it never saw
-  if (skipped > 0)
+  const unread = [
+    ...(skipped > 0 ? [`${skipped} more beyond the first ${MAX_LINKED_ISSUES}`] : []),
+    ...(elsewhere > 0 ? [`${elsewhere} in repositories of other owners`] : []),
+  ]
+  if (unread.length > 0)
     linked.push({
       source: 'pr-inbox',
       trust: 'a note from pr-inbox itself',
-      content: `The PR links to ${skipped} more issue${skipped === 1 ? '' : 's'} or PRs, not read: do not judge it by them`,
+      content: `The PR links to issues or PRs that were not read (${unread.join(', ')}): do not judge it by them`,
     })
   // A PR that changes AI instructions is for a person to judge: the review would be judging its own instructions
   let changed: string[] = []

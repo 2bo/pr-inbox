@@ -1252,12 +1252,12 @@ test('the PR content reaches the models as labeled, untrusted JSON, after the in
   await ui.unmount()
 })
 
-test('the AI review reads the issues and PRs the description links to, in any repository, the first 5 from the top', async ($, on) => {
+test('the AI review reads the issues and PRs the description links to, in repositories of the same owner, the first 5 from the top', async ($, on) => {
   const s = stubs(on, {
     answer: 'Cancel',
     overview: {
       body: [
-        'Fixes #3 and follows my-org/lib#7 (see https://github.com/my-org/lib/pull/7 again).',
+        'Fixes #3 and follows acme/lib#7 (see https://github.com/acme/lib/pull/7 again), not my-org/lib#1 of another owner.',
         'This PR is https://github.com/acme/app/pull/11; not a ref: a.b/c#9, page.html#12, #12abc.',
         '<!-- Fixes #20 --> Not links either: `#21` and',
         '```',
@@ -1272,19 +1272,19 @@ test('the AI review reads the issues and PRs the description links to, in any re
   await start($, s.clock)
   const ui = await pressReview($, s)
   const read = s.calls.filter((c) => c[1] === 'issue' && c[2] === 'view').map((c) => `${c[5]}#${c[3]}`)
-  expect(read).toEqual(['acme/app#3', 'my-org/lib#7', 'acme/app#4', 'acme/app#5', 'acme/app#6'])
+  expect(read).toEqual(['acme/app#3', 'acme/lib#7', 'acme/app#4', 'acme/app#5', 'acme/app#6'])
   const items = JSON.parse(reviewsOf(s)[0]?.prompt.match(/<pr_content>\n([\s\S]*?)\n<\/pr_content>/)?.[1] ?? '[]') as {
     source: string
     trust: string
     content?: string
   }[]
-  expect(items.find((x) => x.source.includes('my-org/lib#7'))).toMatchObject({
-    source: 'GitHub issue or PR my-org/lib#7, mentioned in the description of acme/app#11',
+  expect(items.find((x) => x.source.includes('acme/lib#7'))).toMatchObject({
+    source: 'GitHub issue or PR acme/lib#7, mentioned in the description of acme/app#11',
     trust: expect.stringContaining('untrusted'),
   })
-  // The reviewers are told what was left out (#8, and #2 the PR closes from the sidebar), so they do not judge by it
+  // The reviewers are told what was left out (#8, #2 the PR closes from the sidebar, my-org/lib#1), so they do not judge by it
   expect(items.find((x) => x.source === 'pr-inbox')?.content).toBe(
-    'The PR links to 2 more issues or PRs, not read: do not judge it by them',
+    'The PR links to issues or PRs that were not read (2 more beyond the first 5, 1 in repositories of other owners): do not judge it by them',
   )
   await ui.unmount()
 })
@@ -1292,16 +1292,16 @@ test('the AI review reads the issues and PRs the description links to, in any re
 test('the AI review also reads the issues a PR closes from the sidebar, when the description leaves room', async ($, on) => {
   const s = stubs(on, {
     answer: 'Cancel',
-    overview: { body: 'Fixes #3', closingIssuesReferences: [{ number: 3 }, { number: 2, url: 'https://github.com/my-org/lib/issues/2' }] },
+    overview: { body: 'Fixes #3', closingIssuesReferences: [{ number: 3 }, { number: 2, url: 'https://github.com/acme/lib/issues/2' }] },
   })
   await start($, s.clock)
   const ui = await pressReview($, s)
   const read = s.calls.filter((c) => c[1] === 'issue' && c[2] === 'view').map((c) => `${c[5]}#${c[3]}`)
-  expect(read).toEqual(['acme/app#3', 'my-org/lib#2'])
+  expect(read).toEqual(['acme/app#3', 'acme/lib#2'])
   // What the PR closes is named as such: it states the purpose, the rest is context
   const prompt = reviewsOf(s)[0]?.prompt ?? ''
   expect(prompt).toContain('GitHub issue or PR acme/app#3, closed by acme/app#11')
-  expect(prompt).toContain('GitHub issue or PR my-org/lib#2, closed by acme/app#11')
+  expect(prompt).toContain('GitHub issue or PR acme/lib#2, closed by acme/app#11')
   expect(prompt).not.toContain('"source":"pr-inbox"')
   await ui.unmount()
 })
