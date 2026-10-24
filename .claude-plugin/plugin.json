@@ -1,6 +1,6 @@
 {
   "name": "pr-inbox",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "An inbox for review requests and your own PRs: AI summary and risk, an AI review that can approve, a reader for the description and diff, asking reviewers (teams that assign too), merging (gh stack too) and CI fixes with Claude",
   "author": {
     "name": "2bo"
@@ -106,6 +106,13 @@
       "description": "What happens when the AI review (v) passes: confirm (the row says so and a approves, after its dialog) or auto (approve without asking, for PRs from members and collaborators of the repository and for Dependabot or Renovate; others are left to a)",
       "default": "confirm",
       "options": ["confirm", "auto"]
+    },
+    "auto_review": {
+      "type": "string",
+      "title": "AI review: run on its own",
+      "description": "Run the AI review (v) without pressing v when a review request arrives or gets new commits: bots (bot PRs only), review requests (every review request, bots too) or off. Interactive sessions only, one at a time, at most 6 an hour across sessions (each about two review_model calls per perspective); drafts, conflicts, changes requested and running CI wait. v on one it runs cancels it and pauses this for an hour. Approving still follows ai_approve",
+      "default": "off",
+      "options": ["off", "bots", "review requests"]
     },
     "review_model": {
       "type": "string",

@@ -102,6 +102,8 @@ type Config = {
   glyphs: 'unicode' | 'ascii'
   // AI review and approve (v)
   ai_approve: 'confirm' | 'auto'
+  // Which review requests the AI review takes up on its own when they arrive or get new commits
+  auto_review: 'off' | 'bots' | 'review requests'
   review_model: string
   review_purpose: string
   review_correctness: string
@@ -302,6 +304,7 @@ let cfg: Config = {
   theme: 'dark',
   glyphs: 'unicode',
   ai_approve: 'confirm',
+  auto_review: 'off',
   review_model: 'sonnet',
   review_purpose: '',
   review_correctness: '',
@@ -358,7 +361,7 @@ let panelPage = { url: '', expanded: '', from: 0 }
 // The filter typed after f (matched against repository, number, title and author), and whether its field is open
 let filterText = ''
 let filtering = false
-// Reviewing every bot PR in turn (w): progress, and a stop request
+// Reviewing every bot PR in turn (b): progress, and a stop request
 let botBatch: { total: number; done: number; current: string; stop: boolean } | undefined
 let showHelp = false
 let showSnoozed = false
@@ -821,6 +824,8 @@ function summary(g: Record<Group, PR[]>): string {
     ...part(high, `▲${high} high`),
     ...part(reviewing, `⠿ AI ${reviewing}${botBatch ? ` (bots ${botBatch.done}/${botBatch.total})` : ''}`),
     ...part(passed, `☑${passed} to approve`),
+    // auto_review held back: paused after a cancel, or at its hourly limit
+    ...(autoPausedUntil > fetchedAt ? ['auto paused'] : autoNextAt > fetchedAt ? ['auto at limit'] : []),
     // Approved by you, then changed: worth another look
     ...part(g.approved.filter(approvalOutdated).length, `↻${g.approved.filter(approvalOutdated).length} re-review`),
   ]
@@ -1024,6 +1029,7 @@ async function fetchAll($: EngineInterface): Promise<void> {
   showStatus($)
   $.ui.invalidate('ui.render')
   if (!error) await scheduleAnalyses($)
+  if (!error) void scheduleAutoReviews($)
 }
 
 // What to do when gh is missing or signed out, instead of its raw message
@@ -1749,6 +1755,8 @@ type ReviewRun = {
   baseRef: string
   // What it all comes to, in a sentence or two in your language: the decision and why
   summary?: string
+  // Started by auto_review, not by v
+  auto?: boolean
 }
 
 type Verdict = { perspective: string; verdict: 'pass' | 'fail' | 'unknown' | 'none'; conclusion: string }
@@ -1773,12 +1781,15 @@ function newRun(pr: PR): ReviewRun {
 }
 
 // A finished review as kept in $.store under review:<url>, for the commit it reviewed
-type StoredReview = { head: string; run: Pick<ReviewRun, 'state' | 'problems' | 'findings' | 'verdicts' | 'warnings' | 'summary'> }
+type StoredReview = {
+  head: string
+  run: Pick<ReviewRun, 'state' | 'problems' | 'findings' | 'verdicts' | 'warnings' | 'summary' | 'auto'>
+}
 
 function asStoredReview(x: unknown): StoredReview | undefined {
   if (!x || typeof x !== 'object') return undefined
   const v = x as { head?: unknown; state?: unknown; problems?: unknown; findings?: unknown }
-  if (typeof v.head !== 'string' || !['approved', 'passed', 'blocked'].includes(String(v.state))) return undefined
+  if (typeof v.head !== 'string' || !['approved', 'passed', 'blocked', 'cancelled'].includes(String(v.state))) return undefined
   if (!Array.isArray(v.problems) || !Array.isArray(v.findings)) return undefined
   const findings: Finding[] = []
   for (const f of v.findings as Record<string, unknown>[]) {
@@ -1810,7 +1821,15 @@ function asStoredReview(x: unknown): StoredReview | undefined {
   const summary = typeof rawSummary === 'string' ? clean(rawSummary).slice(0, 400) : undefined
   return {
     head: v.head,
-    run: { state: v.state as StoredReview['run']['state'], problems, findings, verdicts, warnings, ...(summary ? { summary } : {}) },
+    run: {
+      state: v.state as StoredReview['run']['state'],
+      problems,
+      findings,
+      verdicts,
+      warnings,
+      ...(summary ? { summary } : {}),
+      ...((x as { auto?: unknown }).auto === true ? { auto: true } : {}),
+    },
   }
 }
 
@@ -2284,14 +2303,15 @@ function enabledPerspectives(pr: PR): { p: Perspective; text: string }[] {
 
 // The whole review: gates, reading and screening, one model call per perspective, the verifier, then approve or
 // report why not
-async function aiReview($: EngineInterface, pr: PR): Promise<void> {
+async function aiReview($: EngineInterface, pr: PR, auto = false): Promise<void> {
   const current = reviews.get(pr.url)
-  // v again while it runs cancels it
+  // v again while it runs cancels it; auto_review leaves a running review alone (v or b started it meanwhile)
   if (current?.state === 'running') {
-    current.stop.abort()
+    if (!auto) current.stop.abort()
     return
   }
   const run = newRun(pr)
+  if (auto) run.auto = true
   // Your own PR: reviewed for you to fix, never approved (GitHub does not let you approve your own)
   const own = mine.some((p) => p.url === pr.url)
   run.strict = !own && approvesWithoutAsking(pr)
@@ -2302,13 +2322,24 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
     $.ui.invalidate('ui.render')
   }
   const cancelled = () => run.stop.signal.aborted
+  const endCancelled = async () => {
+    run.state = 'cancelled'
+    // auto_review says it itself, with what happens next
+    if (!auto) $.ui.toast(`AI review of ${askLabel(pr)} cancelled`)
+    // Kept for the commit, so a restart does not review it again on its own
+    await $.store.set(`review:${pr.url}`, {
+      head: pr.headRefOid,
+      state: run.state,
+      problems: [],
+      findings: [],
+      verdicts: [],
+      warnings: [],
+      ...(auto ? { auto } : {}),
+    })
+    redraw()
+  }
   const finish = async () => {
-    if (cancelled()) {
-      run.state = 'cancelled'
-      $.ui.toast(`AI review of ${askLabel(pr)} cancelled`)
-      redraw()
-      return
-    }
+    if (cancelled()) return endCancelled()
     // One problem per location, naming every perspective that found it
     const confirmed = run.findings.filter((f) => isCandidate(f) && f.confirmed !== false)
     const byPlace = new Map<string, Finding[]>()
@@ -2323,18 +2354,22 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
       run.step = 'summing up…'
       redraw()
       run.summary = await summarizeReview($, run)
+      // v while it summed up: nothing is approved or kept as passed
+      if (cancelled()) return endCancelled()
       if (run.summary) $.ui.log(`pr-inbox AI review of ${pr.repository.nameWithOwner}#${pr.number}, in short: ${run.summary}`)
     }
     if (run.problems.length > 0) {
       run.state = 'blocked'
       // Stopped by a gate before any model ran is not the AI's verdict
       const gated = run.verdicts.length === 0 && run.injection.length === 0
-      $.ui.toast(
-        gated
-          ? `AI review not run on ${askLabel(pr)}: ${fit(run.problems[0] ?? '', 60)}`
-          : `✗ AI review blocked ${askLabel(pr)}: ${fit(run.problems[0] ?? '', 80)}`,
-        { timeoutMs: 8000 },
-      )
+      // auto_review sums up its reviews in one toast
+      if (!auto)
+        $.ui.toast(
+          gated
+            ? `AI review not run on ${askLabel(pr)}: ${fit(run.problems[0] ?? '', 60)}`
+            : `✗ AI review blocked ${askLabel(pr)}: ${fit(run.problems[0] ?? '', 80)}`,
+          { timeoutMs: 8000 },
+        )
     } else {
       // The notes go to the transcript in full
       for (const line of reviewPreview(run, enabledPerspectives(pr))) $.ui.log(line)
@@ -2348,7 +2383,7 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
       } else {
         // No dialog breaking in on what you do next: the row says it passed, and a approves, its dialog with the notes
         run.state = 'passed'
-        $.ui.toast(`✓ AI review passed ${askLabel(pr)} at ${pr.headRefOid.slice(0, 7)} · a: approve`, { timeoutMs: 8000 })
+        if (!auto) $.ui.toast(`✓ AI review passed ${askLabel(pr)} at ${pr.headRefOid.slice(0, 7)} · a: approve`, { timeoutMs: 8000 })
       }
     }
     await $.store.set(`review:${pr.url}`, {
@@ -2359,6 +2394,7 @@ async function aiReview($: EngineInterface, pr: PR): Promise<void> {
       verdicts: run.verdicts,
       warnings: run.warnings,
       ...(run.summary ? { summary: run.summary } : {}),
+      ...(auto ? { auto } : {}),
     })
     logReview($, run)
     redraw()
@@ -4011,21 +4047,202 @@ function spin($: EngineInterface): void {
   })
 }
 
-// ---- Bulk review of bot PRs (w) ----
+// ---- AI review on its own (auto_review) ----
+
+// At most this many reviews start on their own per hour, across sessions; the rest wait for a later fetch
+const MAX_AUTO_REVIEWS_PER_HOUR = 6
+// How long a session holds a PR it reviews on its own, so other sessions leave it alone
+const AUTO_LEASE = 15 * MINUTE
+// The store has no conditional write, so two sessions can both take a PR: each writes its own id, waits this long and
+// reads it back, and the one whose id is gone leaves the PR. This narrows the race; it cannot close it
+const AUTO_SETTLE = 2000
+const SESSION_ID = crypto.randomUUID()
+let autoReviewing = false
+// For the rows: until when auto_review is paused, when the hourly limit lets the next review start, and when a failed
+// review is tried again (0 or missing: not waiting on it). Learned from the store on each round
+let autoPausedUntil = 0
+let autoNextAt = 0
+const autoRetryAt = new Map<string, number>()
+// Whether a person is at the prompt (decided on session.start): -p runs and the SDK review nothing on their own
+let interactive = false
+
+// What the store keeps per PR, shared by the sessions: who reviews it until when, and the retries of a review that
+// failed (no answer, a timeout) rather than found something
+type AutoRecord = { head: string; until: number; attempts: number; retryAt: number; owner?: string }
+
+function asAutoRecord(x: unknown): AutoRecord | undefined {
+  if (!x || typeof x !== 'object') return undefined
+  const v = x as Record<string, unknown>
+  const n = (k: string) => (typeof v[k] === 'number' && Number.isFinite(v[k]) ? (v[k] as number) : 0)
+  if (typeof v.head !== 'string') return undefined
+  return {
+    head: v.head,
+    until: n('until'),
+    attempts: n('attempts'),
+    retryAt: n('retryAt'),
+    ...(typeof v.owner === 'string' ? { owner: v.owner } : {}),
+  }
+}
+
+// Blocked only because reviewers gave no answer: worth another try, unlike a review that found something
+function failedOnly(r: Pick<ReviewRun, 'state' | 'problems'>): boolean {
+  return r.state === 'blocked' && r.problems.length > 0 && r.problems.every((x) => x.endsWith('the reviewer gave no valid result'))
+}
+
+// Whether auto_review takes up this review request now: not snoozed, not stopped by a gate, CI not running (it would
+// keep ai_approve auto from approving), and no review of its current commit yet, or one that failed
+function wantsAutoReview(p: PR): boolean {
+  if (cfg.auto_review !== 'review requests' && !(cfg.auto_review === 'bots' && isBot(p))) return false
+  const ci = ciState(p)
+  if (isSnoozed(p) || reviewGates(p).length > 0 || ci === 'PENDING' || ci === 'EXPECTED') return false
+  const r = reviews.get(p.url)
+  return !r || r.pr.headRefOid !== p.headRefOid || failedOnly(r)
+}
+
+// Takes the PR for this session, unless another session reviews it, has reviewed it, or its retries are spent
+async function claimAutoReview($: EngineInterface, pr: PR, now: number): Promise<boolean> {
+  const stored = asStoredReview(await $.store.get(`review:${pr.url}`))
+  if (stored && stored.head === pr.headRefOid && !failedOnly(stored.run)) {
+    if (reviews.get(pr.url)?.state !== 'running') reviews.set(pr.url, { ...newRun(pr), ...stored.run })
+    return false
+  }
+  const rec = asAutoRecord(await $.store.get(`auto-review:${pr.url}`))
+  const same = rec?.head === pr.headRefOid ? rec : undefined
+  if (same && same.attempts > 0) autoRetryAt.set(pr.url, same.attempts >= MAX_ATTEMPTS ? Number.POSITIVE_INFINITY : same.retryAt)
+  if (same && (now < same.until || same.attempts >= MAX_ATTEMPTS || now < same.retryAt)) return false
+  const key = `auto-review:${pr.url}`
+  await $.store.set(key, { head: pr.headRefOid, until: now + AUTO_LEASE, attempts: same?.attempts ?? 0, retryAt: 0, owner: SESSION_ID })
+  // Another session that took it meanwhile wrote over this one: it is theirs
+  try {
+    await $.clock.sleep(AUTO_SETTLE)
+  } catch {
+    // A wait cut short (the session ends): give the PR back, unless another session holds it now
+    if (asAutoRecord(await $.store.get(key))?.owner === SESSION_ID) await $.store.delete(key)
+    return false
+  }
+  return asAutoRecord(await $.store.get(key))?.owner === SESSION_ID
+}
+
+// Reviews the review requests auto_review takes up, one at a time, after each fetch. The outcome is the same as v:
+// approving still takes a and its dialog, unless ai_approve auto applies to the PR. Cancelling one (v) pauses them
+// for an hour
+async function scheduleAutoReviews($: EngineInterface): Promise<void> {
+  if (autoReviewing || cfg.auto_review === 'off' || !interactive) return
+  if (cfg.analysis === 'when opened' && !paneOpened) return
+  autoReviewing = true
+  // What this round reviewed, for one toast at the end
+  const done: PR[] = []
+  try {
+    autoPausedUntil = 0
+    autoNextAt = 0
+    for (const { url } of [...review].sort(byRequestedAt)) {
+      // b reviews the bots itself; what it leaves is taken up after the next fetch
+      if (botBatch) break
+      // The list may have been fetched again meanwhile
+      const pr = review.find((p) => p.url === url)
+      if (!pr || !wantsAutoReview(pr)) continue
+      const now = await $.clock.now()
+      const paused = Number((await $.store.get('auto-review-paused')) ?? 0)
+      if (now < paused) {
+        autoPausedUntil = paused
+        break
+      }
+      const raw = await $.store.get('auto-review-starts')
+      const starts = (Array.isArray(raw) ? raw : []).filter((t): t is number => typeof t === 'number' && now - t < HOUR)
+      if (starts.length >= MAX_AUTO_REVIEWS_PER_HOUR) {
+        autoNextAt = Math.min(...starts) + HOUR
+        break
+      }
+      if (!(await claimAutoReview($, pr, now))) continue
+      // v or b may have started it while the store was read: theirs, and not one of this hour's
+      if (reviews.get(url)?.state === 'running') {
+        await $.store.delete(`auto-review:${url}`)
+        continue
+      }
+      // Other sessions may have started reviews while this one waited: count them again right before adding this one
+      const again = await $.store.get('auto-review-starts')
+      const fresh = (Array.isArray(again) ? again : []).filter((t): t is number => typeof t === 'number' && now - t < HOUR)
+      if (fresh.length >= MAX_AUTO_REVIEWS_PER_HOUR) {
+        await $.store.delete(`auto-review:${url}`)
+        autoNextAt = Math.min(...fresh) + HOUR
+        break
+      }
+      await $.store.set('auto-review-starts', [...fresh, now])
+      $.ui.log(`pr-inbox AI review of ${pr.repository.nameWithOwner}#${pr.number} started on its own (auto_review)`)
+      await aiReview($, pr, true)
+      done.push(pr)
+      const run = reviews.get(url)
+      const rec = asAutoRecord(await $.store.get(`auto-review:${url}`))
+      if (run && failedOnly(run)) {
+        const attempts = (rec?.head === pr.headRefOid ? rec.attempts : 0) + 1
+        const retryAt = (await $.clock.now()) + Math.min(DAY, RETRY_BASE * 2 ** (attempts - 1))
+        await $.store.set(`auto-review:${url}`, { head: pr.headRefOid, until: 0, attempts, retryAt })
+        autoRetryAt.set(url, attempts >= MAX_ATTEMPTS ? Number.POSITIVE_INFINITY : retryAt)
+      } else {
+        await $.store.delete(`auto-review:${url}`)
+        autoRetryAt.delete(url)
+      }
+      if (run?.state === 'cancelled') {
+        autoPausedUntil = (await $.clock.now()) + HOUR
+        await $.store.set('auto-review-paused', autoPausedUntil)
+        $.ui.toast(`AI review of ${askLabel(pr)} cancelled · auto_review paused for an hour (v still reviews)`, { timeoutMs: 8000 })
+        break
+      }
+    }
+  } finally {
+    autoReviewing = false
+  }
+  // One toast for the round instead of one per PR; approvals by ai_approve auto have their own
+  const count = (state: ReviewRun['state']) => done.filter((p) => reviews.get(p.url)?.state === state).length
+  const parts = [
+    ...(count('passed') ? [`${count('passed')} passed (a: approve)`] : []),
+    ...(count('approved') ? [`${count('approved')} approved`] : []),
+    ...(count('blocked') ? [`${count('blocked')} blocked (i: findings)`] : []),
+  ]
+  if (parts.length > 0) $.ui.toast(`auto_review: ${parts.join(', ')}`, { timeoutMs: 8000 })
+  showStatus($)
+  $.ui.invalidate('ui.render')
+}
+
+// Why auto_review has not reviewed this PR's current commit yet, for its row; undefined when it does not take it up
+// or there is nothing to say
+function autoWhy(p: PR, now: number): string | undefined {
+  if (cfg.auto_review === 'off' || !interactive || (cfg.auto_review === 'bots' && !isBot(p)) || isSnoozed(p)) return undefined
+  if (!review.some((x) => x.url === p.url)) return undefined
+  const r = reviews.get(p.url)
+  if (r?.state === 'running' || (r && r.pr.headRefOid === p.headRefOid && !failedOnly(r))) return undefined
+  const gates = reviewGates(p)
+  if (gates.length > 0) return `auto_review skips it: ${gates.join(', ')}`
+  const ci = ciState(p)
+  if (ci === 'PENDING' || ci === 'EXPECTED') return 'auto_review waits for CI to finish · v: review now'
+  const inMin = (at: number) => `${Math.max(1, Math.ceil((at - now) / MINUTE))}m`
+  const retry = r && failedOnly(r) ? autoRetryAt.get(p.url) : undefined
+  if (retry === Number.POSITIVE_INFINITY) return 'auto_review gave up after repeated failures · v: try again'
+  if (retry && retry > now) return `auto_review tries again in ${inMin(retry)} · v: now`
+  if (autoPausedUntil > now) return `auto_review paused for ${inMin(autoPausedUntil)} · v: review now`
+  if (autoNextAt > now) return `auto_review waits for its hourly limit (${inMin(autoNextAt)}) · v: review now`
+  return 'auto_review will review it · v: now'
+}
+
+// ---- Bulk review of bot PRs (b) ----
 
 // Reviews each bot PR on To review in turn, one at a time to keep the cost down. PRs already reviewed at their current
-// commit are skipped. Pressing w again stops after cancelling the running review
+// commit are skipped. Then one dialog approves those that passed, these and any passed before (auto_review's too).
+// Pressing b again stops after cancelling the running review
 async function reviewAllBots($: EngineInterface): Promise<void> {
   if (botBatch) {
     botBatch.stop = true
     reviews.get(botBatch.current)?.stop.abort()
     return
   }
-  const targets = groups(fetchedAt || Date.now()).bots.filter((p) => !reviewOfHead(p) && reviews.get(p.url)?.state !== 'running')
-  if (targets.length === 0) {
+  const bots = groups(fetchedAt || Date.now()).bots
+  const targets = bots.filter((p) => !reviewOfHead(p) && reviews.get(p.url)?.state !== 'running')
+  const waitsForYou = () => bots.filter((p) => reviewOfHead(p)?.state === 'passed')
+  if (targets.length === 0 && waitsForYou().length === 0) {
     $.ui.toast('Every bot PR already has an AI review of its current commit')
     return
   }
+  const before = waitsForYou()
   botBatch = { total: targets.length, done: 0, current: '', stop: false }
   for (const pr of targets) {
     if (botBatch.stop) break
@@ -4036,7 +4253,7 @@ async function reviewAllBots($: EngineInterface): Promise<void> {
   const stopped = botBatch.stop
   botBatch = undefined
   // Those that passed and wait for you: one dialog for all, naming each commit; each approval is pinned to it
-  const passed = targets.filter((p) => reviews.get(p.url)?.state === 'passed')
+  const passed = waitsForYou()
   if (passed.length > 0) {
     const list = passed.map((p) => `${p.repository.nameWithOwner.split('/')[1]}#${p.number} @${p.headRefOid.slice(0, 7)}`).join(', ')
     let answer = ''
@@ -4052,10 +4269,11 @@ async function reviewAllBots($: EngineInterface): Promise<void> {
     if (answer.startsWith('Approve all'))
       for (const p of passed) {
         const run = reviews.get(p.url)
-        if (run && (await postApproval($, p, 'you chose Approve all in the dialog after w'))) run.state = 'approved'
+        if (run && (await postApproval($, p, 'you chose Approve all in the dialog after b'))) run.state = 'approved'
       }
   }
-  const outcome = (state: ReviewRun['state']) => targets.filter((p) => reviews.get(p.url)?.state === state).length
+  const touched = [...targets, ...before.filter((p) => !targets.includes(p))]
+  const outcome = (state: ReviewRun['state']) => touched.filter((p) => reviews.get(p.url)?.state === state).length
   $.ui.toast(
     `${stopped ? 'Stopped. ' : ''}Bot PRs: ${outcome('approved')} approved, ${outcome('passed')} passed but not approved, ${outcome('blocked')} blocked`,
     { timeoutMs: 10_000 },
@@ -4762,6 +4980,7 @@ export function register(on: On, options: PluginOptions) {
   NEON = cfg.theme === 'light' ? LIGHT : DARK
 
   on('session.start', async ($, e, next) => {
+    interactive = e.isInteractive
     language = await resolveLanguage($)
     // Defer the first fetch to a timer so startup does not wait on it
     $.clock.after(0, () => refresh($))
@@ -4810,7 +5029,10 @@ export function register(on: On, options: PluginOptions) {
     paneOpen = true
     if (!paneOpened) {
       paneOpened = true
-      if (cfg.analysis === 'when opened' && fetchedAt && !error) void scheduleAnalyses($)
+      if (cfg.analysis === 'when opened' && fetchedAt && !error) {
+        void scheduleAnalyses($)
+        void scheduleAutoReviews($)
+      }
     }
     if (!loading && (await $.clock.now()) - fetchedAt > MINUTE) $.clock.after(0, () => refresh($))
     return {}
@@ -5920,34 +6142,40 @@ export function register(on: On, options: PluginOptions) {
     // The AI review's rows under a review request: its state, then what blocked it
     const reviewRows = (p: PR): { text: string; color?: string; dim?: boolean; indent?: number }[] => {
       const r = reviews.get(p.url)
-      if (!r) return []
-      if (r.state === 'cancelled') return [{ text: 'AI review cancelled · v: run it again', dim: true }]
+      // Why auto_review has not reviewed the current commit yet
+      const why = autoWhy(p, fetchedAt || Date.now())
+      const waiting = why ? [{ text: why, dim: true }] : []
+      if (!r) return waiting
+      // Which reviews auto_review started
+      const name = r.auto ? 'AI review (auto)' : 'AI review'
+      if (r.state === 'cancelled') return [{ text: `${name} cancelled · v: run it again`, dim: true }]
       if (r.state === 'running' && r.step !== 'approving…')
         return [
           {
-            text: `AI review ${aiGlyph(p).text} ${r.step} ${Math.floor((Date.now() - r.startedAt) / 1000)}s · v: cancel`,
+            text: `${name} ${aiGlyph(p).text} ${r.step} ${Math.floor((Date.now() - r.startedAt) / 1000)}s · v: cancel`,
             color: NEON.cyan,
           },
         ]
       if (r.pr.headRefOid !== p.headRefOid)
-        return [{ text: `AI review of an older commit (${r.pr.headRefOid.slice(0, 7)}) · v: review the new one`, dim: true }]
+        return [{ text: `${name} of an older commit (${r.pr.headRefOid.slice(0, 7)}) · v: review the new one`, dim: true }, ...waiting]
       // The decision first, then each perspective's conclusion; findings and evidence wait behind d
       const notes = r.findings.filter((f) => f.severity !== 'pre-existing').length
       const hint = expanded === p.url ? '' : notes > 0 || r.problems.length > 0 ? ' · i: findings' : ''
       const head =
         r.state === 'blocked'
-          ? { text: `AI review ✗ blocked · ${blockedWhy(r)}${hint}`, color: NEON.red }
+          ? { text: `${name} ✗ blocked · ${blockedWhy(r)}${hint}`, color: NEON.red }
           : r.state === 'approved'
-            ? { text: `AI review ✓ approved at ${r.pr.headRefOid.slice(0, 7)}: no blocking issues${hint}`, color: NEON.green }
+            ? { text: `${name} ✓ approved at ${r.pr.headRefOid.slice(0, 7)}: no blocking issues${hint}`, color: NEON.green }
             : r.state === 'passed'
               ? {
                   text: mine.some((m) => m.url === p.url)
-                    ? `AI review ✓ passed: no blocking issues${hint}`
-                    : `AI review ✓ passed at ${r.pr.headRefOid.slice(0, 7)}: no blocking issues · a: approve${hint}`,
+                    ? `${name} ✓ passed: no blocking issues${hint}`
+                    : `${name} ✓ passed at ${r.pr.headRefOid.slice(0, 7)}: no blocking issues · a: approve${hint}`,
                   color: NEON.green,
                 }
-              : { text: 'AI review ✓ passed: waiting for your approval', color: NEON.green }
-      const rows: { text: string; color?: string; dim?: boolean; indent?: number }[] = [head]
+              : { text: `${name} ✓ passed: waiting for your approval`, color: NEON.green }
+      // A review that failed and auto_review tries again says when
+      const rows: { text: string; color?: string; dim?: boolean; indent?: number }[] = [head, ...waiting]
       if (r.summary) rows.push({ text: `→ ${r.summary}`, indent: 2 })
       // Worst first: blocking, could not tell, held back, fine
       const rank = (v: Verdict) => {
@@ -6309,9 +6537,15 @@ export function register(on: On, options: PluginOptions) {
     // AI review every bot PR in turn: those with no review of their current commit yet
     const unreviewedBots = g.bots.filter((p) => !reviewOfHead(p) && reviews.get(p.url)?.state !== 'running').length
     // b sits on the bots heading
-    const reviewBotsLabel = botBatch ? `stop AI review (${botBatch.done}/${botBatch.total})` : `AI review ${unreviewedBots} unreviewed`
+    // With none to review, b approves those that passed (auto_review's, say) in one dialog
+    const passedBots = g.bots.filter((p) => reviewOfHead(p)?.state === 'passed').length
+    const reviewBotsLabel = botBatch
+      ? `stop AI review (${botBatch.done}/${botBatch.total})`
+      : unreviewedBots > 0
+        ? `AI review ${unreviewedBots} unreviewed`
+        : `approve ${passedBots} passed`
     const reviewBots =
-      tab === 'review' && (unreviewedBots > 0 || botBatch)
+      tab === 'review' && (unreviewedBots > 0 || passedBots > 0 || botBatch)
         ? small('review-bots', reviewBotsLabel, 'b', () => {
             void reviewAllBots($)
             redraw()
