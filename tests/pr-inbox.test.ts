@@ -158,6 +158,8 @@ type StubOptions = {
   files?: Record<string, string>
   // The paths the PR changes, as gh pr view lists them
   changed?: string[]
+  // The description and closing issues the AI review's overview reads
+  overview?: { body?: string; closingIssuesReferences?: unknown[] }
 }
 
 function stubs(on: TestOn, opts: StubOptions = {}) {
@@ -214,10 +216,10 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
     if (e.argv[2] === 'view' && e.argv.some((a) => a.includes('closingIssuesReferences')))
       stdout = JSON.stringify({
         title: 't',
-        body: 'b',
+        body: opts.overview?.body ?? 'b',
         baseRefName: 'main',
         files: (opts.changed ?? []).map((path) => ({ path, additions: 1, deletions: 1 })),
-        closingIssuesReferences: [],
+        closingIssuesReferences: opts.overview?.closingIssuesReferences ?? [],
       })
     const content = e.argv.find((a) => a.includes('/contents/'))?.match(/\/contents\/([^?]+)/)?.[1]
     if (content !== undefined) stdout = opts.files?.[decodeURIComponent(content)] ?? ''
@@ -1247,6 +1249,70 @@ test('the PR content reaches the models as labeled, untrusted JSON, after the in
   // The repository guides are read from the base branch, not the PR head
   expect(s.calls).toContainEqual(['gh', 'api', '-H', 'Accept: application/vnd.github.raw', 'repos/acme/app/contents/CLAUDE.md?ref=main'])
   expect(s.calls.some((c) => c.join(' ').includes(`CLAUDE.md?ref=${HEAD}`))).toBe(false)
+  await ui.unmount()
+})
+
+test('the AI review reads the issues and PRs the description links to, in repositories of the same owner, the first 5 from the top', async ($, on) => {
+  const s = stubs(on, {
+    answer: 'Cancel',
+    overview: {
+      body: [
+        'Fixes #3 and follows acme/lib#7 (see https://github.com/acme/lib/pull/7 again), not my-org/lib#1 of another owner.',
+        'This PR is https://github.com/acme/app/pull/11; not a ref: a.b/c#9, page.html#12, #12abc.',
+        '<!-- Fixes #20 --> Not links either: `#21` and',
+        '```',
+        '```js',
+        'see #22',
+        '```',
+        'Related: https://github.com/acme/app/issues/4, acme/app#5, #6, #8',
+      ].join('\n'),
+      // Linked in the sidebar only, after what the description says
+      closingIssuesReferences: [{ number: 2, url: 'https://github.com/acme/app/issues/2' }],
+    },
+  })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  const read = s.calls.filter((c) => c[1] === 'issue' && c[2] === 'view').map((c) => `${c[5]}#${c[3]}`)
+  expect(read).toEqual(['acme/app#3', 'acme/lib#7', 'acme/app#4', 'acme/app#5', 'acme/app#6'])
+  const items = JSON.parse(reviewsOf(s)[0]?.prompt.match(/<pr_content>\n([\s\S]*?)\n<\/pr_content>/)?.[1] ?? '[]') as {
+    source: string
+    trust: string
+    content?: string
+  }[]
+  expect(items.find((x) => x.source.includes('acme/lib#7'))).toMatchObject({
+    source: 'GitHub issue or PR acme/lib#7, mentioned in the description of acme/app#11',
+    trust: expect.stringContaining('untrusted'),
+  })
+  // The reviewers are told what was left out (#8, #2 the PR closes from the sidebar, my-org/lib#1), so they do not judge by it
+  expect(items.find((x) => x.source === 'pr-inbox')?.content).toBe(
+    'The PR links to issues or PRs that were not read (2 more beyond the first 5, 1 in repositories of other owners): do not judge it by them',
+  )
+  await ui.unmount()
+})
+
+test('the AI review also reads the issues a PR closes from the sidebar, when the description leaves room', async ($, on) => {
+  const s = stubs(on, {
+    answer: 'Cancel',
+    overview: { body: 'Fixes #3', closingIssuesReferences: [{ number: 3 }, { number: 2, url: 'https://github.com/acme/lib/issues/2' }] },
+  })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  const read = s.calls.filter((c) => c[1] === 'issue' && c[2] === 'view').map((c) => `${c[5]}#${c[3]}`)
+  expect(read).toEqual(['acme/app#3', 'acme/lib#2'])
+  // What the PR closes is named as such: it states the purpose, the rest is context
+  const prompt = reviewsOf(s)[0]?.prompt ?? ''
+  expect(prompt).toContain('GitHub issue or PR acme/app#3, closed by acme/app#11')
+  expect(prompt).toContain('GitHub issue or PR acme/lib#2, closed by acme/app#11')
+  expect(prompt).not.toContain('"source":"pr-inbox"')
+  await ui.unmount()
+})
+
+test('a PR overview too long to read whole tells the reviewers its links may be missing', async ($, on) => {
+  const s = stubs(on, { answer: 'Cancel', overview: { body: `Fixes #3 ${'x'.repeat(40_000)}` } })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  expect(s.calls.filter((c) => c[1] === 'issue' && c[2] === 'view')).toEqual([])
+  expect(reviewsOf(s)[0]?.prompt).toContain('the PR overview was cut off, so its links may be missing')
   await ui.unmount()
 })
 
