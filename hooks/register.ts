@@ -1402,13 +1402,18 @@ async function runWrite($: EngineInterface, p: WritePanel): Promise<string> {
 // A failed approval says so in its own toast. Each one done leaves the panel as it goes, so if something throws
 // midway, the panel stays open naming only what is left, and y again never approves one twice
 async function approveAll($: EngineInterface, p: WritePanel, how: string): Promise<string> {
+  // Several: one toast for all of them at the end, each named in full
+  const quiet = p.prs.length > 1
+  const done: string[] = []
   for (const pr of [...p.prs]) {
     const run = reviewOfHead(pr)
-    const ok = await postApproval($, pr, how)
+    const ok = await postApproval($, pr, how, quiet)
     p.prs = p.prs.filter((x) => x !== pr)
     Object.assign(p, approveLines(p.prs))
+    if (ok) done.push(`${pr.repository.nameWithOwner}#${pr.number}`)
     if (ok && run?.state === 'passed') run.state = 'approved'
   }
+  if (quiet && done.length > 0) $.ui.toast(`✦ approved ${done.length}: ${done.join(', ')} · moved to approved by you`, { timeoutMs: 8000 })
   return ''
 }
 
@@ -1489,7 +1494,8 @@ const AUTO_HOW = 'automatically (ai_approve auto, the AI review passed)'
 // PRs approved that way in this session, so the pane says who decided
 const autoApproved = new Set<string>()
 
-async function postApproval($: EngineInterface, pr: PR, how: string): Promise<boolean> {
+// quiet: no toast of its own when it is approved (approveAll sums several up in one); failures always say so
+async function postApproval($: EngineInterface, pr: PR, how: string, quiet = false): Promise<boolean> {
   const auto = how === AUTO_HOW
   const sha = pr.headRefOid.slice(0, 7)
   const fail = (why: string) => $.ui.toast(`Approve failed: ${fit(clean(why), 80)}`, { timeoutMs: 8000 })
@@ -1529,12 +1535,13 @@ async function postApproval($: EngineInterface, pr: PR, how: string): Promise<bo
   // GitHub took it: from here on it is approved, whatever the bookkeeping below does, so no caller approves it twice
   try {
     const repoLabel = `${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number}`
-    $.ui.toast(
-      auto
-        ? `✦ the AI review approved ${repoLabel} @${sha} as you (ai_approve auto)`
-        : `✦ approved ${repoLabel} @${sha} · moved to approved by you`,
-      { timeoutMs: 6000 },
-    )
+    if (!quiet)
+      $.ui.toast(
+        auto
+          ? `✦ the AI review approved ${repoLabel} @${sha} as you (ai_approve auto)`
+          : `✦ approved ${repoLabel} @${sha} · moved to approved by you`,
+        { timeoutMs: 6000 },
+      )
     if (auto) autoApproved.add(pr.url)
     // Into the approved section now; the next fetch confirms it from GitHub
     const at = new Date(await $.clock.now()).toISOString()
@@ -5209,7 +5216,7 @@ export function register(on: On, options: PluginOptions) {
       Button({ key: k, label, hotkey, plain: true, dimColor: dim, onPress })
     const leave = () => {
       if (p.sending) {
-        toast(`q: wait, ${p.progress.replace(/^⟳ /, '')}`)
+        toast(`q: wait, ${p.progress.replace(/^⟳ /, '').replace(/…$/, '')} ${p.sends}…`)
         return
       }
       writePanel = undefined

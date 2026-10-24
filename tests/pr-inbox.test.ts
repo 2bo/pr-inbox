@@ -3924,6 +3924,8 @@ test('b reviews the bot PRs without moving the selection, then opens one approve
   expect(s.panels[0]).toContain(`app#12 @${HEAD.slice(0, 7)}`)
   expect(s.panels[0]).toContain(`y approves: acme/app#12 at ${HEAD.slice(0, 7)}, acme/app#14 at ${HEAD.slice(0, 7)}`)
   expect(s.logs).toContain('pr-inbox approved acme/app#12 at aaaaaaa: you pressed y in the approve panel after b')
+  // One toast for both, each named in full
+  expect(s.toasts.filter((t) => t.startsWith('✦ approved'))).toEqual(['✦ approved 2: acme/app#12, acme/app#14 · moved to approved by you'])
   expect(approvedAt(s).map((c) => c[4])).toEqual(['repos/acme/app/pulls/12/reviews', 'repos/acme/app/pulls/14/reviews'])
   expect(before.includes('"▸')).toBe(true)
   await ui.unmount()
