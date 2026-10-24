@@ -2305,9 +2305,9 @@ function enabledPerspectives(pr: PR): { p: Perspective; text: string }[] {
 // report why not
 async function aiReview($: EngineInterface, pr: PR, auto = false): Promise<void> {
   const current = reviews.get(pr.url)
-  // v again while it runs cancels it
+  // v again while it runs cancels it; auto_review leaves a running review alone (v or b started it meanwhile)
   if (current?.state === 'running') {
-    current.stop.abort()
+    if (!auto) current.stop.abort()
     return
   }
   const run = newRun(pr)
@@ -4132,6 +4132,11 @@ async function scheduleAutoReviews($: EngineInterface): Promise<void> {
         break
       }
       if (!(await claimAutoReview($, pr, now))) continue
+      // v or b may have started it while the store was read: theirs, and not one of this hour's
+      if (reviews.get(url)?.state === 'running') {
+        await $.store.delete(`auto-review:${url}`)
+        continue
+      }
       await $.store.set('auto-review-starts', [...starts, now])
       $.ui.log(`pr-inbox AI review of ${pr.repository.nameWithOwner}#${pr.number} started on its own (auto_review)`)
       await aiReview($, pr, true)

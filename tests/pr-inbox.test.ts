@@ -2128,6 +2128,31 @@ test('cancelling a review auto_review started pauses auto_review for an hour', A
   await ui.unmount()
 })
 
+test('auto_review leaves alone a review you started with v', AUTO, async ($, on) => {
+  // CI still running: auto_review waits, and you press v yourself
+  const opts: StubOptions = {
+    graphql: only(member({ commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING' } } }] } })),
+    slow: true,
+  }
+  const s = stubs(on, opts)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'act-ai-review' })
+  await settleReview(s)
+  expect((await ui.find({ key: 'act-ai-review' }))?.props.label).toBe('cancel AI review')
+  // CI passes and the list is fetched again while your review runs
+  opts.graphql = only(member())
+  await s.clock.advance(5 * 60_000)
+  for (let i = 0; i < 4; i++) {
+    await s.clock.advance(60_000)
+    await settleReview(s)
+  }
+  expect(s.toasts.some((t) => t.includes('cancelled') || t.includes('paused'))).toBe(false)
+  expect(s.logs.some((l) => l.includes('started on its own'))).toBe(false)
+  expect(s.toasts.some((t) => t.includes('AI review passed app#11'))).toBe(true)
+  await ui.unmount()
+})
+
 test('auto_review tries a review that failed again later, and gives up after a few tries', AUTO, async ($, on) => {
   const s = stubs(on, { graphql: only(member()), review: () => 'no JSON here' })
   await start($, s.clock)
