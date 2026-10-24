@@ -236,13 +236,13 @@ const QUERY = `query($review: String!, $mine: String!, $approved: String!, $assi
   review: search(query: $review, type: ISSUE, first: 50) { nodes { ...pr ...checks ...requested } }
   mine: search(query: $mine, type: ISSUE, first: 50) { nodes { ...pr ...checks ...reviewed ...asked } }
   approved: search(query: $approved, type: ISSUE, first: 50) { nodes { ...pr ...checks ...reviewed } }
-  assigned: search(query: $assigned, type: ISSUE, first: 50) { nodes { ...issue } }
+  assigned: search(query: $assigned, type: ISSUE, first: 50) { issueCount nodes { ...issue } }
 }
 fragment issue on Issue {
   number title url createdAt updatedAt
   repository { nameWithOwner }
   author { login }
-  labels(first: 5) { nodes { name } }
+  labels(first: 20) { nodes { name } }
   comments { totalCount }
 }
 ${REVIEWED_FRAGMENT}
@@ -407,6 +407,8 @@ let approved: PR[] = []
 let mine: PR[] = []
 // Open issues assigned to you, most recently updated first
 let assigned: Issue[] = []
+// How many the search found: more than it returns when over its 50
+let assignedTotal = 0
 let fetchedAt = 0
 let loading = false
 let error = ''
@@ -891,7 +893,7 @@ function summary(g: Record<Group, PR[]>): string {
     ...part(g.ready.length, `✓${g.ready.length} ready`),
     ...part(g.waiting.length, `…${g.waiting.length} in review`),
   ]
-  return `${left.join(' · ')} │ my PRs ${right.length ? right.join(' · ') : mine.length}${assigned.length ? ` │ issues ${assigned.length}` : ''}`
+  return `${left.join(' · ')} │ my PRs ${right.length ? right.join(' · ') : mine.length}${assigned.length ? ` │ issues ${issuesCount()}` : ''}`
 }
 
 // Time since the request
@@ -995,6 +997,11 @@ function visibleRows(g: Record<Group, PR[]>): PR[] {
   return groupStacks(rows.filter(matchesFilter))
 }
 
+// "50+" when the search found more issues than it returned
+function issuesCount(): string {
+  return `${assigned.length}${assignedTotal > assigned.length ? '+' : ''}`
+}
+
 // Every word of the filter must appear in the PR's (or issue's) repository, number, title or author, or an issue's labels
 function matchesFilter(item: PR | Issue): boolean {
   const words = filterText.toLowerCase().split(/\s+/).filter(Boolean)
@@ -1067,7 +1074,7 @@ async function fetchAll($: EngineInterface): Promise<void> {
       review: { nodes: (PR | null)[] }
       mine: { nodes: (PR | null)[] }
       approved?: { nodes: (PR | null)[] }
-      assigned?: { nodes: (Issue | null)[] }
+      assigned?: { issueCount?: number; nodes: (Issue | null)[] }
     }
     viewer = data.viewer?.login ?? ''
     // Search results can contain nulls for PRs we have no access to
@@ -1078,6 +1085,7 @@ async function fetchAll($: EngineInterface): Promise<void> {
       .filter((n): n is PR => Boolean(n?.url))
       .map(cleanPr)
       .filter((p) => myApproval(p) !== undefined && !review.some((r) => r.url === p.url))
+    assignedTotal = Number(data.assigned?.issueCount) || 0
     assigned = (data.assigned?.nodes ?? [])
       .filter((n): n is Issue => Boolean(n?.url))
       .map(cleanIssue)
@@ -6572,7 +6580,7 @@ export function register(on: On, options: PluginOptions) {
     const helpLabel = showHelp ? 'close help' : '?'
     const reviewTabLabel = `${tab === 'review' ? '◉ ' : ''}to review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`
     const mineTabLabel = `${tab === 'mine' ? '◉ ' : ''}my PRs ${mine.length}`
-    const issuesTabLabel = `${tab === 'issues' ? '◉ ' : ''}issues ${assigned.length}`
+    const issuesTabLabel = `${tab === 'issues' ? '◉ ' : ''}issues ${issuesCount()}`
     const tabButton = (name: typeof tab, label: string, hotkey: string) =>
       Button({
         key: `tab-${name}`,
@@ -6798,7 +6806,17 @@ export function register(on: On, options: PluginOptions) {
     const whyNot = (k: string): string => {
       // On the issues tab only o (and j / k) act on the selected issue; the PR keys say where they work
       if (tab === 'issues') {
-        if (k === 'o') return filterText ? 'o: no issue matches the filter · f: change it' : 'o: no issue is selected'
+        const none = !fetchedAt
+          ? 'still fetching your issues'
+          : filterText
+            ? 'no issue matches the filter · f: change it'
+            : 'no issues assigned to you'
+        if (k === 'o')
+          return selected && assigned.some((i) => i.url === selected)
+            ? "o: this issue's link is not a plain https:// GitHub link, so it does not open"
+            : `o: ${none}`
+        if (k === 'j' || k === 'k') return `${k}: ${none}`
+        if (k === 'n') return "n pages a PR's details (1, 2) · issues have none here: o opens one on GitHub"
         if ('abcdeimpsvwxyz'.includes(k)) return `${k} acts on PRs (1: To review, 2: My PRs) · on issues, o opens one on GitHub`
       }
       const n = pr ? askLabel(pr) : 'this PR'
@@ -7432,7 +7450,7 @@ export function register(on: On, options: PluginOptions) {
         [
           'the list',
           [
-            ['j / k', 'next / previous PR'],
+            ['j / k', 'next / previous row'],
             ['1 / 2 / 3', 'To review / My PRs / issues assigned to you · h / l: the tab to the left / right'],
             ['b', 'AI review every bot PR not reviewed yet, then approve those that passed in one panel (y) · b again stops'],
             ['z', 'show or hide snoozed PRs'],
@@ -7441,7 +7459,13 @@ export function register(on: On, options: PluginOptions) {
             ['r', 'refresh: fetch again'],
           ],
         ],
-        ['the selected issue (3)', [['o', 'open on GitHub · issues are only listed: nothing reads or changes them']]],
+        [
+          'the selected issue (3)',
+          [
+            ['o', 'open on GitHub · issues are only listed: no model sees them, and the pane writes nothing to them'],
+            ['TALK / UPD', 'comments · time since the last update'],
+          ],
+        ],
         [
           'the reader (d)',
           [
@@ -7616,19 +7640,34 @@ export function register(on: On, options: PluginOptions) {
         const parts = [lo > 0 ? `↑ ${lo} more` : '', below > 0 ? `↓ ${below} more` : ''].filter(Boolean)
         issueMore.push(Text({ dimColor: true, children: [`  ${parts.join('  ')} · j/k: move`] }))
       }
+      const org = cfg.org_filter.trim()
       const empty = !fetchedAt
         ? loading
           ? `  ${SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]} fetching your issues…`
-          : '  not fetched yet · r: refresh'
+          : error
+            ? '  Nothing to show until GitHub answers · r: retry'
+            : '  not fetched yet · r: refresh'
         : filterText
           ? `  No issues match "${filterText}" · f: change or clear the filter`
           : error
             ? '  Nothing to show until GitHub answers · r: retry'
-            : '  No open issues are assigned to you'
+            : org
+              ? `  No open issues assigned to you in ${org} · org_filter in /config`
+              : '  No open issues are assigned to you'
       const issueList = issues.length > 0 ? shownIssues.map(issueRow) : [Text({ dimColor: true, children: [empty] })]
+      // Over the search's 50: say how many are left out, and where to see them
+      if (assignedTotal > assigned.length)
+        issueMore.push(
+          Text({
+            dimColor: true,
+            children: [
+              `  ${assigned.length} of ${assignedTotal} shown, most recently updated first · org_filter or github.com for the rest`,
+            ],
+          }),
+        )
       const issueHead = Text({
         color: NEON.muted,
-        children: [`   ${'ISSUE'.padEnd(issueWidth)} TITLE`.padEnd(Math.max(0, columns - 10)) + ' CMT  UPD'],
+        children: [`   ${'ISSUE'.padEnd(issueWidth)} TITLE`.padEnd(Math.max(0, columns - 10)) + 'TALK  UPD'],
       })
       const issueTree = [...top, focusRule(), ...(issues.length > 0 ? [issueHead] : []), ...issueList, ...issueMore, rule(), ...issueFooter]
       lastHeight = topLines + 2 + (issues.length > 0 ? 1 : 0) + issueList.length + issueMore.length + issueFooter.length

@@ -3028,6 +3028,9 @@ test('issues are drawn cleaned, never reach a model, and a link that is not http
   expect(line).not.toContain('pwned')
   expect(linksIn(line)).toEqual([])
   expect(await ui.find({ key: 'issue-open' })).toBeUndefined()
+  await ui.press({ key: 'unbound-o' })
+  expect(s.toasts.at(-1)).toBe("o: this issue's link is not a plain https:// GitHub link, so it does not open")
+  expect(s.calls.some((c) => c[1] === 'issue')).toBe(false)
   await ui.unmount()
 })
 
@@ -3049,6 +3052,18 @@ test('on the issues tab the PR keys say where they work, and the filter matches 
   await ui.input({ key: 'filter-input', text: 'docs', kind: 'change' })
   expect(await ui.find({ key: 'line-https://github.com/acme/app/issues/9' })).toBeDefined()
   expect(await ui.find({ key: 'line-https://github.com/acme/app/issues/7' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('more assigned issues than the search returns are counted as 50+ and the list says how many are left out', async ($, on) => {
+  const many = Array.from({ length: 50 }, (_, i) => issue({ number: 100 + i, url: `https://github.com/acme/app/issues/${100 + i}` }))
+  const s = stubs(on, { graphql: JSON.stringify({ data: { ...JSON.parse(GRAPHQL).data, assigned: { issueCount: 73, nodes: many } } }) })
+  await start($, s.clock)
+  expect(s.statuses.at(-1)).toMatch(/│ issues 50\+$/)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  expect((await ui.find({ key: 'tab-issues' }))?.props.label).toBe('◉ issues 50+')
+  expect(await ui.find({ type: 'Text', text: /50 of 73 shown/ })).toBeDefined()
   await ui.unmount()
 })
 
