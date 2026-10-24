@@ -44,6 +44,9 @@ command -v jq >/dev/null 2>&1 || exit 0
 
 input=$(cat)
 cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
+# What may stand between gh, pr and create: options only (-R / --repo with its value, or any -flag), so gh pr list
+# --search create is not taken for gh pr create
+OPTS='([[:space:]]+(-R|--repo)[[:space:]]+[^-[:space:]][^[:space:]]*|[[:space:]]+-[^[:space:]]*)*'
 # Only a real call: a command (after ; && || | or a newline, env assignments allowed) that is gh … pr … create, so
 # gh -R owner/repo pr create counts and echo 'gh pr create' does not. Quoted text is blanked first (to Q), so a
 # separator or a gh inside quotes is never taken for a command
@@ -60,7 +63,7 @@ printf '%s\n' "$cmd" |
     }
     print out
   }' |
-  grep -Eq '^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*gh([[:space:]]+[^[:space:]]+)*[[:space:]]+pr([[:space:]]+[^[:space:]]+)*[[:space:]]+create([[:space:]]|$)' ||
+  grep -Eq "^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*gh${OPTS}[[:space:]]+pr${OPTS}[[:space:]]+create([[:space:]]|\$)" ||
   exit 0
 
 cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
