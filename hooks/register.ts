@@ -2322,24 +2322,24 @@ async function aiReview($: EngineInterface, pr: PR, auto = false): Promise<void>
     $.ui.invalidate('ui.render')
   }
   const cancelled = () => run.stop.signal.aborted
+  const endCancelled = async () => {
+    run.state = 'cancelled'
+    // auto_review says it itself, with what happens next
+    if (!auto) $.ui.toast(`AI review of ${askLabel(pr)} cancelled`)
+    // Kept for the commit, so a restart does not review it again on its own
+    await $.store.set(`review:${pr.url}`, {
+      head: pr.headRefOid,
+      state: run.state,
+      problems: [],
+      findings: [],
+      verdicts: [],
+      warnings: [],
+      ...(auto ? { auto } : {}),
+    })
+    redraw()
+  }
   const finish = async () => {
-    if (cancelled()) {
-      run.state = 'cancelled'
-      // auto_review says it itself, with what happens next
-      if (!auto) $.ui.toast(`AI review of ${askLabel(pr)} cancelled`)
-      // Kept for the commit, so a restart does not review it again on its own
-      await $.store.set(`review:${pr.url}`, {
-        head: pr.headRefOid,
-        state: run.state,
-        problems: [],
-        findings: [],
-        verdicts: [],
-        warnings: [],
-        ...(auto ? { auto } : {}),
-      })
-      redraw()
-      return
-    }
+    if (cancelled()) return endCancelled()
     // One problem per location, naming every perspective that found it
     const confirmed = run.findings.filter((f) => isCandidate(f) && f.confirmed !== false)
     const byPlace = new Map<string, Finding[]>()
@@ -2354,6 +2354,8 @@ async function aiReview($: EngineInterface, pr: PR, auto = false): Promise<void>
       run.step = 'summing up…'
       redraw()
       run.summary = await summarizeReview($, run)
+      // v while it summed up: nothing is approved or kept as passed
+      if (cancelled()) return endCancelled()
       if (run.summary) $.ui.log(`pr-inbox AI review of ${pr.repository.nameWithOwner}#${pr.number}, in short: ${run.summary}`)
     }
     if (run.problems.length > 0) {
@@ -4051,6 +4053,10 @@ function spin($: EngineInterface): void {
 const MAX_AUTO_REVIEWS_PER_HOUR = 6
 // How long a session holds a PR it reviews on its own, so other sessions leave it alone
 const AUTO_LEASE = 15 * MINUTE
+// The store has no conditional write, so two sessions can both take a PR: each writes its own id, waits this long and
+// reads it back, and the one whose id is gone leaves the PR. This narrows the race; it cannot close it
+const AUTO_SETTLE = 2000
+const SESSION_ID = crypto.randomUUID()
 let autoReviewing = false
 // For the rows: until when auto_review is paused, when the hourly limit lets the next review start, and when a failed
 // review is tried again (0 or missing: not waiting on it). Learned from the store on each round
@@ -4062,13 +4068,20 @@ let interactive = false
 
 // What the store keeps per PR, shared by the sessions: who reviews it until when, and the retries of a review that
 // failed (no answer, a timeout) rather than found something
-type AutoRecord = { head: string; until: number; attempts: number; retryAt: number }
+type AutoRecord = { head: string; until: number; attempts: number; retryAt: number; owner?: string }
 
 function asAutoRecord(x: unknown): AutoRecord | undefined {
   if (!x || typeof x !== 'object') return undefined
   const v = x as Record<string, unknown>
   const n = (k: string) => (typeof v[k] === 'number' && Number.isFinite(v[k]) ? (v[k] as number) : 0)
-  return typeof v.head === 'string' ? { head: v.head, until: n('until'), attempts: n('attempts'), retryAt: n('retryAt') } : undefined
+  if (typeof v.head !== 'string') return undefined
+  return {
+    head: v.head,
+    until: n('until'),
+    attempts: n('attempts'),
+    retryAt: n('retryAt'),
+    ...(typeof v.owner === 'string' ? { owner: v.owner } : {}),
+  }
 }
 
 // Blocked only because reviewers gave no answer: worth another try, unlike a review that found something
@@ -4097,8 +4110,11 @@ async function claimAutoReview($: EngineInterface, pr: PR, now: number): Promise
   const same = rec?.head === pr.headRefOid ? rec : undefined
   if (same && same.attempts > 0) autoRetryAt.set(pr.url, same.attempts >= MAX_ATTEMPTS ? Number.POSITIVE_INFINITY : same.retryAt)
   if (same && (now < same.until || same.attempts >= MAX_ATTEMPTS || now < same.retryAt)) return false
-  await $.store.set(`auto-review:${pr.url}`, { head: pr.headRefOid, until: now + AUTO_LEASE, attempts: same?.attempts ?? 0, retryAt: 0 })
-  return true
+  const key = `auto-review:${pr.url}`
+  await $.store.set(key, { head: pr.headRefOid, until: now + AUTO_LEASE, attempts: same?.attempts ?? 0, retryAt: 0, owner: SESSION_ID })
+  // Another session that took it meanwhile wrote over this one: it is theirs
+  await $.clock.sleep(AUTO_SETTLE)
+  return asAutoRecord(await $.store.get(key))?.owner === SESSION_ID
 }
 
 // Reviews the review requests auto_review takes up, one at a time, after each fetch. The outcome is the same as v:
@@ -4137,7 +4153,15 @@ async function scheduleAutoReviews($: EngineInterface): Promise<void> {
         await $.store.delete(`auto-review:${url}`)
         continue
       }
-      await $.store.set('auto-review-starts', [...starts, now])
+      // Other sessions may have started reviews while this one waited: count them again right before adding this one
+      const again = await $.store.get('auto-review-starts')
+      const fresh = (Array.isArray(again) ? again : []).filter((t): t is number => typeof t === 'number' && now - t < HOUR)
+      if (fresh.length >= MAX_AUTO_REVIEWS_PER_HOUR) {
+        await $.store.delete(`auto-review:${url}`)
+        autoNextAt = Math.min(...fresh) + HOUR
+        break
+      }
+      await $.store.set('auto-review-starts', [...fresh, now])
       $.ui.log(`pr-inbox AI review of ${pr.repository.nameWithOwner}#${pr.number} started on its own (auto_review)`)
       await aiReview($, pr, true)
       done.push(pr)
