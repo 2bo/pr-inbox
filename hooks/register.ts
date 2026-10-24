@@ -1437,6 +1437,11 @@ function offered(p: WritePanel): PanelChoice[] {
   return p.choices.filter((c) => !c.refused)
 }
 
+// What y sends, with the choice picked in it: the panel's line above the keys, and the toast of q while sending
+function sendsText(p: WritePanel): string {
+  return p.sends.replace('{choice}', chosenWord(p))
+}
+
 // The word of the choice picked ('' before one is)
 function chosenWord(p: WritePanel): string {
   return p.choices.find((c) => c.key === p.chosen)?.word ?? ''
@@ -5298,7 +5303,7 @@ export function register(on: On, options: PluginOptions) {
       Button({ key: k, label, hotkey, plain: true, dimColor: dim, onPress })
     const leave = () => {
       if (p.sending) {
-        toast(`q: wait, ${p.progress.replace(/^⟳ /, '').replace(/…$/, '')} ${p.sends}…`)
+        toast(`q: wait, ${p.progress.replace(/^⟳ /, '').replace(/…$/, '')} ${sendsText(p)}…`)
         return
       }
       writePanel = undefined
@@ -5347,7 +5352,7 @@ export function register(on: On, options: PluginOptions) {
           flexDirection: 'row',
           children: [
             Text({ color: NEON.muted, children: [p.sendsLead] }),
-            Text({ color: NEON.cyan, bold: true, wrap: 'wrap', children: [p.sends.replace('{choice}', chosenWord(p))] }),
+            Text({ color: NEON.cyan, bold: true, wrap: 'wrap', children: [sendsText(p)] }),
           ],
         })
     // The choices, each on its number key: the one picked marked, one not offered here dim (its key says why)
