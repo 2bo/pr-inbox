@@ -1374,8 +1374,9 @@ type PanelWrite =
 // A row to check or uncheck (x, or its number key), such as an AI review finding; note is said after it, dim
 type PanelItem = { text: string; note: string; checked: boolean }
 // A choice y needs first (the merge method), picked with its number key; refused says why a key is not offered here
-// sends: what y does with this choice, when it differs by choice
-type PanelChoice = { key: string; word: string; refused: string; sends?: string }
+// sends: what y does with this choice, when it differs by choice; yes: y's label with it; refusedTag: what the dim
+// choice says when refused ('not allowed' unless set)
+type PanelChoice = { key: string; word: string; refused: string; sends?: string; yes?: string; refusedTag?: string }
 type WritePanel = {
   // What y does, in a word: the header's first word and y's label
   verb: string
@@ -1403,20 +1404,37 @@ type WritePanel = {
   progress: string
   // The write y does (see runWrite)
   write: PanelWrite
+  // How a write that did not happen starts ('Not sent' unless set)
+  failLead?: string
+  // A panel opened by another panel's y ignores y until then, so a double tap cannot confirm it unread
+  guardUntil: number
   sending: boolean
   error: string
 }
 let writePanel: WritePanel | undefined
+// While a panel's write runs: when it started, so a panel it opens is guarded (see guardUntil)
+let chainedAt: number | undefined
+const PANEL_GUARD = 1000
 
 function openPanel(
   $: EngineInterface,
-  p: Omit<WritePanel, 'sending' | 'error' | 'choices' | 'choiceWhat' | 'chosen' | 'items' | 'cursor'> & {
+  p: Omit<WritePanel, 'sending' | 'error' | 'choices' | 'choiceWhat' | 'chosen' | 'items' | 'cursor' | 'guardUntil'> & {
     choices?: PanelChoice[]
     choiceWhat?: string
     items?: PanelItem[]
   },
 ): void {
-  writePanel = { choices: [], choiceWhat: 'a method', items: [], ...p, chosen: '', cursor: 0, sending: false, error: '' }
+  writePanel = {
+    choices: [],
+    choiceWhat: 'a method',
+    items: [],
+    ...p,
+    chosen: '',
+    cursor: 0,
+    guardUntil: chainedAt === undefined ? 0 : chainedAt + PANEL_GUARD,
+    sending: false,
+    error: '',
+  }
   $.ui.invalidate('ui.render')
 }
 
@@ -1428,6 +1446,12 @@ async function sendPanel($: EngineInterface, p: WritePanel): Promise<void> {
     $.ui.toast(`y: ${need} first`, { timeoutMs: 4000 })
     return
   }
+  const now = await $.clock.now()
+  if (now < p.guardUntil) {
+    $.ui.toast('y: read it first, then y', { timeoutMs: 4000 })
+    return
+  }
+  chainedAt = now
   p.sending = true
   p.error = ''
   $.ui.invalidate('ui.render')
@@ -1437,6 +1461,7 @@ async function sendPanel($: EngineInterface, p: WritePanel): Promise<void> {
   } catch (err) {
     error = friendlyError(messageOf(err))
   } finally {
+    chainedAt = undefined
     // Never left stuck on sending, even when the write throws
     p.sending = false
     if (writePanel === p) {
@@ -1503,7 +1528,10 @@ async function runWrite($: EngineInterface, p: WritePanel): Promise<string> {
   if (p.write.kind === 'ci') return p.chosen === '1' ? fixCi($, pr) : rerunFailed($, pr)
   if (p.write.kind === 'fixing') return p.chosen === '1' ? afterFix($, p.write.job, 'early') : stopWatching($, p.write.job)
   if (p.write.kind === 'clone') return cloneAndFix($, pr)
-  if (p.write.kind === 'worktree') return fixCi($, pr, p.chosen === '1' ? 'go on' : 'start again')
+  if (p.write.kind === 'worktree') {
+    if (p.chosen === '3') return pushLeft($, pr)
+    return fixCi($, pr, p.chosen === '1' ? 'go on' : 'start again')
+  }
   if (p.write.kind === 'push') return sendPush($, p.write.job, p.write.head)
   if (!method) return ''
   if (p.write.kind === 'merge') return mergeNow($, pr, method)
@@ -4950,6 +4978,7 @@ async function findClone($: EngineInterface, pr: PR): Promise<string | undefined
     yes: 'clone',
     movedNote: 'the fix starts from its new head',
     progress: `⟳ cloning ${repo} with ghq… (up to 10 min)`,
+    failLead: 'Not started',
     write: { kind: 'clone' },
   })
   return undefined
@@ -5003,17 +5032,21 @@ async function fixCi($: EngineInterface, pr: PR, left?: 'go on' | 'start again')
         sends: '',
         choiceWhat: 'how to go on',
         choices: [
-          { key: '1', word: 'go on from them', refused: '', sends: `Claude goes on in ${dir} from those ${n}` },
+          { key: '1', word: 'go on from them', refused: '', yes: 'go on', sends: `Claude goes on in ${dir} from those ${n}` },
           {
             key: '2',
             word: 'start again from the PR head',
             refused: '',
+            yes: 'start again',
             sends: `the ${n} leave the worktree, and Claude starts from ${branch} as fetched`,
           },
+          // The way back to a fix you forgot (x in the push panel): push them without another turn
+          { key: '3', word: 'push them as they are', refused: '', yes: 'push panel', sends: `opens the push panel with those ${n}` },
         ],
         yes: 'go on',
         movedNote: 'the fix starts from its new head',
         progress: '⟳ starting the fix…',
+        failLead: 'Not started',
         write: { kind: 'worktree' },
       })
       return ''
@@ -5091,7 +5124,9 @@ async function afterFix($: EngineInterface, job: FixJob, end: FixEnd = 'done'): 
   const full = `${job.pr.repository.nameWithOwner}#${job.pr.number}`
   const how = end === 'interrupted' ? 'the fix turn stopped before it finished; ' : ''
   $.ui.toast(
-    `⇡ fix ready for ${full}: ${how}${plural(commits.length, 'commit')} not pushed · ${paneOpen ? 'c' : '/pr-inbox, then c'}: push panel`,
+    glyph(
+      `⇡ fix ready for ${full}: ${how}${plural(commits.length, 'commit')} not pushed · ${paneOpen ? 'c' : '/pr-inbox, then c'}: push panel`,
+    ),
     { timeoutMs: 15000 },
   )
   return ''
@@ -5107,9 +5142,13 @@ async function openPush($: EngineInterface, job: FixJob, end: FixEnd = 'done'): 
     $.ui.invalidate('ui.render')
     return `no commit to push in ${job.dir}`
   }
-  const ready: FixJob = { ...job, commits }
+  // The PR as it is now (an early push moved its head), and whether GitHub's branch is still where the fix builds on
+  const pr = findPr(job.pr.url) ?? job.pr
+  const ready: FixJob = { ...job, pr, commits }
   if (end !== 'early') fixReady.set(job.pr.url, ready)
   const dirty = (await $.process.run(['git', '-C', job.dir, 'status', '--porcelain'])).stdout.trim()
+  const base = (await $.process.run(['git', '-C', job.dir, 'rev-parse', `origin/${job.branch}`])).stdout.trim()
+  const branchMoved = /^[0-9a-f]{40}$/.test(base) && /^[0-9a-f]{40}$/.test(pr.headRefOid) && base !== pr.headRefOid
   const how =
     end === 'early'
       ? 'Claude is still working: these are the commits so far; later ones come with c once it ends'
@@ -5118,18 +5157,26 @@ async function openPush($: EngineInterface, job: FixJob, end: FixEnd = 'done'): 
         : ''
   openPanel($, {
     verb: 'push',
-    prs: [job.pr],
+    prs: [pr],
     title: '',
     notes: [
       ...(how ? [{ text: how, color: 'yellow' as const }] : []),
+      ...(branchMoved
+        ? [
+            {
+              text: `✗ The branch on GitHub moved since the fix started from it (from ${base.slice(0, 7)} to ${pr.headRefOid.slice(0, 7)}): the push will be refused · q, then c`,
+              color: 'red' as const,
+            },
+          ]
+        : []),
       { text: `${plural(commits.length, 'commit')} from ${job.dir}:` },
       ...commits.map((c) => ({ text: `  ${c}` })),
       { text: `To ${job.branch} of ${job.repo}, never forced${dirty ? ' · uncommitted changes stay in the worktree' : ''}` },
     ],
     sendsLead: 'y pushes: ',
-    sends: `${plural(commits.length, 'commit')} to ${job.branch} of ${job.repo} (#${job.pr.number}), up to ${head.slice(0, 7)}`,
+    sends: `${plural(commits.length, 'commit')} to ${job.branch} of ${job.repo} (#${job.pr.number}), ${/^[0-9a-f]{40}$/.test(base) ? `from ${base.slice(0, 7)} ` : ''}up to ${head.slice(0, 7)}`,
     yes: 'push',
-    movedNote: 'GitHub will refuse the push (the branch moved)',
+    movedNote: 'GitHub will refuse the push (the branch moved) · q, then c',
     progress: `⟳ pushing to ${job.branch}…`,
     write: { kind: 'push', job: ready, head },
   })
@@ -5159,11 +5206,19 @@ async function sendPush($: EngineInterface, job: FixJob, head: string): Promise<
   return ''
 }
 
+// 3 in the worktree panel: the commits left there go to the push panel, as a fix ready, with no new turn
+async function pushLeft($: EngineInterface, pr: PR): Promise<string> {
+  const home = (await $.env.get('HOME')) || ''
+  const branch = pr.headRefName ?? ''
+  const dir = `${home}/.cache/pr-inbox/worktrees/${pr.repository.nameWithOwner}/pr-${pr.number}`
+  return openPush($, { pr, repo: pr.repository.nameWithOwner, branch, dir, base: `origin/${branch}`, startedAt: await $.clock.now() })
+}
+
 // x in the push panel: the fix is set aside; its commits stay in the worktree
 function forgetFix($: EngineInterface, job: FixJob): void {
   fixReady.delete(job.pr.url)
   if (writePanel?.write.kind === 'push') writePanel = undefined
-  $.ui.toast(`Forgot the fix of ${askLabel(job.pr)}; its commits stay in ${job.dir}`, { timeoutMs: 8000 })
+  $.ui.toast(`Forgot the fix of ${askLabel(job.pr)}; its commits stay in ${job.dir} · c, 1: push them later`, { timeoutMs: 8000 })
   $.ui.invalidate('ui.render')
 }
 
@@ -5213,12 +5268,14 @@ async function ciMenu($: EngineInterface, pr: PR): Promise<void> {
           key: '1',
           word: 'push what it has now',
           refused: '',
+          yes: 'push panel',
           sends: 'opens the push panel with the commits so far (Claude keeps working)',
         },
         {
           key: '2',
           word: 'stop watching',
           refused: '',
+          yes: 'stop watching',
           sends: `stops following the fix (Claude keeps working; Esc in the prompt stops it)`,
         },
       ],
@@ -5237,7 +5294,12 @@ async function ciMenu($: EngineInterface, pr: PR): Promise<void> {
   }
   const runs = failedRuns(pr)
   const failed = failedChecks(pr).map((c) => c.name)
+  // A re-run reaches only GitHub Actions: the checks it re-runs, by name
+  const actions = failedChecks(pr)
+    .filter((c) => runs.some((id) => c.url?.includes(`/actions/runs/${id}`)))
+    .map((c) => c.name)
   const dir = `~/.cache/pr-inbox/worktrees/${pr.repository.nameWithOwner}/pr-${pr.number}`
+  const other = fixJob && fixJob.pr.url !== pr.url ? fixJob.pr : undefined
   openPanel($, {
     verb: 'fix CI',
     prs: [pr],
@@ -5252,17 +5314,27 @@ async function ciMenu($: EngineInterface, pr: PR): Promise<void> {
     sends: '',
     choiceWhat: 'what to do',
     choices: [
-      { key: '1', word: 'fix with Claude', refused: '', sends: `Claude fixes ${full} in ${dir}, then you push it from c` },
+      {
+        key: '1',
+        word: 'fix with Claude',
+        refused: other ? `Claude is fixing ${askLabel(other)}; one fix at a time · c on it to follow` : '',
+        refusedTag: 'one at a time',
+        yes: 'fix with Claude',
+        sends: `Claude fixes ${full} in ${dir}, then you push it from c`,
+      },
       {
         key: '2',
         word: 're-run the failed jobs',
         refused: runs.length ? '' : 'no failed GitHub Actions run here; open the check for other CI',
-        sends: `re-runs the failed jobs of ${plural(runs.length, 'run')} on ${full}: ${failed.join(', ')}`,
+        refusedTag: 'no Actions run',
+        yes: 're-run',
+        sends: `re-runs the failed jobs of ${plural(runs.length, 'run')} on ${full}: ${actions.join(', ')} (GitHub Actions only)`,
       },
     ],
     yes: 'go',
     movedNote: 'the fix starts from its new head',
     progress: '⟳ starting…',
+    failLead: 'Not started',
     write: { kind: 'ci' },
   })
 }
@@ -5418,7 +5490,9 @@ export function register(on: On, options: PluginOptions) {
     // A fix waiting for your push stays in sight until it is pushed or forgotten
     const first = [...fixReady.values()][0]
     const ready = first
-      ? ` · ⇡ fix ready: ${first.pr.repository.nameWithOwner}#${first.pr.number}${fixReady.size > 1 ? ` (+${fixReady.size - 1})` : ''} · c in pr-inbox`
+      ? glyph(
+          ` · ⇡ fix ready: ${first.pr.repository.nameWithOwner}#${first.pr.number}${fixReady.size > 1 ? ` (+${fixReady.size - 1})` : ''} · c in pr-inbox`,
+        )
       : ''
     const about = `${asked}${ready}`
     if (!paneOpen) return about ? next({ ...e, props: { ...e.props, tail: about } }) : next(e)
@@ -5445,7 +5519,8 @@ export function register(on: On, options: PluginOptions) {
       Button({ key: k, label, hotkey, plain: true, dimColor: dim, onPress })
     const leave = () => {
       if (p.sending) {
-        toast(`q: wait, ${p.progress.replace(/^⟳ /, '').replace(/…$/, '')} ${sendsText(p)}…`)
+        const named = ['approve', 'merge', 'auto-merge on', 'auto-merge off', 'merge stack', 'findings'].includes(p.write.kind)
+        toast(`q: wait, ${p.progress.replace(/^⟳ /, '').replace(/…$/, '')}${named ? ` ${sendsText(p)}` : ''}…`)
         return
       }
       writePanel = undefined
@@ -5488,6 +5563,7 @@ export function register(on: On, options: PluginOptions) {
       )
     // Until a choice is picked, the line says to pick one; then exactly what y sends, with the choice in it
     const need = panelNeed(p)
+    const yesLabel = p.choices.find((c) => c.key === p.chosen)?.yes ?? p.yes
     const sends = need
       ? Text({ color: NEON.yellow, wrap: 'wrap', children: [`${need} · then y`] })
       : Box({
@@ -5508,7 +5584,7 @@ export function register(on: On, options: PluginOptions) {
             children: p.choices.map((c) =>
               Button({
                 key: `panel-choice-${c.key}`,
-                label: `${c.key === p.chosen ? '◉' : '○'} ${c.word}${c.refused ? ' (not allowed)' : ''}`,
+                label: `${c.key === p.chosen ? '◉' : '○'} ${c.word}${c.refused ? ` (${c.refusedTag ?? 'not allowed'})` : ''}`,
                 hotkey: c.key,
                 plain: true,
                 dimColor: c.refused !== '',
@@ -5528,7 +5604,14 @@ export function register(on: On, options: PluginOptions) {
     const status = p.sending
       ? [Text({ color: NEON.cyan, children: [p.progress] })]
       : p.error
-        ? [Text({ color: NEON.red, wrap: 'wrap', children: [`✗ Not sent: ${clean(p.error)} · y: try again · q: cancel`] }), sends]
+        ? [
+            Text({
+              color: NEON.red,
+              wrap: 'wrap',
+              children: [`✗ ${p.failLead ?? 'Not sent'}: ${clean(p.error)} · y: try again · q: cancel`],
+            }),
+            sends,
+          ]
         : [sends]
     const keys = Box({
       key: 'panel-keys',
@@ -5540,7 +5623,7 @@ export function register(on: On, options: PluginOptions) {
         key('panel-cancel', 'cancel', 'q', leave, p.sending),
         ...(p.items.length ? [key('panel-toggle', 'check / uncheck', 'x', () => toggle(p.cursor))] : []),
         Box({ display: 'none', children: [key('panel-no', 'cancel', 'n', leave)] }),
-        key('panel-yes', p.error ? 'try again' : p.yes, 'y', () => void sendPanel($, p)),
+        key('panel-yes', p.error ? 'try again' : yesLabel, 'y', () => void sendPanel($, p), need !== ''),
         // The push panel: the fix's diff in the reader (c brings the panel back), or set the fix aside
         ...(p.write.kind === 'push'
           ? (() => {
@@ -5646,7 +5729,8 @@ export function register(on: On, options: PluginOptions) {
         keyCatcher(
           kit,
           tree,
-          (k) => `${k}: no such key here · ${p.items.length ? 'j/k move · x check · ' : ''}${picks}y ${p.verb} · q cancel`,
+          (k) =>
+            `${k}: no such key here · ${p.items.length ? 'j/k move · x check · ' : ''}${picks}y ${yesLabel}${p.write.kind === 'push' ? ' · d diff · x forget' : ''} · q cancel`,
           toast,
         ),
       ],
@@ -6644,7 +6728,7 @@ export function register(on: On, options: PluginOptions) {
         fixJob?.pr.url === p.url
           ? `⟳ Claude is fixing its CI in ${fixJob.dir} (${elapsed(new Date(fixJob.startedAt).toISOString(), now)})`
           : ready
-            ? `⇡ fix ready: ${plural(ready.commits?.length ?? 0, 'commit')} not pushed · c: push it`
+            ? `⇡ fix ready: ${plural(ready.commits?.length ?? 0, 'commit')} not pushed · c: push panel`
             : ''
       return [fixing, branchNote(p), stackNote(p), ...metaOf(p), talkNote(p)].filter(Boolean).join(' · ')
     }

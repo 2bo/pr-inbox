@@ -126,7 +126,7 @@ Three tabs, `1` description, `2` conversation (comments and reviews, oldest firs
 1. The panel names the failed checks and what will happen. Nothing starts until you press `1` (fix with Claude) and `y`
 2. pr-inbox finds your clone (the session's directory, or the one `ghq` knows, or `ghq get` after `y` in the clone panel) and makes a git worktree of its own at the PR's head: `~/.cache/pr-inbox/worktrees/<owner>/<repo>/pr-<n>`. Your checkout is not touched
 3. Claude reads the failed logs, fixes, runs the tests and commits. The row shows `⟳ WIP`. It cannot push, merge, approve or comment: pr-inbox refuses those
-4. When the turn ends, nothing opens by itself: the row shows `⇡ PUSH`, a toast names the PR, and the hint under the prompt says `⇡ fix ready` until it is pushed or forgotten. `c` opens the push panel: exactly the commits a push would send, pinned to the worktree's HEAD; `y` pushes, `d` shows the diff first, `x` forgets the fix (its commits stay in the worktree). A worktree with commits left from an earlier fix asks first: `1` go on from them or `2` start again
+4. When the turn ends, nothing opens by itself: the row shows `⇡ PUSH`, a toast names the PR, and the hint under the prompt says `⇡ fix ready` until it is pushed or forgotten. `c` opens the push panel: exactly the commits a push would send, pinned to the worktree's HEAD; `y` pushes, `d` shows the diff first, `x` forgets the fix (its commits stay in the worktree; `c`, `1` and then `3` in the worktree panel push them later). A worktree with commits left from an earlier fix asks first: `1` go on from them or `2` start again
 
 ## AI review and approve
 
