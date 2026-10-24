@@ -1349,7 +1349,7 @@ const REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 // ---- Write panels ----
 
 // Every write the pane makes to GitHub is confirmed in a write panel, drawn over the list, the reader or the picker:
-// a and b (approve), m (merge, auto-merge, stack merge). It names in full what y sends, each PR at the commit the write is pinned to; y does it,
+// a and b (approve), m (merge, auto-merge, stack merge), s (the AI review's findings as a review). It names in full what y sends, each PR at the commit the write is pinned to; y does it,
 // q or n leaves, and every other key only says so. A panel opens only from the person's own key, never on its own
 // or by taking focus, and pane keys come only from the keyboard, so no model can press y
 type PanelNote = { text: string; color?: 'red' | 'yellow' | 'green' }
@@ -1361,6 +1361,10 @@ type PanelWrite =
   | { kind: 'auto-merge on' }
   | { kind: 'auto-merge off' }
   | { kind: 'merge stack'; list: string }
+  // The AI review's findings, one per item of the panel, in the same order
+  | { kind: 'findings'; findings: Finding[] }
+// A row to check or uncheck (x, or its number key), such as an AI review finding; note is said after it, dim
+type PanelItem = { text: string; note: string; checked: boolean }
 // A choice y needs first (the merge method), picked with its number key; refused says why a key is not offered here
 type PanelChoice = { key: string; word: string; refused: string }
 type WritePanel = {
@@ -1374,9 +1378,13 @@ type WritePanel = {
   // The line above the keys: what y does, then exactly what it sends ({choice} is the word of the choice picked)
   sendsLead: string
   sends: string
-  // Picked with their number keys before y does anything; never one picked from the start
+  // Picked with their keys before y does anything; never one picked from the start. choiceWhat names them
   choices: PanelChoice[]
+  choiceWhat: string
   chosen: string
+  // Rows to check before y (at least one), and the selected one
+  items: PanelItem[]
+  cursor: number
   yes: string
   // What a PR that got new commits since the panel opened is told
   movedNote: string
@@ -1393,17 +1401,22 @@ let writePanel: WritePanel | undefined
 
 function openPanel(
   $: EngineInterface,
-  p: Omit<WritePanel, 'sending' | 'error' | 'choices' | 'chosen'> & { choices?: PanelChoice[] },
+  p: Omit<WritePanel, 'sending' | 'error' | 'choices' | 'choiceWhat' | 'chosen' | 'items' | 'cursor'> & {
+    choices?: PanelChoice[]
+    choiceWhat?: string
+    items?: PanelItem[]
+  },
 ): void {
-  writePanel = { choices: [], ...p, chosen: '', sending: false, error: '' }
+  writePanel = { choices: [], choiceWhat: 'a method', items: [], ...p, chosen: '', cursor: 0, sending: false, error: '' }
   $.ui.invalidate('ui.render')
 }
 
 // y: the panel's write, once; it closes when the write is done, and stays open with the reason when it is not
 async function sendPanel($: EngineInterface, p: WritePanel): Promise<void> {
   if (p.sending || writePanel !== p) return
-  if (p.choices.length > 0 && !p.chosen) {
-    $.ui.toast(`y: ${pickText(p)} first`, { timeoutMs: 4000 })
+  const need = panelNeed(p)
+  if (need) {
+    $.ui.toast(`y: ${need} first`, { timeoutMs: 4000 })
     return
   }
   p.sending = true
@@ -1425,9 +1438,16 @@ async function sendPanel($: EngineInterface, p: WritePanel): Promise<void> {
   }
 }
 
+// What y still needs ('' when nothing): a row checked, then a choice picked
+function panelNeed(p: WritePanel): string {
+  if (p.items.length > 0 && !p.items.some((i) => i.checked)) return 'check a finding (x or its number)'
+  if (p.choices.length > 0 && !p.chosen) return pickText(p)
+  return ''
+}
+
 // "pick a method: 1 squash · 2 merge commit · 3 rebase"
 function pickText(p: WritePanel): string {
-  return `pick a method: ${offered(p)
+  return `pick ${p.choiceWhat}: ${offered(p)
     .map((c) => `${c.key} ${c.word}`)
     .join(' · ')}`
 }
@@ -1439,6 +1459,13 @@ function offered(p: WritePanel): PanelChoice[] {
 
 // What y sends, with the choice picked in it: the panel's line above the keys, and the toast of q while sending
 function sendsText(p: WritePanel): string {
+  if (p.write.kind === 'findings') {
+    const chosen = p.write.findings.filter((_, i) => p.items[i]?.checked)
+    const placed = chosen.filter((f) => findingPlace(f)).length
+    const pr = p.prs[0]
+    const at = pr ? `${pr.repository.nameWithOwner}#${pr.number} at ${pr.headRefOid.slice(0, 7)}` : ''
+    return `1 review on ${at} as ${chosenWord(p)}: ${placed} on their lines, ${chosen.length - placed} in the body`
+  }
   return p.sends.replace('{choice}', chosenWord(p))
 }
 
@@ -1453,6 +1480,15 @@ async function runWrite($: EngineInterface, p: WritePanel): Promise<string> {
   const method = METHODS.find((m) => m.key === p.chosen)
   if (p.write.kind === 'approve') return approveAll($, p, p.write.how)
   if (!pr) return ''
+  if (p.write.kind === 'findings') {
+    const event = p.chosen === 'r' ? 'REQUEST_CHANGES' : 'COMMENT'
+    return sendFindings(
+      $,
+      pr,
+      p.write.findings.filter((_, i) => p.items[i]?.checked),
+      event,
+    )
+  }
   if (p.write.kind === 'auto-merge off') return disableAutoMerge($, pr)
   if (!method) return ''
   if (p.write.kind === 'merge') return mergeNow($, pr, method)
@@ -4456,61 +4492,60 @@ function findingPlace(f: Finding): { path: string; line: number } | undefined {
   return m?.[1] && m[2] ? { path: m[1], line: Number(m[2]) } : undefined
 }
 
-async function postFindings($: EngineInterface, pr: PR): Promise<void> {
+// s: the findings panel. Each finding is a row, those that block checked to start with; r (request changes, not on
+// your own PR) or c (comment) picks what it is posted as, never one picked for you; y posts exactly the line above
+// the keys, as one review pinned to the reviewed commit
+function openFindings($: EngineInterface, pr: PR): void {
   const run = reviewOfHead(pr)
   const all = (run?.findings ?? []).filter((f) => f.severity !== 'pre-existing' && f.confirmed !== false)
   if (!run || all.length === 0) {
     $.ui.toast(`No AI review findings to send for ${askLabel(pr)}`, { timeoutMs: 6000 })
     return
   }
-  const ask = async (question: string, options: string[], header: string, multiSelect = false) => {
-    let answer = ''
-    try {
-      answer = await $.ui.ask(question, { options, header, ...(multiSelect ? { multiSelect: true } : {}) })
-    } catch {
-      // Dismissed
-    }
-    await focusPane($)
-    return answer
-  }
-  const blocking = all.filter((f) => isCandidate(f))
-  const label = (f: Finding) => fit(`${isCandidate(f) ? '✗' : '·'} ${f.location} ${f.summary}`.replace(/,/g, ';'), 70)
-  // Which ones: each by name when they fit the dialog, else the ones that block or all
-  let chosen: Finding[] = []
-  if (all.length <= 4) {
-    const answer = await ask(
-      `Which AI review findings go to ${askLabel(pr)} as comments on their lines?`,
-      all.map(label),
-      'Send findings',
-      true,
-    )
-    const picked = answer.split(',').map((x) => x.trim())
-    chosen = all.filter((f) => picked.includes(label(f)))
-  } else {
-    const answer = await ask(
-      `${all.length} AI review findings on ${askLabel(pr)}. Which go to GitHub as comments on their lines?`,
-      ['Cancel', ...(blocking.length ? [`The ${blocking.length} that block`] : []), `All ${all.length}`],
-      'Send findings',
-    )
-    chosen = answer.startsWith('All') ? all : answer.startsWith('The ') ? blocking : []
-  }
-  if (chosen.length === 0) return
-  // As what: your own PR takes comments only (GitHub refuses changes requested by its author)
+  if (!REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) return
+  // Your own PR takes comments only (GitHub refuses changes requested by its author)
   const own = mine.some((p) => p.url === pr.url)
+  openPanel($, {
+    verb: 'post review',
+    prs: [pr],
+    title: '',
+    notes: [
+      ...(run.summary ? [{ text: "The review's body: the AI review's summary, with @mentions defused" }] : []),
+      {
+        text: 'A finding with no line goes in the body (→ body). If GitHub refuses a line outside the diff, all of them go in the body',
+      },
+    ],
+    items: all.map((f) => ({
+      text: `${findingMark(f)} [${f.perspective}] ${f.location || 'general'} ${f.summary}`,
+      note: findingPlace(f) ? '' : '→ body',
+      checked: isCandidate(f),
+    })),
+    choiceWhat: 'what it is posted as',
+    choices: [
+      { key: 'r', word: 'request changes', refused: own ? 'GitHub does not let you request changes on your own PR' : '' },
+      { key: 'c', word: 'comment', refused: '' },
+    ],
+    sendsLead: 'y posts: ',
+    sends: '',
+    yes: 'post',
+    movedNote: 'nothing will be posted (v: review them)',
+    progress: '⟳ posting…',
+    write: { kind: 'findings', findings: all },
+  })
+}
+
+// y in the findings panel: the checked findings, as one review of the kind picked
+async function sendFindings($: EngineInterface, pr: PR, chosen: Finding[], event: 'REQUEST_CHANGES' | 'COMMENT'): Promise<string> {
+  const run = reviewOfHead(pr)
+  if (!run || chosen.length === 0) return ''
   const sha = pr.headRefOid.slice(0, 7)
-  const verdict = await ask(
-    `Post ${plural(chosen.length, 'comment')} on ${pr.repository.nameWithOwner}#${pr.number} at ${sha} as you? ${chosen.map((f) => f.location).join('; ')}`,
-    ['Cancel', ...(own ? [] : ['Request changes']), 'Comment'],
-    'Post review',
-  )
-  const event = verdict === 'Request changes' ? 'REQUEST_CHANGES' : verdict === 'Comment' ? 'COMMENT' : ''
-  if (!event || !REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) return
+  const verdict = event === 'REQUEST_CHANGES' ? 'Request changes' : 'Comment'
   // Pinned to the reviewed commit: if new commits came, the lines may have moved
   const { head } = await currentHead($, pr)
   if (head && head !== pr.headRefOid) {
     $.ui.toast(`Not posted: ${askLabel(pr)} has new commits since ${sha} · v: review them`, { timeoutMs: 10000 })
     await refresh($)
-    return
+    return ''
   }
   const placed = chosen.filter((f) => findingPlace(f))
   const loose = chosen.filter((f) => !findingPlace(f))
@@ -4535,15 +4570,13 @@ async function postFindings($: EngineInterface, pr: PR): Promise<void> {
   let r = await send(placed, loose)
   // A line outside the diff is refused: then everything goes in the review's body, each with its place
   if (r.exitCode !== 0 && placed.length > 0 && /line|position|diff|422|Unprocessable/i.test(r.stderr)) r = await send([], chosen)
-  if (r.exitCode !== 0) {
-    $.ui.toast(`Not posted: ${fit(clean(r.stderr), 90)}`, { timeoutMs: 10000 })
-    return
-  }
+  if (r.exitCode !== 0) return fit(clean(r.stderr) || 'GitHub refused it', 160)
   $.ui.toast(`✦ posted ${plural(chosen.length, 'comment')} on ${askLabel(pr)} (${verdict.toLowerCase()})`, { timeoutMs: 8000 })
   $.ui.log(
-    `pr-inbox posted a review on ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${verdict.toLowerCase()}, ${plural(chosen.length, 'AI finding')}): you chose it in the dialog of s`,
+    `pr-inbox posted a review on ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${verdict.toLowerCase()}, ${plural(chosen.length, 'AI finding')}): you pressed y in the findings panel of s`,
   )
   await refresh($)
+  return ''
 }
 
 // ---- My PRs: merge (m) and re-run failed CI (c) ----
@@ -5286,7 +5319,7 @@ export function register(on: On, options: PluginOptions) {
     })
   })
 
-  // The write panel (a, b, m), over the list, the reader or the picker: each PR at its commit, what is known about it, and
+  // The write panel (a, b, m, s), over the list, the reader or the picker: each PR at its commit, what is known about it, and
   // what y sends. y does it, q or n leaves, and any other key only says so
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE || !writePanel) return next(e)
@@ -5345,9 +5378,9 @@ export function register(on: On, options: PluginOptions) {
           : Text({ color: NEON.red, wrap: 'wrap', children: [`✗ ${label(pr)} has new commits since it opened: ${p.movedNote}`] }),
       )
     // Until a choice is picked, the line says to pick one; then exactly what y sends, with the choice in it
-    const waiting = p.choices.length > 0 && !p.chosen
-    const sends = waiting
-      ? Text({ color: NEON.yellow, wrap: 'wrap', children: [`${pickText(p)} · then y`] })
+    const need = panelNeed(p)
+    const sends = need
+      ? Text({ color: NEON.yellow, wrap: 'wrap', children: [`${need} · then y`] })
       : Box({
           flexDirection: 'row',
           children: [
@@ -5411,14 +5444,81 @@ export function register(on: On, options: PluginOptions) {
           : []),
       ],
     })
-    const tree: El[] = [head, rule(true), ...body, rule(), ...choices, ...status, keys]
+    // Rows to check: the count, then the rows around the selected one, each with its number; x or the number checks
+    const LIST_ROWS = 10
+    const top = Math.max(0, Math.min(p.cursor - Math.floor(LIST_ROWS / 2), p.items.length - LIST_ROWS))
+    const toggle = (i: number) => {
+      const item = p.items[i]
+      if (!item || p.sending) return
+      item.checked = !item.checked
+      p.cursor = i
+      redraw()
+    }
+    const items: El[] = p.items.length
+      ? [
+          Text({
+            color: NEON.violet,
+            bold: true,
+            children: [`${p.items.filter((i) => i.checked).length} of ${plural(p.items.length, 'finding')} checked`],
+          }),
+          ...(top > 0 ? [Text({ color: NEON.muted, children: [`  ${top} more ↑`] })] : []),
+          ...p.items.slice(top, top + LIST_ROWS).map((item, k) => {
+            const i = top + k
+            const here = i === p.cursor
+            return Box({
+              key: `panel-item-${i}`,
+              flexDirection: 'row',
+              ...(here && focused ? { backgroundColor: NEON.selection } : {}),
+              children: [
+                Text({ color: focused ? NEON.pink : NEON.muted, bold: true, children: [here ? '▸' : ' '] }),
+                Text({ color: NEON.muted, children: [i < 9 ? `${i + 1}` : ' '] }),
+                Text({ color: item.checked ? NEON.green : NEON.muted, bold: item.checked, children: [item.checked ? ' [x] ' : ' [ ] '] }),
+                Text({
+                  wrap: 'truncate-end',
+                  ...(here && focused ? { color: NEON.onSelection } : {}),
+                  children: [fit(clean(item.text), Math.max(10, columns - 14 - textWidth(item.note)))],
+                }),
+                Text({ color: NEON.muted, children: [item.note ? ` ${item.note}` : ''] }),
+              ],
+            })
+          }),
+          ...(top + LIST_ROWS < p.items.length
+            ? [Text({ color: NEON.muted, children: [`  ${p.items.length - top - LIST_ROWS} more ↓`] })]
+            : []),
+          Box({
+            display: 'none',
+            children: [
+              key('panel-down', '↓', 'j', () => {
+                p.cursor = Math.min(p.items.length - 1, p.cursor + 1)
+                redraw()
+              }),
+              key('panel-up', '↑', 'k', () => {
+                p.cursor = Math.max(0, p.cursor - 1)
+                redraw()
+              }),
+              key('panel-toggle', 'check / uncheck', 'x', () => toggle(p.cursor)),
+              ...p.items.slice(0, 9).map((_, i) => key(`panel-item-key-${i + 1}`, String(i + 1), String(i + 1), () => toggle(i))),
+            ],
+          }),
+          rule(),
+        ]
+      : []
+    const tree: El[] = [head, rule(true), ...body, rule(), ...items, ...choices, ...status, keys]
     const picks = offered(p)
       .map((c) => `${c.key} ${c.word} · `)
       .join('')
     return Box({
       key: 'panel',
       flexDirection: 'column',
-      children: [...tree, keyCatcher(kit, tree, (k) => `${k}: no such key here · ${picks}y ${p.verb} · q cancel`, toast)],
+      children: [
+        ...tree,
+        keyCatcher(
+          kit,
+          tree,
+          (k) => `${k}: no such key here · ${p.items.length ? 'j/k move · x check · ' : ''}${picks}y ${p.verb} · q cancel`,
+          toast,
+        ),
+      ],
     })
   })
 
@@ -6280,7 +6380,7 @@ export function register(on: On, options: PluginOptions) {
           : []),
         // The AI review's findings, to the author as comments on their lines
         ...(reviewOfHead(pr)?.findings.some((f) => f.severity !== 'pre-existing' && f.confirmed !== false)
-          ? [act('act-send', 'send findings', 's', () => postFindings($, pr), true)]
+          ? [act('act-send', 'send findings', 's', () => openFindings($, pr), true)]
           : []),
         act(
           'act-snooze',
@@ -6942,7 +7042,7 @@ export function register(on: On, options: PluginOptions) {
             ],
             ['o', 'open on GitHub'],
             ['i', "the AI review's findings, linked to their lines"],
-            ['s', 'send findings to GitHub as review comments, after two dialogs'],
+            ['s', 'send findings to GitHub as one review: check them (x), r or c, then y'],
             ['x', 'snooze it until it is updated'],
             ['y', 'its description and conversation as markdown, or as plain text (here and in the reader)'],
           ],
