@@ -4067,6 +4067,29 @@ test('a worktree with commits left from before asks in a panel before going on',
   await ui.unmount()
 })
 
+test('start again stops when git cannot reset the worktree, and says why', async ($, on) => {
+  const left = (argv: readonly string[]) => {
+    const a = argv.join(' ')
+    if (a === `git -C ${WORKTREE} rev-parse --is-inside-work-tree`) return { stdout: 'true' }
+    if (a === `git -C ${WORKTREE} checkout --detach origin/fix-21`) return { exitCode: 1 }
+    return fixGit('old1111 An earlier try')(argv)
+  }
+  const s = stubs(on, { git: left, locale: { HOME: '/home/me' }, stderr: 'error: cannot lock ref' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await pressCi(ui, s, '1')
+  await ui.press({ key: 'panel-choice-2' })
+  await s.clock.advance(1000)
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text).toContain(
+    '✗ Not started: could not start again from fix-21',
+  )
+  expect(s.submitted.length).toBe(0)
+  await ui.unmount()
+})
+
 test('a double y cannot push: the push panel opened by y in the fixing panel ignores y at first', async ($, on) => {
   const s = stubs(on, { git: fixGit(), locale: { HOME: '/home/me' } })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))

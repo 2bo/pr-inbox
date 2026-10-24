@@ -5052,9 +5052,12 @@ async function fixCi($: EngineInterface, pr: PR, left?: 'go on' | 'start again')
       return ''
     }
     if (earlier.length > 0 && left === 'start again') {
-      const dirty = (await $.process.run(['git', '-C', dir, 'status', '--porcelain'])).stdout.trim()
-      if (dirty) return `the worktree has uncommitted changes; clean ${dir} first`
-      await $.process.run(['git', '-C', dir, 'checkout', '--detach', `origin/${branch}`])
+      // Each step must work, or the earlier commits would stay and go out with the new fix
+      const status = await $.process.run(['git', '-C', dir, 'status', '--porcelain'])
+      if (status.exitCode !== 0) return `could not read the worktree: ${fit(clean(status.stderr), 120)}`
+      if (status.stdout.trim()) return `the worktree has uncommitted changes; clean ${dir} first`
+      const reset = await $.process.run(['git', '-C', dir, 'checkout', '--detach', `origin/${branch}`])
+      if (reset.exitCode !== 0) return `could not start again from ${branch}: ${fit(clean(reset.stderr), 120)}`
     }
   }
   // Commits are counted from the branch as GitHub had it at the fetch: exactly what a push would send
