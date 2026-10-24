@@ -27,7 +27,9 @@ base_ref() {
 if [ "${1:-}" = "diff" ]; then
   base=$(base_ref) || { echo "no origin/main or main to compare with" >&2; exit 1; }
   dir=$(marker_dir) || exit 1
-  mkdir -p "$dir" && git diff "$base...HEAD" >"$dir/review.diff" && echo "$dir/review.diff"
+  mkdir -p "$dir" || exit 1
+  git diff "$base...HEAD" >"$dir/review.diff" || { echo "could not diff $base...HEAD (shallow clone? try git fetch --unshallow origin main)" >&2; exit 1; }
+  echo "$dir/review.diff"
   exit 0
 fi
 
@@ -67,8 +69,30 @@ head=$(git rev-parse HEAD 2>/dev/null) || exit 0
 
 base=$(base_ref) || exit 0
 
-# Both sides of a rename, and paths as they are (-z: not quoted when they are not ASCII)
-git diff --name-only --no-renames -z "$base...HEAD" 2>/dev/null | tr '\0' '\n' | grep -Eq "$USER_FACING" || exit 0
+# Print a deny decision with its reason (the session reads it), and stop
+deny() {
+  jq -n --arg reason "$1" '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: $reason
+    }
+  }'
+  exit 0
+}
+
+# Both sides of a rename, and paths as they are (-z: not quoted when they are not ASCII). A diff that cannot be
+# computed (no common ancestor in a shallow clone, say) is not "nothing user-facing": it is denied with the fix
+names=$(mktemp 2>/dev/null) || exit 0
+if ! git diff --name-only --no-renames -z "$base...HEAD" >"$names" 2>/dev/null; then
+  rm -f "$names"
+  deny "pr-inbox's UX review gate could not diff $base...HEAD, so it cannot tell whether this branch changes what users see. Fetch the base (for a shallow clone: git fetch --unshallow origin main, or git fetch origin main) and run gh pr create again."
+fi
+if ! tr '\0' '\n' <"$names" | grep -Eq "$USER_FACING"; then
+  rm -f "$names"
+  exit 0
+fi
+rm -f "$names"
 
 dir=$(marker_dir) || exit 0
 [ -f "$dir/$head" ] && exit 0
@@ -83,11 +107,4 @@ reason="This branch changes what pr-inbox users see (hooks/, .claude-plugin/plug
 6. Record the review: \`.claude/hooks/ux-review-gate.sh mark\` (it marks the current HEAD; a later commit needs another review).
 7. Run \`gh pr create\` again, and say in the PR body what the UX review changed and what it skipped and why."
 
-jq -n --arg reason "$reason" '{
-  hookSpecificOutput: {
-    hookEventName: "PreToolUse",
-    permissionDecision: "deny",
-    permissionDecisionReason: $reason
-  }
-}'
-exit 0
+deny "$reason"
