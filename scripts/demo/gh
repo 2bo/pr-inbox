@@ -510,12 +510,15 @@ const ASSIGNED_ALL = [
   issue('storefront', 498, 'Document the feature flag rollout steps', 'mtanaka', 24 * 9, ['docs'], 0),
 ]
 // Closed from the pane (c) during the demo: kept in the demo's state file
-const issueClosed = (url) => readState()[`closed:${url}`] === true
-const setIssueClosed = (url, closed) => {
+const issueClosed = (url) => Boolean(readState()[`closed:${url}`])
+// The reason it was closed with (COMPLETED or NOT_PLANNED), or false when open
+const setIssueClosed = (url, reason) => {
   if (!STATE) return
-  fs.writeFileSync(STATE, JSON.stringify({ ...readState(), [`closed:${url}`]: closed }))
+  fs.writeFileSync(STATE, JSON.stringify({ ...readState(), [`closed:${url}`]: reason }))
 }
 const ASSIGNED = ASSIGNED_ALL.filter((i) => !issueClosed(i.url))
+// The issue a gh issue call names: <number> -R owner/repo
+const issueAt = (number) => `https://github.com/${flag('-R')}/issues/${number}`
 // What the details under the list show for each issue
 const ISSUE_BODIES = {
   'https://github.com/acme/storefront/issues/512':
@@ -565,7 +568,7 @@ if (args[0] === 'api' && args[1] === 'graphql') {
       data: {
         resource: {
           body: ISSUE_BODIES[issueUrl] ?? '',
-          stateReason: issueClosed(issueUrl) ? 'NOT_PLANNED' : null,
+          stateReason: readState()[`closed:${issueUrl}`] || null,
           comments: { totalCount: talk.length, nodes: talk },
           subIssues: { nodes: subs },
         },
@@ -682,9 +685,11 @@ if (args[0] === 'api' && args[1] === 'graphql') {
 } else if (args[0] === 'issue' && args[1] === 'view' && args.includes('--web')) {
   out('')
 } else if (args[0] === 'issue' && args[1] === 'view' && flag('--json') === 'state') {
-  out({ state: issueClosed(args[2]) ? 'CLOSED' : 'OPEN' })
+  out({ state: issueClosed(issueAt(args[2])) ? 'CLOSED' : 'OPEN' })
 } else if (args[0] === 'issue' && (args[1] === 'close' || args[1] === 'reopen')) {
-  setIssueClosed(args[2], args[1] === 'close')
+  // gh issue close <number> -R acme/<repo> --reason completed | "not planned"
+  const reason = flag('--reason') === 'not planned' ? 'NOT_PLANNED' : 'COMPLETED'
+  setIssueClosed(issueAt(args[2]), args[1] === 'close' ? reason : false)
   out('')
 } else if (args[0] === 'issue' && args[1] === 'view') {
   fail('GraphQL: Could not resolve to an issue')

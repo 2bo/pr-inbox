@@ -3046,7 +3046,7 @@ test('on the issues tab the PR keys say where they work, and the filter matches 
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-issues' })
   await ui.press({ key: 'unbound-a' })
-  expect(s.toasts.at(-1)).toBe('a acts on PRs (1: To review, 2: My PRs) · on issues: o opens, c closes or reopens')
+  expect(s.toasts.at(-1)).toBe('a acts on PRs (1: To review, 2: My PRs) · on issues: c closes or reopens, o opens, y plain text')
   expect(approved(s.calls)).toBe(false)
   await ui.press({ key: 'filter' })
   await ui.input({ key: 'filter-input', text: 'docs', kind: 'change' })
@@ -3174,22 +3174,25 @@ test('c closes an issue only after a reason is picked and y, then c on it under 
   expect(s.calls.some((c) => c[2] === 'close')).toBe(false)
   await ui.press({ key: 'panel-choice-2' })
   expect(JSON.stringify(await ui.find({ key: 'panel' }))).toContain('acme/app#7 as not planned')
+  // y names the outcome, never just "close"
+  expect((await ui.find({ key: 'panel-yes' }))?.props.label).toBe('close as not planned')
   await ui.press({ key: 'panel-yes' })
   for (let i = 0; i < 10; i++) await s.clock.settle()
-  expect(s.calls).toContainEqual(['gh', 'issue', 'close', 'https://github.com/acme/app/issues/7', '--reason', 'not planned'])
+  expect(s.calls).toContainEqual(['gh', 'issue', 'view', '7', '-R', 'acme/app', '--json', 'state'])
+  expect(s.calls).toContainEqual(['gh', 'issue', 'close', '7', '-R', 'acme/app', '--reason', 'not planned'])
   expect(s.toasts.at(-1)).toContain('closed acme/app#7 as not planned')
   // Gone from the assigned list, kept under closed here, where c reopens it
   expect(await ui.find({ type: 'Text', text: /✓ closed here 1/ })).toBeDefined()
-  expect((await ui.find({ key: 'issue-state' }))?.props.label).toBe('reopen')
+  expect((await ui.find({ key: 'issue-state' }))?.props.label).toBe('reopen issue')
   await ui.press({ key: 'issue-state' })
   await ui.press({ key: 'panel-yes' })
   for (let i = 0; i < 10; i++) await s.clock.settle()
-  expect(s.calls).toContainEqual(['gh', 'issue', 'reopen', 'https://github.com/acme/app/issues/7'])
+  expect(s.calls).toContainEqual(['gh', 'issue', 'reopen', '7', '-R', 'acme/app'])
   expect(await ui.find({ type: 'Text', text: /closed here/ })).toBeUndefined()
   await ui.unmount()
 })
 
-test('closing an issue already closed on GitHub sends nothing and says so; q leaves the panel', async ($, on) => {
+test('closing an issue already closed on GitHub sends nothing, closes the panel and says so', async ($, on) => {
   const s = stubs(on, {
     graphql: withIssues(issue()),
     gh: (argv) => (argv[1] === 'issue' && argv[2] === 'view' ? { stdout: JSON.stringify({ state: 'CLOSED' }) } : detailsAnswer(argv)),
@@ -3202,10 +3205,54 @@ test('closing an issue already closed on GitHub sends nothing and says so; q lea
   await ui.press({ key: 'panel-yes' })
   for (let i = 0; i < 10; i++) await s.clock.settle()
   expect(s.calls.some((c) => c[2] === 'close')).toBe(false)
-  expect(JSON.stringify(await ui.find({ key: 'panel' }))).toContain('closed already')
-  await ui.press({ key: 'panel-cancel' })
   expect(await ui.find({ key: 'panel' })).toBeUndefined()
+  expect(s.toasts).toContain('acme/app#7 was already closed on GitHub · nothing sent')
   await ui.unmount()
+})
+
+test('an issue whose URL is not its own github.com address opens no close panel and sends nothing', async ($, on) => {
+  const elsewhere = issue({ url: 'https://github.com/other/place/issues/7' })
+  const s = stubs(on, { graphql: withIssues(elsewhere), gh: detailsAnswer })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  await ui.press({ key: 'issue-state' })
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
+  expect(s.toasts.at(-1)).toContain('is not at its own github.com address')
+  expect(s.calls.some((c) => c[1] === 'issue' && c[2] !== 'view')).toBe(false)
+  await ui.unmount()
+})
+
+test('after closing, the selection stays in place, and closing the pane forgets the closed list', async ($, on) => {
+  on('ui.close', () => ({ value: undefined }))
+  let state = 'OPEN'
+  const next = issue({ number: 8, title: 'Next one', url: 'https://github.com/acme/app/issues/8', updatedAt: '2026-09-01T00:00:00Z' })
+  const s = stubs(on, {
+    graphql: withIssues(issue(), next),
+    gh: (argv) => {
+      if (argv.some((a) => a.startsWith('assigned='))) return { stdout: state === 'OPEN' ? withIssues(issue(), next) : withIssues(next) }
+      if (argv[1] === 'issue' && argv[2] === 'view') return { stdout: JSON.stringify({ state }) }
+      if (argv[1] === 'issue' && argv[2] === 'close') state = 'CLOSED'
+      return detailsAnswer(argv)
+    },
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  await ui.press({ key: 'issue-state' })
+  await ui.press({ key: 'panel-choice-1' })
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(await isSelectedUrl(ui, next.url)).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /✓ closed here 1/ })).toBeDefined()
+  // q closes the pane
+  await ui.press({ key: 'close' })
+  await s.clock.settle()
+  await ui.unmount()
+  const again = await $.ui.mount(PANE)
+  await again.press({ key: 'tab-issues' })
+  expect(await again.find({ type: 'Text', text: /closed here/ })).toBeUndefined()
+  await again.unmount()
 })
 
 test('toasts an issue newly assigned to you, but not those assigned before issues were listed', async ($, on) => {
