@@ -1259,6 +1259,10 @@ test('the AI review reads the issues and PRs the description links to, in any re
       body: [
         'Fixes #3 and follows my-org/lib#7 (see https://github.com/my-org/lib/pull/7 again).',
         'This PR is https://github.com/acme/app/pull/11; not a ref: a.b/c#9, page.html#12, #12abc.',
+        '<!-- Fixes #20 --> Not links either: `#21` and',
+        '```',
+        'see #22',
+        '```',
         'Related: https://github.com/acme/app/issues/4, acme/app#5, #6, #8',
       ].join('\n'),
       // Linked in the sidebar only, after what the description says
@@ -1272,11 +1276,16 @@ test('the AI review reads the issues and PRs the description links to, in any re
   const items = JSON.parse(reviewsOf(s)[0]?.prompt.match(/<pr_content>\n([\s\S]*?)\n<\/pr_content>/)?.[1] ?? '[]') as {
     source: string
     trust: string
+    content?: string
   }[]
   expect(items.find((x) => x.source.includes('my-org/lib#7'))).toMatchObject({
-    source: 'GitHub issue or PR my-org/lib#7, linked from acme/app#11',
+    source: 'GitHub issue or PR my-org/lib#7, mentioned in the description of acme/app#11',
     trust: expect.stringContaining('untrusted'),
   })
+  // The reviewers are told what was left out (#8, and #2 the PR closes from the sidebar), so they do not judge by it
+  expect(items.find((x) => x.source === 'pr-inbox')?.content).toBe(
+    'The PR links to 2 more issues or PRs, not read: do not judge it by them',
+  )
   await ui.unmount()
 })
 
@@ -1289,6 +1298,11 @@ test('the AI review also reads the issues a PR closes from the sidebar, when the
   const ui = await pressReview($, s)
   const read = s.calls.filter((c) => c[1] === 'issue' && c[2] === 'view').map((c) => `${c[5]}#${c[3]}`)
   expect(read).toEqual(['acme/app#3', 'my-org/lib#2'])
+  // What the PR closes is named as such: it states the purpose, the rest is context
+  const prompt = reviewsOf(s)[0]?.prompt ?? ''
+  expect(prompt).toContain('GitHub issue or PR acme/app#3, closed by acme/app#11')
+  expect(prompt).toContain('GitHub issue or PR my-org/lib#2, closed by acme/app#11')
+  expect(prompt).not.toContain('"source":"pr-inbox"')
   await ui.unmount()
 })
 
