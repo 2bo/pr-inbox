@@ -1084,7 +1084,8 @@ async function fetchAll($: EngineInterface): Promise<void> {
     const reviewQuery = searchQuery('review-requested:@me')
     const mineQuery = searchQuery('author:@me')
     const approvedQuery = searchQuery('reviewed-by:@me -author:@me')
-    const assignedQuery = searchQuery('assignee:@me', 'issue')
+    // Newest updates first, so the 50 the search returns are the 50 most recently updated
+    const assignedQuery = searchQuery('assignee:@me sort:updated-desc', 'issue')
     const r = await $.process.run([
       'gh',
       'api',
@@ -1207,7 +1208,8 @@ async function notifyChanges($: EngineInterface): Promise<void> {
   const snapshot: Snapshot = {
     review: review.filter((p) => !isBot(p)).map((p) => p.url),
     mine: Object.fromEntries(mine.map((p) => [p.url, `${p.reviewDecision ?? ''}|${ciState(p)}`])),
-    assigned: assigned.map((i) => i.url),
+    // Closed from the pane while it is open: still known, so reopening one here is not a new assignment
+    assigned: [...assigned, ...closedHere].map((i) => i.url),
   }
   await $.store.set('snapshot', snapshot)
   // The first fetch only sets the baseline

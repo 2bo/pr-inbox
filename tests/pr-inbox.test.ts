@@ -2994,7 +2994,9 @@ test('issues assigned to you are fetched and listed on their own tab, newest upd
   const older = issue({ number: 8, title: 'Old one', url: 'https://github.com/acme/app/issues/8', updatedAt: '2026-09-01T00:00:00Z' })
   const s = stubs(on, { graphql: withIssues(older, issue(), null) })
   await start($, s.clock)
-  expect(s.calls.find((c) => c.includes('graphql'))).toContainEqual('assigned=is:issue is:open archived:false assignee:@me')
+  expect(s.calls.find((c) => c.includes('graphql'))).toContainEqual(
+    'assigned=is:issue is:open archived:false assignee:@me sort:updated-desc',
+  )
   expect(s.statuses.at(-1)).toMatch(/│ issues 2$/)
   const ui = await $.ui.mount(PANE)
   expect((await ui.find({ key: 'tab-issues' }))?.props.label).toBe('issues 2')
@@ -3188,6 +3190,8 @@ test('c closes an issue only after a reason is picked and y, then c on it under 
   await ui.press({ key: 'panel-yes' })
   for (let i = 0; i < 10; i++) await s.clock.settle()
   expect(s.calls).toContainEqual(['gh', 'issue', 'reopen', '7', '-R', 'acme/app'])
+  // Reopening your own close is no new assignment
+  expect(s.toasts.join(' ')).not.toContain('Assigned')
   expect(await ui.find({ type: 'Text', text: /closed here/ })).toBeUndefined()
   await ui.unmount()
 })
