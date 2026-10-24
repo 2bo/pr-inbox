@@ -4113,7 +4113,13 @@ async function claimAutoReview($: EngineInterface, pr: PR, now: number): Promise
   const key = `auto-review:${pr.url}`
   await $.store.set(key, { head: pr.headRefOid, until: now + AUTO_LEASE, attempts: same?.attempts ?? 0, retryAt: 0, owner: SESSION_ID })
   // Another session that took it meanwhile wrote over this one: it is theirs
-  await $.clock.sleep(AUTO_SETTLE)
+  try {
+    await $.clock.sleep(AUTO_SETTLE)
+  } catch {
+    // A wait cut short (the session ends): give the PR back, unless another session holds it now
+    if (asAutoRecord(await $.store.get(key))?.owner === SESSION_ID) await $.store.delete(key)
+    return false
+  }
   return asAutoRecord(await $.store.get(key))?.owner === SESSION_ID
 }
 
