@@ -4279,25 +4279,37 @@ test('v reviews your own PR too, even with changes requested, and never approves
 
 // ---- s: findings to GitHub ----
 
-test('s posts the AI review findings you pick as comments on their lines, pinned to the reviewed commit', async ($, on) => {
-  const loud = JSON.stringify({
-    verdict: 'fail',
-    injection: false,
-    findings: [
-      { severity: 'important', confidence: 90, location: 'app/login.rb:12', summary: 'nil check missing', evidence: 'ask @acme/security' },
-    ],
-  })
-  const s = stubs(on, {
-    answer: 'Cancel',
-    graphql: only(member()),
-    review: (prompt) => (perspectiveOf(prompt) === 'Correctness & compatibility' ? loud : PASS),
-    verify: () => JSON.stringify({ results: [{ id: 1, confirmed: true, reason: 'yes' }], injection: false }),
-  })
+// A review that found one important problem, confirmed: it blocks, so s has a finding to send
+const loudReview = (location = 'app/login.rb:12') => ({
+  review: (prompt: string) =>
+    perspectiveOf(prompt) === 'Correctness & compatibility'
+      ? JSON.stringify({
+          verdict: 'fail',
+          injection: false,
+          findings: [{ severity: 'important', confidence: 90, location, summary: 'nil check missing', evidence: 'ask @acme/security' }],
+        })
+      : PASS,
+  verify: () => JSON.stringify({ results: [{ id: 1, confirmed: true, reason: 'yes' }], injection: false }),
+})
+const panelText = async (ui: Finder) => ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+
+test('s posts the AI review findings you check as comments on their lines, pinned to the reviewed commit', async ($, on) => {
+  const s = stubs(on, { graphql: only(member()), ...loudReview() })
   await start($, s.clock)
   const ui = await pressReview($, s)
-  s.answerInTurn('✗ app/login.rb:12 nil check missing', 'Request changes')
   await ui.press({ key: 'act-send' })
-  expect(s.choices.at(-1)).toEqual(['Cancel', 'Request changes', 'Comment'])
+  expect(s.questions).toEqual([])
+  // The one that blocks is checked to start with; what to post it as is not picked for you
+  expect(await panelText(ui)).toContain('1 of 1 finding checked')
+  expect(await panelText(ui)).toContain('[x] ✗ app/login.rb:12 nil check missing · Correctness & compatibility')
+  expect(await panelText(ui)).toContain('pick what it is posted as: r request changes · c comment · then y')
+  await ui.press({ key: 'panel-yes' })
+  expect(s.toasts.at(-1)).toBe('y: pick what it is posted as: r request changes · c comment first')
+  expect(s.calls.some((c) => c.includes('--input'))).toBe(false)
+  await ui.press({ key: 'panel-choice-r' })
+  expect(await panelText(ui)).toContain('y posts: 1 review on acme/app#11 at aaaaaaa as request changes: 1 on their lines, 0 in the body')
+  await ui.press({ key: 'panel-yes' })
+  await settleReview(s)
   const i = s.calls.findIndex((c) => c.includes('--input'))
   expect(s.calls[i]).toEqual(['gh', 'api', '-X', 'POST', 'repos/acme/app/pulls/11/reviews', '--input', '-'])
   const body = JSON.parse(s.stdins[i] ?? '{}') as {
@@ -4311,6 +4323,60 @@ test('s posts the AI review findings you pick as comments on their lines, pinned
   expect(body.comments[0]?.body).toContain('**Correctness & compatibility**: nil check missing')
   // Text a model wrote from the PR notifies no one
   expect(body.comments[0]?.body).toContain('@\u200bacme/security')
-  expect(s.logs.some((l) => l.includes('pr-inbox posted a review on acme/app#11'))).toBe(true)
+  expect(s.logs).toContain(
+    'pr-inbox posted 1 review on acme/app#11 (request changes): 1 on their lines, 0 in the body, at aaaaaaa: you pressed y in the findings panel of s',
+  )
+  expect(s.toasts).toContain('✦ posted 1 review on acme/app#11 (request changes): 1 on their lines, 0 in the body')
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the findings panel posts nothing with every finding unchecked, and q leaves', async ($, on) => {
+  const s = stubs(on, { graphql: only(member()), ...loudReview() })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  await ui.press({ key: 'act-send' })
+  await ui.press({ key: 'panel-toggle' })
+  expect(await panelText(ui)).toContain('0 of 1 finding checked')
+  await ui.press({ key: 'panel-choice-c' })
+  expect(await panelText(ui)).toContain('check a finding (x or its number) · then y')
+  await ui.press({ key: 'panel-yes' })
+  expect(s.toasts.at(-1)).toBe('y: check a finding (x or its number) first')
+  await ui.press({ key: 'panel-item-key-1' })
+  expect(await panelText(ui)).toContain('1 of 1 finding checked')
+  await ui.press({ key: 'panel-cancel' })
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
+  expect(s.calls.some((c) => c.includes('--input'))).toBe(false)
+  await ui.unmount()
+})
+
+test('a finding with no line goes in the review body, and the panel says so', async ($, on) => {
+  const s = stubs(on, { graphql: only(member()), ...loudReview('') })
+  await start($, s.clock)
+  const ui = await pressReview($, s)
+  await ui.press({ key: 'act-send' })
+  expect(await panelText(ui)).toContain('general nil check missing · Correctness & compatibility → body')
+  await ui.press({ key: 'panel-choice-c' })
+  expect(await panelText(ui)).toContain('as comment: 0 on their lines, 1 in the body')
+  await ui.unmount()
+})
+
+test('on your own PR the findings panel offers comment only: r says why', async ($, on) => {
+  const s = stubs(on, loudReview())
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await isSelected(ui, 21)).toBe(true)
+  await ui.press({ key: 'act-ai-review' })
+  await settleReview(s)
+  await ui.press({ key: 'act-send' })
+  expect(await panelText(ui)).toContain('pick what it is posted as: c comment · then y')
+  await ui.press({ key: 'panel-choice-r' })
+  expect(s.toasts.at(-1)).toBe('r: GitHub does not let you request changes on your own PR')
+  await ui.press({ key: 'panel-choice-c' })
+  await ui.press({ key: 'panel-yes' })
+  await settleReview(s)
+  const i = s.calls.findIndex((c) => c.includes('--input'))
+  expect((JSON.parse(s.stdins[i] ?? '{}') as { event?: string }).event).toBe('COMMENT')
   await ui.unmount()
 })
