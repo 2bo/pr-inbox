@@ -23,8 +23,16 @@ type PR = {
   additions: number
   deletions: number
   // autoMergeAllowed: the repository's setting (Settings → Allow auto-merge); missing on a snapshot from before it was read
+  // squashMergeAllowed, mergeCommitAllowed, rebaseMergeAllowed: the merge methods it allows; missing reads as allowed
   // defaultBranchRef: the branch the repository opens on, never the top of a stack made by hand
-  repository: { nameWithOwner: string; autoMergeAllowed?: boolean; defaultBranchRef?: { name: string } | null }
+  repository: {
+    nameWithOwner: string
+    autoMergeAllowed?: boolean
+    squashMergeAllowed?: boolean
+    mergeCommitAllowed?: boolean
+    rebaseMergeAllowed?: boolean
+    defaultBranchRef?: { name: string } | null
+  }
   author: { login: string; __typename: string } | null
   reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN'
@@ -220,7 +228,7 @@ ${REVIEWED_FRAGMENT}
 ${ASKED_FRAGMENT}
 fragment pr on PullRequest {
   number title url isDraft createdAt updatedAt headRefOid authorAssociation isCrossRepository additions deletions
-  repository { nameWithOwner autoMergeAllowed defaultBranchRef { name } }
+  repository { nameWithOwner autoMergeAllowed squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed defaultBranchRef { name } }
   author { login __typename }
   reviewDecision mergeable headRefName baseRefName
   autoMergeRequest { mergeMethod }
@@ -448,6 +456,11 @@ function cleanPr(pr: PR): PR {
     repository: {
       nameWithOwner: clean(pr.repository.nameWithOwner),
       ...(typeof pr.repository.autoMergeAllowed === 'boolean' ? { autoMergeAllowed: pr.repository.autoMergeAllowed } : {}),
+      ...Object.fromEntries(
+        (['squashMergeAllowed', 'mergeCommitAllowed', 'rebaseMergeAllowed'] as const)
+          .filter((k) => typeof pr.repository[k] === 'boolean')
+          .map((k) => [k, pr.repository[k]]),
+      ),
       ...(typeof pr.repository.defaultBranchRef?.name === 'string'
         ? { defaultBranchRef: { name: pr.repository.defaultBranchRef.name } }
         : {}),
@@ -1336,13 +1349,20 @@ const REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 // ---- Write panels ----
 
 // Every write the pane makes to GitHub is confirmed in a write panel, drawn over the list, the reader or the picker:
-// a and b (approve) for now. It names in full what y sends, each PR at the commit the write is pinned to; y does it,
+// a and b (approve), m (merge, auto-merge, stack merge). It names in full what y sends, each PR at the commit the write is pinned to; y does it,
 // q or n leaves, and every other key only says so. A panel opens only from the person's own key, never on its own
 // or by taking focus, and pane keys come only from the keyboard, so no model can press y
 type PanelNote = { text: string; color?: 'red' | 'yellow' | 'green' }
 // Data, not a callback: the write runs through runWrite, a named function per kind
 // bulk: the panel after b, whose header and notes list the PRs (rebuilt from those left as each is approved)
-type PanelWrite = { kind: 'approve'; how: string; bulk: boolean }
+type PanelWrite =
+  | { kind: 'approve'; how: string; bulk: boolean }
+  | { kind: 'merge' }
+  | { kind: 'auto-merge on' }
+  | { kind: 'auto-merge off' }
+  | { kind: 'merge stack'; list: string }
+// A choice y needs first (the merge method), picked with its number key; refused says why a key is not offered here
+type PanelChoice = { key: string; word: string; refused: string }
 type WritePanel = {
   // What y does, in a word: the header's first word and y's label
   verb: string
@@ -1351,9 +1371,12 @@ type WritePanel = {
   // The header when the panel is about more than one PR
   title: string
   notes: PanelNote[]
-  // The line above the keys: what y does, then exactly what it sends
+  // The line above the keys: what y does, then exactly what it sends ({choice} is the word of the choice picked)
   sendsLead: string
   sends: string
+  // Picked with their number keys before y does anything; never one picked from the start
+  choices: PanelChoice[]
+  chosen: string
   yes: string
   // What a PR that got new commits since the panel opened is told
   movedNote: string
@@ -1366,14 +1389,21 @@ type WritePanel = {
 }
 let writePanel: WritePanel | undefined
 
-function openPanel($: EngineInterface, p: Omit<WritePanel, 'sending' | 'error'>): void {
-  writePanel = { ...p, sending: false, error: '' }
+function openPanel(
+  $: EngineInterface,
+  p: Omit<WritePanel, 'sending' | 'error' | 'choices' | 'chosen'> & { choices?: PanelChoice[] },
+): void {
+  writePanel = { choices: [], ...p, chosen: '', sending: false, error: '' }
   $.ui.invalidate('ui.render')
 }
 
 // y: the panel's write, once; it closes when the write is done, and stays open with the reason when it is not
 async function sendPanel($: EngineInterface, p: WritePanel): Promise<void> {
   if (p.sending || writePanel !== p) return
+  if (p.choices.length > 0 && !p.chosen) {
+    $.ui.toast(`y: ${pickText(p)} first`, { timeoutMs: 4000 })
+    return
+  }
   p.sending = true
   p.error = ''
   $.ui.invalidate('ui.render')
@@ -1393,10 +1423,27 @@ async function sendPanel($: EngineInterface, p: WritePanel): Promise<void> {
   }
 }
 
+// "pick a method: 1 squash · 2 merge commit · 3 rebase"
+function pickText(p: WritePanel): string {
+  return `pick a method: ${p.choices.map((c) => `${c.key} ${c.word}`).join(' · ')}`
+}
+
+// The word of the choice picked ('' before one is)
+function chosenWord(p: WritePanel): string {
+  return p.choices.find((c) => c.key === p.chosen)?.word ?? ''
+}
+
 // The panel's write. A message it returns keeps the panel open with it; '' closes the panel
 async function runWrite($: EngineInterface, p: WritePanel): Promise<string> {
+  const pr = p.prs[0]
+  const method = METHODS.find((m) => m.key === p.chosen)
   if (p.write.kind === 'approve') return approveAll($, p, p.write.how)
-  return ''
+  if (!pr) return ''
+  if (p.write.kind === 'auto-merge off') return disableAutoMerge($, pr)
+  if (!method) return ''
+  if (p.write.kind === 'merge') return mergeNow($, pr, method)
+  if (p.write.kind === 'auto-merge on') return enableAutoMerge($, pr, method)
+  return mergeStack($, pr, method, p.write.list)
 }
 
 // y in the approve panel: exactly the commits it shows, one by one; postApproval reads each head again right before.
@@ -4487,10 +4534,22 @@ async function postFindings($: EngineInterface, pr: PR): Promise<void> {
 
 // ---- My PRs: merge (m) and re-run failed CI (c) ----
 
-const MERGE_METHODS: Record<string, string> = {
-  'Squash and merge': '--squash',
-  'Create a merge commit': '--merge',
-  'Rebase and merge': '--rebase',
+// The merge methods, each on the same number key in every repository; one the repository does not allow is drawn dim
+// and its key says why
+const METHODS = [
+  { key: '1', word: 'squash', flag: '--squash', setting: 'squashMergeAllowed', plural: 'squash merges' },
+  { key: '2', word: 'merge commit', flag: '--merge', setting: 'mergeCommitAllowed', plural: 'merge commits' },
+  { key: '3', word: 'rebase', flag: '--rebase', setting: 'rebaseMergeAllowed', plural: 'rebase merges' },
+] as const
+type Method = (typeof METHODS)[number]
+
+// The method choices of the merge panel for this PR's repository
+function methodChoices(pr: PR): PanelChoice[] {
+  return METHODS.map((m) => ({
+    key: m.key,
+    word: m.word,
+    refused: pr.repository[m.setting] === false ? `${pr.repository.nameWithOwner} does not allow ${m.plural} (repository settings)` : '',
+  }))
 }
 
 // A command that could not start (gh not installed) reads as a failed run, so each caller says what went wrong
@@ -4543,39 +4602,70 @@ function notReadyShort(pr: PR, now: number): string {
   return notReadyWhy(pr, now).replace(/ · [a-z]: .*$/, '')
 }
 
-// m: merge now when ready, otherwise auto-merge on or off (see mergeAction)
+// m: merge now when ready, otherwise auto-merge on or off (see mergeAction). Each opens the merge panel; y in it,
+// after a method is picked with its number key, does the write
 async function mergePr($: EngineInterface, pr: PR): Promise<void> {
   const action = mergeAction(pr)
-  if (action === 'auto-merge') return enableAutoMerge($, pr)
-  if (action === 'auto-merge off') return disableAutoMerge($, pr)
-  if (action !== 'merge') return
-  if (stackKey(pr)) return mergeStack($, pr)
-  return mergeNow($, pr)
-}
-
-// Merges a ready PR after the person picks a method in a dialog (Cancel selected first). The merge is pinned to the
-// commit on screen: if the head moved, GitHub refuses it
-async function mergeNow($: EngineInterface, pr: PR): Promise<void> {
-  const sha = pr.headRefOid.slice(0, 7)
   if (!REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) {
-    $.ui.toast('Merge failed: unexpected repository name or commit id', { timeoutMs: 8000 })
+    $.ui.toast('Not merged: unexpected repository name or commit id', { timeoutMs: 8000 })
     return
   }
-  const title = fit(pr.title.replace(/["“”]/g, "'"), 80)
-  let answer = ''
-  try {
-    const into = pr.baseRefName ? ` into ${clean(pr.baseRefName)}` : ''
-    answer = await $.ui.ask(`Merge ${pr.repository.nameWithOwner}#${pr.number}${into} now, at ${sha} (“${title}”)?`, {
-      options: ['Cancel', ...Object.keys(MERGE_METHODS)],
-      header: 'Merge now',
+  const full = `${pr.repository.nameWithOwner}#${pr.number}`
+  const sha = pr.headRefOid.slice(0, 7)
+  const into = pr.baseRefName ? ` into ${clean(pr.baseRefName)}` : ''
+  const panel = { prs: [pr], title: '', notes: [] as PanelNote[] }
+  if (action === 'auto-merge off')
+    return openPanel($, {
+      ...panel,
+      verb: 'auto-merge off',
+      notes: [{ text: `Auto-merge is on (${autoMergeWord(pr)}): GitHub merges it once every review and check passes` }],
+      sendsLead: 'y turns auto-merge off: ',
+      sends: `${full} (${autoMergeWord(pr)})`,
+      yes: 'auto-merge off',
+      movedNote: 'auto-merge is still on',
+      progress: '⟳ turning auto-merge off…',
+      write: { kind: 'auto-merge off' },
     })
-  } catch {
-    // The dialog was dismissed
-  }
-  await focusPane($)
-  const flag = MERGE_METHODS[answer]
-  if (!flag) return
-  const r = await $.process.run(['gh', 'pr', 'merge', pr.url, flag, '--match-head-commit', pr.headRefOid]).catch(ghMissing)
+  if (action === 'auto-merge')
+    return openPanel($, {
+      ...panel,
+      verb: 'auto-merge on',
+      notes: [
+        { text: `Not ready yet: ${notReadyShort(pr, fetchedAt || Date.now())}`, color: 'yellow' },
+        {
+          text: 'GitHub then merges it on its own once every review and check passes, at the commit it is at then; if it is ready now, it merges now',
+        },
+      ],
+      sendsLead: 'y turns auto-merge on: ',
+      sends: `${full}${into} ({choice}), now at ${sha}`,
+      choices: methodChoices(pr),
+      yes: 'auto-merge on',
+      movedNote: 'auto-merge will not be turned on',
+      progress: '⟳ turning auto-merge on…',
+      write: { kind: 'auto-merge on' },
+    })
+  if (action !== 'merge') return
+  if (stackKey(pr)) return openStackMerge($, pr)
+  openPanel($, {
+    ...panel,
+    verb: 'merge',
+    notes: [{ text: '⚠ Merging cannot be undone', color: 'yellow' }],
+    sendsLead: 'y merges: ',
+    sends: `${full} at ${sha}${into} ({choice})`,
+    choices: methodChoices(pr),
+    yes: 'merge',
+    movedNote: 'it will not be merged',
+    progress: '⟳ merging…',
+    write: { kind: 'merge' },
+  })
+}
+
+// Merges a ready PR with the method picked in the panel. Pinned to the commit the panel opened with: if the head
+// moved, GitHub refuses it, and the panel closes (the list is fetched again and says so). Any other refusal stays in
+// the panel, so y can try again
+async function mergeNow($: EngineInterface, pr: PR, method: Method): Promise<string> {
+  const sha = pr.headRefOid.slice(0, 7)
+  const r = await $.process.run(['gh', 'pr', 'merge', pr.url, method.flag, '--match-head-commit', pr.headRefOid]).catch(ghMissing)
   if (r.exitCode !== 0) {
     const moved = /head|match|expected/i.test(r.stderr)
     $.ui.toast(
@@ -4585,40 +4675,21 @@ async function mergeNow($: EngineInterface, pr: PR): Promise<void> {
       { timeoutMs: 10000 },
     )
     await refresh($)
-    return
+    return moved ? '' : `not merged: ${fit(clean(r.stderr), 120)}`
   }
-  $.ui.toast(`✦ merged ${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number} · ${answer.toLowerCase()}`)
-  $.ui.log(
-    `pr-inbox merged ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${answer.toLowerCase()}): you chose it in the dialog of m`,
-  )
+  $.ui.toast(`✦ merged ${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number} · ${method.word}`)
+  $.ui.log(`pr-inbox merged ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${method.word}): you pressed y in the merge panel of m`)
   await refresh($)
+  return ''
 }
 
-// Turns auto-merge on after the person picks a method in a dialog (Cancel selected first): GitHub merges the PR on
-// its own once every review and check passes. Turning it on is pinned to the commit on screen; the merge itself
-// comes later, at whatever commit the PR is at then, as auto-merge stays on through pushes by people with write
-// access. gh merges at once instead when GitHub already finds the PR ready; the dialog says so
-async function enableAutoMerge($: EngineInterface, pr: PR): Promise<void> {
+// Turns auto-merge on with the method picked in the panel: GitHub merges the PR on its own once every review and
+// check passes. Turning it on is pinned to the commit the panel opened with; the merge itself comes later, at
+// whatever commit the PR is at then, as auto-merge stays on through pushes by people with write access. gh merges at
+// once instead when GitHub already finds the PR ready; the panel says so
+async function enableAutoMerge($: EngineInterface, pr: PR, method: Method): Promise<string> {
   const sha = pr.headRefOid.slice(0, 7)
-  if (!REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) {
-    $.ui.toast('Auto-merge failed: unexpected repository name or commit id', { timeoutMs: 8000 })
-    return
-  }
-  const title = fit(pr.title.replace(/["“”]/g, "'"), 80)
-  const why = notReadyShort(pr, fetchedAt || Date.now())
-  let answer = ''
-  try {
-    answer = await $.ui.ask(
-      `Turn auto-merge on for ${pr.repository.nameWithOwner}#${pr.number}${pr.baseRefName ? ` into ${clean(pr.baseRefName)}` : ''} (“${title}”, now at ${sha}: ${why})? GitHub then merges it on its own once every review and check passes, at the commit it is at then; if it is ready already, it merges now.`,
-      { options: ['Cancel', ...Object.keys(MERGE_METHODS)], header: 'Auto-merge' },
-    )
-  } catch {
-    // The dialog was dismissed
-  }
-  await focusPane($)
-  const flag = MERGE_METHODS[answer]
-  if (!flag) return
-  const r = await $.process.run(['gh', 'pr', 'merge', pr.url, '--auto', flag, '--match-head-commit', pr.headRefOid]).catch(ghMissing)
+  const r = await $.process.run(['gh', 'pr', 'merge', pr.url, '--auto', method.flag, '--match-head-commit', pr.headRefOid]).catch(ghMissing)
   if (r.exitCode !== 0) {
     const moved = /head|match|expected/i.test(r.stderr)
     $.ui.toast(
@@ -4628,46 +4699,36 @@ async function enableAutoMerge($: EngineInterface, pr: PR): Promise<void> {
       { timeoutMs: 10000 },
     )
     await refresh($)
-    return
+    return moved ? '' : `auto-merge not turned on: ${fit(clean(r.stderr), 120)}`
   }
-  $.ui.toast(`✦ auto-merge on: ${askLabel(pr)} merges by itself once it is ready · ${answer.toLowerCase()}`)
+  $.ui.toast(`✦ auto-merge on: ${askLabel(pr)} merges by itself once it is ready · ${method.word}`)
   $.ui.log(
-    `pr-inbox turned auto-merge on for ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${answer.toLowerCase()}): you chose it in the dialog of m`,
+    `pr-inbox turned auto-merge on for ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${method.word}): you pressed y in the merge panel of m`,
   )
   await refresh($)
+  return ''
 }
 
-// Turns auto-merge off after the person confirms it in a dialog (Cancel selected first)
-async function disableAutoMerge($: EngineInterface, pr: PR): Promise<void> {
-  if (!REPO_NAME.test(pr.repository.nameWithOwner)) return
-  const off = 'Turn auto-merge off'
-  let answer = ''
-  try {
-    answer = await $.ui.ask(
-      `Auto-merge is on for ${pr.repository.nameWithOwner}#${pr.number} (${autoMergeWord(pr)}): GitHub merges it once every review and check passes. Turn it off?`,
-      { options: ['Cancel', off], header: 'Auto-merge' },
-    )
-  } catch {
-    // The dialog was dismissed
-  }
-  await focusPane($)
-  if (answer !== off) return
+// Turns auto-merge off, after y in its panel
+async function disableAutoMerge($: EngineInterface, pr: PR): Promise<string> {
   const r = await $.process.run(['gh', 'pr', 'merge', pr.url, '--disable-auto']).catch(ghMissing)
   if (r.exitCode !== 0) {
     $.ui.toast(`Auto-merge still on: ${fit(clean(r.stderr), 90)} · refreshed`, { timeoutMs: 10000 })
     await refresh($)
-    return
+    return `auto-merge still on: ${fit(clean(r.stderr), 120)}`
   }
   $.ui.toast(`auto-merge off for ${askLabel(pr)}`)
-  $.ui.log(`pr-inbox turned auto-merge off for ${pr.repository.nameWithOwner}#${pr.number}: you chose it in the dialog of m`)
+  $.ui.log(`pr-inbox turned auto-merge off for ${pr.repository.nameWithOwner}#${pr.number}: you pressed y in the merge panel of m`)
   await refresh($)
+  return ''
 }
 
 // A stacked PR merges with gh stack: the stack from its bottom up to this PR, all or nothing, into the stack's base.
-// A plain merge would land it in the branch below instead. The dialog names every PR that goes (Cancel first)
-async function mergeStack($: EngineInterface, pr: PR): Promise<void> {
+// A plain merge would land it in the branch below instead. The panel names every PR that goes, and says that gh
+// stack cannot be pinned to commits. gh stack is looked for before the panel opens
+async function openStackMerge($: EngineInterface, pr: PR): Promise<void> {
   const stack = pr.stack
-  if (!stack || !REPO_NAME.test(pr.repository.nameWithOwner)) return
+  if (!stack) return
   const version = await $.process.run(['gh', 'stack', '--version']).catch(() => ({ exitCode: 1 }))
   if (version.exitCode !== 0) {
     $.ui.toast('This PR is in a stack: merging it needs gh stack. Install it: gh extension install github/gh-stack', {
@@ -4692,34 +4753,46 @@ async function mergeStack($: EngineInterface, pr: PR): Promise<void> {
     })
     .filter(Boolean)
   const list = goes.map((n) => `#${n.pullRequest.number}`).join(', ')
-  const warn = notReady.length ? ` GitHub may refuse it: ${notReady.join('; ')}.` : ''
-  let answer = ''
-  try {
-    answer = await $.ui.ask(
-      `Merge stack #${stack.number} of ${pr.repository.nameWithOwner} up to #${pr.number} into ${clean(stack.baseRefName)}: ${plural(goes.length, 'PR')} (${list}), all or nothing?${warn}`,
-      { options: ['Cancel', ...Object.keys(MERGE_METHODS)], header: 'Stack merge' },
-    )
-  } catch {
-    // The dialog was dismissed
-  }
-  await focusPane($)
-  const flag = MERGE_METHODS[answer]
-  if (!flag) return
+  openPanel($, {
+    verb: 'merge stack',
+    prs: [pr],
+    title: `stack #${stack.number} of ${pr.repository.nameWithOwner} up to #${pr.number}`,
+    notes: [
+      { text: `${plural(goes.length, 'PR')} go, all or nothing: ${list} → ${clean(stack.baseRefName)}` },
+      ...notReady.map((w) => ({ text: `⚠ GitHub may refuse it: ${w}`, color: 'yellow' as const })),
+      { text: 'Not pinned to commits: gh stack merges each branch as it is when you press y', color: 'yellow' },
+      { text: '⚠ Merging cannot be undone', color: 'yellow' },
+    ],
+    sendsLead: 'y merges stack: ',
+    sends: `${pr.repository.nameWithOwner} stack #${stack.number}: ${list} → ${clean(stack.baseRefName)}, all or nothing ({choice})`,
+    choices: methodChoices(pr),
+    yes: 'merge stack',
+    movedNote: 'gh stack merges it as it is now',
+    progress: '⟳ merging stack… (up to 2 min)',
+    write: { kind: 'merge stack', list },
+  })
+}
+
+async function mergeStack($: EngineInterface, pr: PR, method: Method, list: string): Promise<string> {
+  const stack = pr.stack
+  if (!stack) return ''
   // gh stack has no -R: GH_REPO names the repository, so it works from any directory
-  const r = await $.process.run(['gh', 'stack', 'merge', String(pr.number), '--yes', flag], {
+  const r = await $.process.run(['gh', 'stack', 'merge', String(pr.number), '--yes', method.flag], {
     env: { GH_REPO: pr.repository.nameWithOwner, GH_STACK_NO_UPDATE_NOTIFIER: '1' },
     timeoutMs: 120000,
   })
   if (r.exitCode !== 0) {
+    const why = fit(clean(r.stderr || r.stdout), 120)
     $.ui.toast(`Stack merge failed, nothing merged: ${fit(clean(r.stderr || r.stdout), 90)} · refreshed`, { timeoutMs: 10000 })
     await refresh($)
-    return
+    return `stack merge failed, nothing merged: ${why}`
   }
-  $.ui.toast(`✦ merged stack #${stack.number} up to #${pr.number} (${list}) · ${answer.toLowerCase()}`)
+  $.ui.toast(`✦ merged stack #${stack.number} up to #${pr.number} (${list}) · ${method.word}`)
   $.ui.log(
-    `pr-inbox merged stack #${stack.number} of ${pr.repository.nameWithOwner} up to #${pr.number} (${list}, ${answer.toLowerCase()}): you chose it in the dialog of m`,
+    `pr-inbox merged stack #${stack.number} of ${pr.repository.nameWithOwner} up to #${pr.number} (${list}, ${method.word}): you pressed y in the merge panel of m`,
   )
   await refresh($)
+  return ''
 }
 
 // The GitHub Actions runs behind a PR's failed checks, from their links
@@ -5258,13 +5331,45 @@ export function register(on: On, options: PluginOptions) {
     const body: El[] = p.notes.map((n) => Text({ ...color(n.color), wrap: 'wrap', children: [clean(n.text)] }))
     for (const pr of p.prs.filter(moved))
       body.push(Text({ color: NEON.red, wrap: 'wrap', children: [`✗ ${label(pr)} has new commits since it opened: ${p.movedNote}`] }))
-    const sends = Box({
-      flexDirection: 'row',
-      children: [
-        Text({ color: NEON.muted, children: [p.sendsLead] }),
-        Text({ color: NEON.cyan, bold: true, wrap: 'wrap', children: [p.sends] }),
-      ],
-    })
+    // Until a choice is picked, the line says to pick one; then exactly what y sends, with the choice in it
+    const waiting = p.choices.length > 0 && !p.chosen
+    const sends = waiting
+      ? Text({ color: NEON.yellow, wrap: 'wrap', children: [`${pickText(p)} · then y`] })
+      : Box({
+          flexDirection: 'row',
+          children: [
+            Text({ color: NEON.muted, children: [p.sendsLead] }),
+            Text({ color: NEON.cyan, bold: true, wrap: 'wrap', children: [p.sends.replace('{choice}', chosenWord(p))] }),
+          ],
+        })
+    // The choices, each on its number key: the one picked marked, one not offered here dim (its key says why)
+    const choices = p.choices.length
+      ? [
+          Box({
+            key: 'panel-choices',
+            flexDirection: 'row',
+            flexWrap: 'wrap',
+            columnGap: 2,
+            children: p.choices.map((c) =>
+              Button({
+                key: `panel-choice-${c.key}`,
+                label: `${c.key === p.chosen ? '◉' : '○'} ${c.word}`,
+                hotkey: c.key,
+                plain: true,
+                dimColor: c.refused !== '',
+                ...(c.key === p.chosen ? { color: NEON.cyan, bold: true } : {}),
+                onPress: () => {
+                  if (p.sending) return
+                  if (c.refused) return toast(`${c.key}: ${c.refused}`)
+                  p.chosen = c.key
+                  p.error = ''
+                  redraw()
+                },
+              }),
+            ),
+          }),
+        ]
+      : []
     const status = p.sending
       ? [Text({ color: NEON.cyan, children: [p.progress] })]
       : p.error
@@ -5293,11 +5398,12 @@ export function register(on: On, options: PluginOptions) {
           : []),
       ],
     })
-    const tree: El[] = [head, rule(true), ...body, rule(), ...status, keys]
+    const tree: El[] = [head, rule(true), ...body, rule(), ...choices, ...status, keys]
+    const picks = p.choices.map((c) => `${c.key} ${c.word} · `).join('')
     return Box({
       key: 'panel',
       flexDirection: 'column',
-      children: [...tree, keyCatcher(kit, tree, (k) => `${k}: no such key here · y ${p.verb} · q cancel`, toast)],
+      children: [...tree, keyCatcher(kit, tree, (k) => `${k}: no such key here · ${picks}y ${p.verb} · q cancel`, toast)],
     })
   })
 
@@ -6831,7 +6937,7 @@ export function register(on: On, options: PluginOptions) {
           [
             [
               'm',
-              'ready: merge now, after picking a method (a stack: gh stack merge) · not ready: auto-merge when ready (⇢ AUTO), or off again · also on bot PRs (1)',
+              'ready: merge now in the merge panel: 1/2/3 picks the method, then y (a stack: gh stack merge) · not ready: auto-merge when ready (⇢ AUTO), or off again · also on bot PRs (1)',
             ],
             ['c', 'CI failed: Claude fixes it in a worktree (asks before push), or re-run'],
             ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · s in it sends'],

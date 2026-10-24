@@ -1191,6 +1191,17 @@ async function pressApprove(ui: Pressable, s: Stubs, key = 'act-approve') {
   await answerPanel(ui, s)
 }
 
+// m, then in the merge panel: what it says goes to s.panels, the method key if given, then y (or q)
+async function pressMerge(ui: Pressable, s: Stubs, method?: '1' | '2' | '3', yes = true) {
+  await ui.press({ key: 'act-merge' })
+  for (let i = 0; i < 3; i++) await s.clock.settle()
+  if (!(await ui.find({ key: 'panel' }))) return
+  if (method) await ui.press({ key: `panel-choice-${method}` })
+  s.panels.push(((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? '')
+  await ui.press({ key: yes ? 'panel-yes' : 'panel-cancel' })
+  await settleReview(s)
+}
+
 test('v reviews from each perspective on the review model, then approves after confirmation', async ($, on) => {
   const s = stubs(on, { approve: true })
   await start($, s.clock)
@@ -2312,8 +2323,8 @@ test(
   },
 )
 
-test('m merges a ready PR with the chosen method, pinned to the commit on screen', async ($, on) => {
-  const s = stubs(on, { answer: 'Squash and merge' })
+test('m merges a ready PR with the method picked in the merge panel, pinned to the commit on screen', async ($, on) => {
+  const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
@@ -2322,51 +2333,116 @@ test('m merges a ready PR with the chosen method, pinned to the commit on screen
   await ui.press({ key: 'nav-down' })
   expect(await isSelected(ui, 22)).toBe(true)
   expect((await ui.find({ key: 'act-merge' }))?.props.label).toBe('merge now')
-  await ui.press({ key: 'act-merge' })
-  expect(s.choices.at(-1)).toEqual(['Cancel', 'Squash and merge', 'Create a merge commit', 'Rebase and merge'])
+  await pressMerge(ui, s, '1')
+  expect(s.questions).toEqual([])
+  expect(s.panels.at(-1)).toContain('⚠ Merging cannot be undone')
   expect(s.calls).toContainEqual(['gh', 'pr', 'merge', READY.url, '--squash', '--match-head-commit', HEAD])
   expect(s.calls.some((c) => c.includes('--auto'))).toBe(false)
-  expect(s.logs.some((l) => l.includes('pr-inbox merged acme/app#22'))).toBe(true)
+  expect(s.logs.some((l) => l.includes('pr-inbox merged acme/app#22 at aaaaaaa (squash): you pressed y in the merge panel of m'))).toBe(
+    true,
+  )
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
   await ui.unmount()
 })
 
-test('m on a PR that is not ready turns auto-merge on with the chosen method, pinned to the commit on screen', async ($, on) => {
-  const s = stubs(on, { answer: 'Squash and merge' })
+test('the merge panel picks no method for you: y waits for 1, 2 or 3, and the line says what y will send', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'nav-down' })
+  await ui.press({ key: 'act-merge' })
+  const text = async () => ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+  expect(await text()).toContain('pick a method: 1 squash · 2 merge commit · 3 rebase · then y')
+  // y (and m again) merge nothing before a method is picked
+  await ui.press({ key: 'panel-yes' })
+  expect(s.toasts.at(-1)).toBe('y: pick a method: 1 squash · 2 merge commit · 3 rebase first')
+  await ui.press({ key: 'unbound-m' })
+  expect(s.calls.some((c) => c[2] === 'merge')).toBe(false)
+  await ui.press({ key: 'panel-choice-3' })
+  expect(await text()).toContain('y merges: acme/app#22 at aaaaaaa (rebase)')
+  await ui.press({ key: 'panel-cancel' })
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
+  expect(s.calls.some((c) => c[2] === 'merge')).toBe(false)
+  await ui.unmount()
+})
+
+test('a merge method the repository does not allow is dim and its key says why; one allowed is still not picked', async ($, on) => {
+  const squashOnly = pr({
+    ...READY,
+    repository: { nameWithOwner: 'acme/app', squashMergeAllowed: true, mergeCommitAllowed: false, rebaseMergeAllowed: false },
+  })
+  const s = stubs(on, {
+    graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [squashOnly] } } }),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-merge' })
+  expect((await ui.find({ key: 'panel-choice-2' }))?.props.dimColor).toBe(true)
+  await ui.press({ key: 'panel-choice-2' })
+  expect(s.toasts.at(-1)).toBe('2: acme/app does not allow merge commits (repository settings)')
+  await ui.press({ key: 'panel-yes' })
+  expect(s.calls.some((c) => c[2] === 'merge')).toBe(false)
+  await ui.press({ key: 'panel-choice-1' })
+  await ui.press({ key: 'panel-yes' })
+  await settleReview(s)
+  expect(s.calls).toContainEqual(['gh', 'pr', 'merge', READY.url, '--squash', '--match-head-commit', HEAD])
+  await ui.unmount()
+})
+
+test('m on a PR that is not ready turns auto-merge on with the method picked, pinned to the commit on screen', async ($, on) => {
+  const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   await ui.press({ key: 'nav-down' })
   await ui.press({ key: 'nav-down' })
   expect(await isSelected(ui, 23)).toBe(true)
-  await ui.press({ key: 'act-merge' })
-  expect(s.questions.at(-1)).toContain('Turn auto-merge on for acme/app#23 (“レビュー待ち”, now at aaaaaaa: waiting for reviews)?')
-  expect(s.choices.at(-1)).toEqual(['Cancel', 'Squash and merge', 'Create a merge commit', 'Rebase and merge'])
+  await pressMerge(ui, s, '1')
+  expect(s.panels.at(-1)).toContain('Not ready yet: waiting for reviews')
+  expect(s.panels.at(-1)).toContain('GitHub then merges it on its own once every review and check passes')
   expect(s.calls).toContainEqual(['gh', 'pr', 'merge', WAITING.url, '--auto', '--squash', '--match-head-commit', HEAD])
   expect(s.toasts.at(-1)).toContain('auto-merge on: app#23')
-  expect(s.logs.some((l) => l.includes('pr-inbox turned auto-merge on for acme/app#23 at aaaaaaa (squash and merge)'))).toBe(true)
+  expect(s.logs.some((l) => l.includes('pr-inbox turned auto-merge on for acme/app#23 at aaaaaaa (squash)'))).toBe(true)
   await ui.unmount()
 })
 
-test('auto-merge is not turned on when the dialog is cancelled, or when the PR moved', async ($, on) => {
-  const s = stubs(on, { answer: 'Cancel', stderr: 'Head branch was modified (expected head sha)', fail: ['gh pr'] })
+test('auto-merge is not turned on when the panel is cancelled, or when the PR moved', async ($, on) => {
+  const s = stubs(on, { stderr: 'Head branch was modified (expected head sha)', fail: ['gh pr'] })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   await ui.press({ key: 'nav-down' })
   await ui.press({ key: 'nav-down' })
-  await ui.press({ key: 'act-merge' })
+  await pressMerge(ui, s, '2', false)
   expect(s.calls.some((c) => c[2] === 'merge')).toBe(false)
-  s.setAnswer('Create a merge commit')
-  await ui.press({ key: 'act-merge' })
+  await pressMerge(ui, s, '2')
   expect(s.calls).toContainEqual(['gh', 'pr', 'merge', WAITING.url, '--auto', '--merge', '--match-head-commit', HEAD])
   expect(s.toasts.at(-1)).toContain('Auto-merge not turned on: app#23 has new commits since aaaaaaa')
+  // Moved: the panel closes and the list is fetched again
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
   await ui.unmount()
 })
 
-test('a PR with auto-merge on says so, and m turns it off after a dialog', async ($, on) => {
+test('a merge GitHub refuses for another reason stays in the panel with the reason, and y tries again', async ($, on) => {
+  const s = stubs(on, { stderr: 'Pull request is not mergeable: required status check "lint" has not run', fail: ['gh pr'] })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'nav-down' })
+  await pressMerge(ui, s, '1')
+  const panel = (await ui.find({ key: 'panel' })) as { text?: string } | undefined
+  expect(panel?.text).toContain(
+    '✗ Not sent: not merged: Pull request is not mergeable: required status check "lint" has not run · y: try again · q: cancel',
+  )
+  expect((await ui.find({ key: 'panel-yes' }))?.props.label).toBe('try again')
+  await ui.unmount()
+})
+
+test('a PR with auto-merge on says so, and m turns it off after y in its panel', async ($, on) => {
   const auto = pr({ ...WAITING, autoMergeRequest: { mergeMethod: 'SQUASH' } })
   const s = stubs(on, {
-    answer: 'Cancel',
     graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [auto] } } }),
   })
   await start($, s.clock)
@@ -2378,11 +2454,10 @@ test('a PR with auto-merge on says so, and m turns it off after a dialog', async
   expect((await ui.find({ key: 'act-merge' }))?.props.label).toBe('auto-merge off')
   // The row says so at a glance
   expect(await lineOf(ui, 23)).toContain('⇢ AUTO')
-  await ui.press({ key: 'act-merge' })
-  expect(s.choices.at(-1)).toEqual(['Cancel', 'Turn auto-merge off'])
+  await pressMerge(ui, s, undefined, false)
+  expect(s.panels.at(-1)).toContain('y turns auto-merge off: acme/app#23 (squash)')
   expect(s.calls.some((c) => c[2] === 'merge')).toBe(false)
-  s.setAnswer('Turn auto-merge off')
-  await ui.press({ key: 'act-merge' })
+  await pressMerge(ui, s)
   expect(s.calls).toContainEqual(['gh', 'pr', 'merge', WAITING.url, '--disable-auto'])
   expect(s.logs.some((l) => l.includes('pr-inbox turned auto-merge off for acme/app#23'))).toBe(true)
   await ui.unmount()
@@ -2438,7 +2513,6 @@ test('m merges a bot review request you approved, offers auto-merge on one still
     ...requested('2026-10-02T00:00:00Z', 'me'),
   })
   const s = stubs(on, {
-    answer: 'Squash and merge',
     graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [HUMAN, BOT, readyBot] }, mine: { nodes: [] } } }),
   })
   await start($, s.clock)
@@ -2459,20 +2533,21 @@ test('m merges a bot review request you approved, offers auto-merge on one still
   expect(await isSelected(ui, 14)).toBe(true)
   expect((await ui.find({ key: 'act-merge' }))?.props.label).toBe('merge now')
   expect(await hotkeysOf(ui, 'footer')).toEqual(['d', 'a', 'm', 'v', 'e', 'p', 'o', 'i', 'x', 'y'])
-  await ui.press({ key: 'act-merge' })
-  expect(s.questions.at(-1)).toContain('Merge acme/app#14 now, at aaaaaaa')
+  await pressMerge(ui, s, '1')
+  expect(s.panels.at(-1)).toContain('y merges: acme/app#14 at aaaaaaa')
   expect(s.calls).toContainEqual(['gh', 'pr', 'merge', readyBot.url, '--squash', '--match-head-commit', HEAD])
   expect(s.logs.some((l) => l.includes('pr-inbox merged acme/app#14'))).toBe(true)
   await ui.unmount()
 })
 
-test('m does nothing when the dialog is cancelled', async ($, on) => {
-  const s = stubs(on, { answer: 'Cancel' })
+test('m does nothing when the merge panel is cancelled', async ($, on) => {
+  const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   await ui.press({ key: 'nav-down' })
-  await ui.press({ key: 'act-merge' })
+  await pressMerge(ui, s, '1', false)
+  expect(s.panels.length).toBe(1)
   expect(s.calls.some((c) => c[2] === 'merge')).toBe(false)
   await ui.unmount()
 })
@@ -2939,15 +3014,17 @@ test('a stack is listed together, bottom first, where its most urgent member sta
 })
 
 test('m on a stacked PR merges the stack up to it with gh stack, naming every PR that goes', async ($, on) => {
-  const s = stubs(on, { graphql: stackGraphql, answer: 'Squash and merge' })
+  const s = stubs(on, { graphql: stackGraphql })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   await ui.press({ key: 'nav-down' })
   expect(await isSelected(ui, 72)).toBe(true)
-  await ui.press({ key: 'act-merge' })
-  expect(s.questions.at(-1)).toContain('Merge stack #70 of acme/app up to #72 into main: 2 PRs (#71, #72), all or nothing?')
-  expect(s.choices.at(-1)?.[0]).toBe('Cancel')
+  await pressMerge(ui, s, '1')
+  expect(s.panels.at(-1)).toContain('merge stackstack #70 of acme/app up to #72')
+  expect(s.panels.at(-1)).toContain('2 PRs go, all or nothing: #71, #72 → main')
+  expect(s.panels.at(-1)).toContain('Not pinned to commits: gh stack merges each branch as it is when you press y')
+  expect(s.panels.at(-1)).toContain('y merges stack: acme/app stack #70: #71, #72 → main, all or nothing (squash)')
   const i = s.calls.findIndex((c) => c[1] === 'stack' && c[2] === 'merge')
   expect(s.calls[i]).toEqual(['gh', 'stack', 'merge', '72', '--yes', '--squash'])
   expect(s.envs[i]?.GH_REPO).toBe('acme/app')
@@ -2957,12 +3034,14 @@ test('m on a stacked PR merges the stack up to it with gh stack, naming every PR
 })
 
 test('without gh stack, m on a stacked PR says how to install it and merges nothing', async ($, on) => {
-  const s = stubs(on, { graphql: stackGraphql, answer: 'Squash and merge', fail: ['gh stack'] })
+  const s = stubs(on, { graphql: stackGraphql, fail: ['gh stack'] })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  await ui.press({ key: 'act-merge' })
+  await pressMerge(ui, s, '1')
   expect(s.toasts.at(-1)).toContain('gh extension install github/gh-stack')
+  // Looked for before the panel opens
+  expect(s.panels).toEqual([])
   expect(s.calls.some((c) => c.includes('merge'))).toBe(false)
   await ui.unmount()
 })
@@ -3167,18 +3246,18 @@ test('a PR from a long-lived branch is no stack: PRs into develop do not sit on 
   await ui.unmount()
 })
 
-test('m on a PR stacked by hand merges it alone into its base branch, which the dialog names', async ($, on) => {
+test('m on a PR stacked by hand merges it alone into its base branch, which the panel names', async ($, on) => {
   const bottom = onBranch(91, 'develop', 'feat-a', { reviewDecision: 'APPROVED' })
   const middle = onBranch(92, 'feat-a', 'feat-b', { reviewDecision: 'APPROVED' })
-  const s = stubs(on, { graphql: graphqlOf([], [bottom, middle]), answer: 'Squash and merge' })
+  const s = stubs(on, { graphql: graphqlOf([], [bottom, middle]) })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   await ui.press({ key: 'nav-down' })
   expect(await isSelected(ui, 92)).toBe(true)
   expect((await ui.find({ key: 'act-merge' }))?.props.label).toBe('merge now')
-  await ui.press({ key: 'act-merge' })
-  expect(s.questions.at(-1)).toContain('Merge acme/app#92 into feat-a now, at aaaaaaa')
+  await pressMerge(ui, s, '1')
+  expect(s.panels.at(-1)).toContain('y merges: acme/app#92 at aaaaaaa into feat-a (squash)')
   expect(s.calls).toContainEqual(['gh', 'pr', 'merge', middle.url, '--squash', '--match-head-commit', HEAD])
   expect(s.calls.some((c) => c[1] === 'stack')).toBe(false)
   await ui.unmount()
@@ -3992,7 +4071,6 @@ test('the approve panel after b shows each bot PR with its review warnings', asy
 
 test('a merge refused because the PR moved says so and fetches again', async ($, on) => {
   const s = stubs(on, {
-    answer: 'Squash and merge',
     fail: ['gh pr'],
     stderr: 'Head branch was modified. Review and try the merge again (expected head sha)',
   })
@@ -4001,7 +4079,7 @@ test('a merge refused because the PR moved says so and fetches again', async ($,
   await ui.press({ key: 'tab-mine' })
   await ui.press({ key: 'nav-down' })
   const fetches = s.calls.filter((c) => c.includes('graphql')).length
-  await ui.press({ key: 'act-merge' })
+  await pressMerge(ui, s, '1')
   expect(s.toasts.at(-1)).toContain('Not merged: app#22 has new commits since')
   expect(s.calls.filter((c) => c.includes('graphql')).length).toBe(fetches + 1)
   await ui.unmount()
