@@ -3367,7 +3367,7 @@ async function loadCandidates($: EngineInterface, p: Picker): Promise<void> {
     p.candidates = { at: await $.clock.now(), rows: ranked.rows, usual: ranked.usual, teams }
     candidateCache.set(repo, p.candidates)
   }
-  // Nobody asked or reviewed yet, in a repository reviewed by a team: that team is checked, so s alone asks it. After
+  // Nobody asked or reviewed yet, in a repository reviewed by a team: that team is checked, so y alone asks it. After
   // reviews, asking whoever reviewed comes first (their team would pick someone else)
   if (onPrRows(p.pr).length === 0 && p.want.size === 0) for (const id of p.candidates.usual.slice(0, 1)) p.want.set(id, true)
   p.loading = false
@@ -3393,7 +3393,7 @@ async function openPicker($: EngineInterface, pr: PR): Promise<void> {
     error: '',
     sending: false,
   }
-  // Asking again whoever reviewed an older commit is what w is for then: checked, so s alone does it
+  // Asking again whoever reviewed an older commit is what w is for then: checked, so y alone does it
   for (const id of askAgain(pr)) p.want.set(id, true)
   picker = p
   $.ui.invalidate('ui.render')
@@ -3486,8 +3486,9 @@ async function searchReviewers($: EngineInterface, p: Picker, query: string): Pr
 async function sendReviewers($: EngineInterface, p: Picker, viaS = false): Promise<void> {
   const plan = pickerPlan(p)
   const asking = [...plan.add, ...plan.again]
+  const moved = viaS ? ' · use y to send (s stops working in a later version)' : ''
   if (asking.length === 0 && plan.remove.length === 0) {
-    $.ui.toast('Nothing to send · x: check someone, or uncheck to take a request back', { timeoutMs: 4000 })
+    $.ui.toast(`Nothing to send · x: check someone, or uncheck to take a request back${moved}`, { timeoutMs: 4000 })
     return
   }
   const pr = p.pr
@@ -3538,13 +3539,12 @@ async function sendReviewers($: EngineInterface, p: Picker, viaS = false): Promi
     plan.remove.length ? `removed ${plan.remove.map(atName).join(', ')}` : '',
   ].filter(Boolean)
   const teams = plan.add.filter(isTeamId).filter((id) => p.candidates?.teams.get(id)?.assigns !== false)
-  const moved = viaS ? ' · y sends from now on (s stops in a later version)' : ''
   if (teams.length === 0) {
     $.ui.toast(`${capitalize(said.join(' · '))} on ${label}${moved}`, { timeoutMs: 6000 })
     await fetchReviewState($, pr)
     return
   }
-  $.ui.toast(`${capitalize(said.join(' · '))} on ${label} · ⟳ waiting for ${teams.map(atName).join(', ')} to pick a reviewer…${moved}`, {
+  $.ui.toast(`${capitalize(said.join(' · '))} on ${label}${moved} · ⟳ waiting for ${teams.map(atName).join(', ')} to pick a reviewer…`, {
     timeoutMs: 6000,
   })
   void watchAssignment($, pr, teams, new Set([...before, ...asking]))
@@ -5901,7 +5901,7 @@ export function register(on: On, options: PluginOptions) {
           p.searching = true
           redraw()
         }),
-        key('pick-send', 'send', 'y', () => void sendReviewers($, p)),
+        key('pick-send', 'send', 'y', () => void sendReviewers($, p), !planned),
         key('pick-open', 'open on GitHub', 'o', async () => void (await $.process.run(['gh', 'pr', 'view', pr.url, '--web'])), true),
         key('pick-back', p.fromReader ? 'back to the PR' : 'back to list', 'q', back),
       ],
