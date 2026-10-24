@@ -16,6 +16,12 @@ claude -p "/pr-inbox refresh" --plugin-dir .   # smoke test against real GitHub 
 
 Run `pnpm run check` before every commit; all of it must pass. `claude plugin validate` does not catch everything the loader refuses (for example a function given `$` that shares a name with another binding): also load the mod for real, `claude -p "/pr-inbox refresh" --plugin-dir .` must print the counts.
 
+## UX review
+
+Before creating a PR that changes what users see (`hooks/`, `.claude-plugin/plugin.json`, `README.md`, `scripts/demo/`), the `ux-reviewer` subagent (`.claude/agents/ux-reviewer.md`, read-only) reviews `git diff origin/main...HEAD`, and the session applies its findings that are valid and consistent with this file (the security rules below always win; say in the PR body what was changed or skipped and why), then runs `pnpm run check` and commits.
+
+The project's `PreToolUse` hook (`.claude/settings.json` → `.claude/hooks/ux-review-gate.sh`) enforces it: `gh pr create` is denied until the current HEAD is marked as reviewed. Mark it with `.claude/hooks/ux-review-gate.sh mark` after the review's changes are committed; the marker lives under `.git` (`git rev-parse --git-path ux-review`), so any later commit needs another review.
+
 ## Layout
 
 - `hooks/register.ts` — the whole mod. Loaded as TypeScript directly; there is no build step
