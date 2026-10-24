@@ -1,7 +1,7 @@
 {
   "name": "pr-inbox",
-  "version": "1.9.0",
-  "description": "An inbox for review requests and your own PRs: AI summary and risk, an AI review that can approve, a reader for the description and diff, asking reviewers (teams that assign too), merging (gh stack too) and CI fixes with Claude",
+  "version": "1.10.0",
+  "description": "An inbox for review requests, your own PRs and the issues assigned to you: AI summary and risk, an AI review that can approve, a reader for the description and diff, asking reviewers (teams that assign too), merging (gh stack too) and CI fixes with Claude",
   "author": {
     "name": "2bo"
   },
@@ -10,7 +10,7 @@
     "org_filter": {
       "type": "string",
       "title": "Organization",
-      "description": "Only show PRs in this GitHub organization, such as my-org. Leave empty for all",
+      "description": "Only show PRs and issues in this GitHub organization, such as my-org. Leave empty for all",
       "default": ""
     },
     "stale_days": {
@@ -46,7 +46,7 @@
     "desktop_notify": {
       "type": "string",
       "title": "OS notifications",
-      "description": "Also raise an OS notification (macOS or Linux) for: review requests (new review requests), all (also approvals, changes requested and CI failures on your PRs) or off. Toasts inside Claude Code always show",
+      "description": "Also raise an OS notification (macOS or Linux) for: review requests (new review requests), all (also approvals, changes requested and CI failures on your PRs, and issues newly assigned to you) or off. Toasts inside Claude Code always show",
       "default": "review requests",
       "options": ["review requests", "all", "off"]
     },

@@ -471,6 +471,24 @@ const withRequests = (p) => {
   return s ? { ...p, reviewRequests: { nodes: s.asked.map((w) => ({ requestedReviewer: w })) }, requestEvents: { nodes: s.events } } : p
 }
 const WEB_TEAM = ['lena-park', 'mtanaka', 'rkumar']
+// Open issues assigned to you (tab 3)
+const issue = (repo, number, title, author, hours, labels, comments) => ({
+  number,
+  title,
+  url: `https://github.com/acme/${repo}/issues/${number}`,
+  createdAt: ago(hours + 24 * 5),
+  updatedAt: ago(hours),
+  repository: { nameWithOwner: `acme/${repo}` },
+  author: { login: author },
+  labels: { nodes: labels.map((name) => ({ name })) },
+  comments: { totalCount: comments },
+})
+const ASSIGNED = [
+  issue('storefront', 512, 'Checkout button stays disabled after a coupon is removed', 'lena-park', 3, ['bug', 'checkout'], 4),
+  issue('billing-api', 233, 'Retry webhook deliveries with backoff', 'rkumar', 30, ['enhancement'], 1),
+  issue('storefront', 498, 'Document the feature flag rollout steps', 'mtanaka', 24 * 9, ['docs'], 0),
+]
+
 const PEOPLE = [
   { login: 'lena-park', name: 'Lena Park' },
   { login: 'mtanaka', name: 'Mei Tanaka' },
@@ -529,7 +547,7 @@ if (args[0] === 'api' && args[1] === 'graphql') {
   } else if (query.includes('...asked') && !query.includes('search(')) {
     out({ data: { repository: { pullRequest: mineHere ? state(mineHere) : null } } })
   } else {
-    out({ data: { viewer: { login: 'you' }, review: { nodes: REVIEW }, mine: { nodes: MINE.map(withRequests) }, approved: { nodes: APPROVED } } })
+    out({ data: { viewer: { login: 'you' }, review: { nodes: REVIEW }, mine: { nodes: MINE.map(withRequests) }, approved: { nodes: APPROVED }, assigned: { nodes: ASSIGNED } } })
   }
 } else if (args[0] === 'api' && args.some((a) => /\/pulls\/\d+\/requested_reviewers$/.test(a))) {
   // Asking for reviews (w): remembered for the demo, so the list and the picker show it

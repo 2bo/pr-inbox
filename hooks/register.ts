@@ -65,6 +65,19 @@ type PR = {
   requestEvents?: { nodes: (RequestEvent | null)[] }
 }
 
+// An open issue assigned to you (only listed: it never reaches a model, and nothing in the pane writes to it)
+type Issue = {
+  number: number
+  title: string
+  url: string
+  createdAt: string
+  updatedAt: string
+  repository: { nameWithOwner: string }
+  author: { login: string } | null
+  labels?: { nodes: ({ name: string } | null)[] }
+  comments?: { totalCount: number }
+}
+
 // Someone asked to review: a person (login) or a team (combinedSlug, "org/slug")
 type Reviewer = { __typename: string; login?: string; combinedSlug?: string }
 type RequestEvent = { __typename: string; createdAt: string; requestedReviewer: Reviewer | null }
@@ -123,7 +136,7 @@ type Config = {
 }
 
 // The previous fetch, kept in $.store to spot new review requests and state changes
-type Snapshot = { review: string[]; mine: Record<string, string> }
+type Snapshot = { review: string[]; mine: Record<string, string>; assigned?: string[] }
 
 type Risk = 'low' | 'medium' | 'high'
 
@@ -218,11 +231,19 @@ const ASKED_FRAGMENT = `fragment asked on PullRequest {
 }
 fragment who on RequestedReviewer { __typename ... on User { login } ... on Team { combinedSlug } }`
 
-const QUERY = `query($review: String!, $mine: String!, $approved: String!) {
+const QUERY = `query($review: String!, $mine: String!, $approved: String!, $assigned: String!) {
   viewer { login }
   review: search(query: $review, type: ISSUE, first: 50) { nodes { ...pr ...checks ...requested } }
   mine: search(query: $mine, type: ISSUE, first: 50) { nodes { ...pr ...checks ...reviewed ...asked } }
   approved: search(query: $approved, type: ISSUE, first: 50) { nodes { ...pr ...checks ...reviewed } }
+  assigned: search(query: $assigned, type: ISSUE, first: 50) { nodes { ...issue } }
+}
+fragment issue on Issue {
+  number title url createdAt updatedAt
+  repository { nameWithOwner }
+  author { login }
+  labels(first: 5) { nodes { name } }
+  comments { totalCount }
 }
 ${REVIEWED_FRAGMENT}
 ${ASKED_FRAGMENT}
@@ -361,7 +382,7 @@ function labels(): Labels {
 }
 
 // Pane state
-let tab: 'review' | 'mine' = 'review'
+let tab: 'review' | 'mine' | 'issues' = 'review'
 // The PR whose details (the AI review's findings) are open, the key help, and snoozed PRs shown
 let expanded = ''
 // How far the details panel is paged down (n), for which PR and which view; another PR or view starts at the top
@@ -384,6 +405,8 @@ let review: PR[] = []
 // Open PRs by others whose latest review from you is an approval: not merged yet, and why
 let approved: PR[] = []
 let mine: PR[] = []
+// Open issues assigned to you, most recently updated first
+let assigned: Issue[] = []
 let fetchedAt = 0
 let loading = false
 let error = ''
@@ -441,6 +464,27 @@ function safeHref(url: string | null | undefined): string | undefined {
     return u.href.length <= 2048 && /^[\x21-\x7e]+$/.test(u.href) ? u.href : undefined
   } catch {
     return undefined
+  }
+}
+
+// Sanitize every string of an issue that gets drawn
+function cleanIssue(issue: Issue): Issue {
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  return {
+    number: Number(issue.number) || 0,
+    title: clean(str(issue.title)),
+    url: str(issue.url),
+    createdAt: str(issue.createdAt),
+    updatedAt: str(issue.updatedAt),
+    repository: { nameWithOwner: clean(str(issue.repository?.nameWithOwner)) },
+    author: issue.author ? { login: clean(str(issue.author.login)) } : null,
+    labels: {
+      nodes: (issue.labels?.nodes ?? [])
+        .map((l) => clean(str(l?.name)))
+        .filter(Boolean)
+        .map((name) => ({ name })),
+    },
+    comments: { totalCount: Number(issue.comments?.totalCount) || 0 },
   }
 }
 
@@ -847,7 +891,7 @@ function summary(g: Record<Group, PR[]>): string {
     ...part(g.ready.length, `✓${g.ready.length} ready`),
     ...part(g.waiting.length, `…${g.waiting.length} in review`),
   ]
-  return `${left.join(' · ')} │ my PRs ${right.length ? right.join(' · ') : mine.length}`
+  return `${left.join(' · ')} │ my PRs ${right.length ? right.join(' · ') : mine.length}${assigned.length ? ` │ issues ${assigned.length}` : ''}`
 }
 
 // Time since the request
@@ -943,6 +987,7 @@ function findPr(url: string): PR | undefined {
 
 // PRs visible on the current tab, in screen order (what j/k move through)
 function visibleRows(g: Record<Group, PR[]>): PR[] {
+  if (tab === 'issues') return []
   const rows =
     tab === 'review'
       ? [...g.humans, ...g.bots, ...g.approved, ...(showSnoozed ? g.snoozedReview : [])]
@@ -950,24 +995,25 @@ function visibleRows(g: Record<Group, PR[]>): PR[] {
   return groupStacks(rows.filter(matchesFilter))
 }
 
-// Every word of the filter must appear in the PR's repository, number, title or author
-function matchesFilter(pr: PR): boolean {
+// Every word of the filter must appear in the PR's (or issue's) repository, number, title or author, or an issue's labels
+function matchesFilter(item: PR | Issue): boolean {
   const words = filterText.toLowerCase().split(/\s+/).filter(Boolean)
   if (words.length === 0) return true
-  const hay = `${pr.repository.nameWithOwner}#${pr.number} ${pr.title} @${pr.author?.login ?? ''}`.toLowerCase()
+  const labels = 'labels' in item ? (item.labels?.nodes ?? []).map((l) => l?.name ?? '').join(' ') : ''
+  const hay = `${item.repository.nameWithOwner}#${item.number} ${item.title} @${item.author?.login ?? ''} ${labels}`.toLowerCase()
   return words.every((w) => hay.includes(w))
 }
 
 // Where the selection last stood, so a PR that leaves the list (approved, merged, snoozed, gone on a refresh) hands
 // the selection to the one that takes its place, not to the top
 let selectedAt = 0
-function ensureSelection(rows: PR[]): void {
+function ensureSelection(rows: { url: string }[]): void {
   const i = rows.findIndex((p) => p.url === selected)
   if (i >= 0) selectedAt = i
   else selected = rows[Math.min(selectedAt, rows.length - 1)]?.url ?? ''
 }
 
-function moveSelection(rows: PR[], delta: number): void {
+function moveSelection(rows: { url: string }[], delta: number): void {
   if (rows.length === 0) return
   const i = rows.findIndex((p) => p.url === selected)
   selected = rows[Math.min(rows.length - 1, Math.max(0, i + delta))]?.url ?? ''
@@ -978,10 +1024,10 @@ function moveSelection(rows: PR[], delta: number): void {
 // A GitHub organization name, so the setting cannot add other search qualifiers
 const ORG_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
 
-function searchQuery(filter: string): string {
+function searchQuery(filter: string, kind: 'pr' | 'issue' = 'pr'): string {
   const org = cfg.org_filter.trim()
   if (org && !ORG_NAME.test(org)) throw new Error(`org_filter is not an organization name: ${org}`)
-  return `is:pr is:open archived:false ${filter}${org ? ` org:${org}` : ''}`
+  return `is:${kind} is:open archived:false ${filter}${org ? ` org:${org}` : ''}`
 }
 
 // Called during a fetch, wait for that fetch instead of starting another
@@ -999,6 +1045,7 @@ async function fetchAll($: EngineInterface): Promise<void> {
     const reviewQuery = searchQuery('review-requested:@me')
     const mineQuery = searchQuery('author:@me')
     const approvedQuery = searchQuery('reviewed-by:@me -author:@me')
+    const assignedQuery = searchQuery('assignee:@me', 'issue')
     const r = await $.process.run([
       'gh',
       'api',
@@ -1011,6 +1058,8 @@ async function fetchAll($: EngineInterface): Promise<void> {
       `mine=${mineQuery}`,
       '-f',
       `approved=${approvedQuery}`,
+      '-f',
+      `assigned=${assignedQuery}`,
     ])
     if (r.exitCode !== 0) throw new Error(r.stderr.trim() || `gh exited with code ${r.exitCode}`)
     const data = JSON.parse(r.stdout).data as {
@@ -1018,6 +1067,7 @@ async function fetchAll($: EngineInterface): Promise<void> {
       review: { nodes: (PR | null)[] }
       mine: { nodes: (PR | null)[] }
       approved?: { nodes: (PR | null)[] }
+      assigned?: { nodes: (Issue | null)[] }
     }
     viewer = data.viewer?.login ?? ''
     // Search results can contain nulls for PRs we have no access to
@@ -1028,6 +1078,10 @@ async function fetchAll($: EngineInterface): Promise<void> {
       .filter((n): n is PR => Boolean(n?.url))
       .map(cleanPr)
       .filter((p) => myApproval(p) !== undefined && !review.some((r) => r.url === p.url))
+    assigned = (data.assigned?.nodes ?? [])
+      .filter((n): n is Issue => Boolean(n?.url))
+      .map(cleanIssue)
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
     // A description that could not be fetched is tried again after each fetch of the list
     for (const [url, a] of abouts) if (a.error) abouts.delete(url)
     fetchedAt = await $.clock.now()
@@ -1110,6 +1164,7 @@ async function notifyChanges($: EngineInterface): Promise<void> {
   const snapshot: Snapshot = {
     review: review.filter((p) => !isBot(p)).map((p) => p.url),
     mine: Object.fromEntries(mine.map((p) => [p.url, `${p.reviewDecision ?? ''}|${ciState(p)}`])),
+    assigned: assigned.map((i) => i.url),
   }
   await $.store.set('snapshot', snapshot)
   // The first fetch only sets the baseline
@@ -1128,7 +1183,11 @@ async function notifyChanges($: EngineInterface): Promise<void> {
     if ((ci === 'FAILURE' || ci === 'ERROR') && !/\|(FAILURE|ERROR)$/.test(prev))
       changed.push(`✗ CI failed: ${p.repository.nameWithOwner}#${p.number}`)
   }
-  const messages = [...requested, ...changed]
+  // A snapshot from before issues were listed has none: those already assigned are not new
+  const newlyAssigned = before.assigned
+    ? assigned.filter((i) => !before.assigned?.includes(i.url)).map((i) => `📌 Assigned: ${i.repository.nameWithOwner}#${i.number}`)
+    : []
+  const messages = [...requested, ...changed, ...newlyAssigned]
   if (messages.length > 0) {
     const rest = messages.length > 3 ? ` and ${messages.length - 3} more` : ''
     $.ui.toast(messages.slice(0, 3).join('  ') + rest, { timeoutMs: 8000 })
@@ -1142,7 +1201,7 @@ async function notifyChanges($: EngineInterface): Promise<void> {
     : requested.length > 0
       ? [`${fresh.length} review requests: ${fresh.map((p) => `${p.repository.nameWithOwner}#${p.number}`).join(', ')}`]
       : []
-  if (cfg.desktop_notify === 'all') lines.push(...changed)
+  if (cfg.desktop_notify === 'all') lines.push(...changed, ...newlyAssigned)
   if (lines.length > 0) await desktopNotify($, 'PR Inbox', fit(lines.join(' · '), 200))
 }
 
@@ -6466,7 +6525,8 @@ export function register(on: On, options: PluginOptions) {
     const now = fetchedAt || Date.now()
     const g = groups(now)
     const rows = visibleRows(g)
-    ensureSelection(rows)
+    // The issues tab keeps its own rows (below)
+    if (tab !== 'issues') ensureSelection(rows)
 
     // Learn the pane height. Docked beside the conversation, bodyRows is the height.
     // Above the prompt, the bodyRows seen when the previous render overflowed is the limit
@@ -6512,6 +6572,7 @@ export function register(on: On, options: PluginOptions) {
     const helpLabel = showHelp ? 'close help' : '?'
     const reviewTabLabel = `${tab === 'review' ? '◉ ' : ''}to review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`
     const mineTabLabel = `${tab === 'mine' ? '◉ ' : ''}my PRs ${mine.length}`
+    const issuesTabLabel = `${tab === 'issues' ? '◉ ' : ''}issues ${assigned.length}`
     const tabButton = (name: typeof tab, label: string, hotkey: string) =>
       Button({
         key: `tab-${name}`,
@@ -6525,7 +6586,7 @@ export function register(on: On, options: PluginOptions) {
           redraw()
         },
       })
-    const TABS: (typeof tab)[] = ['review', 'mine']
+    const TABS: (typeof tab)[] = ['review', 'mine', 'issues']
     const switchTab = (by: number) => {
       const i = TABS.indexOf(tab)
       const to = TABS[Math.min(TABS.length - 1, Math.max(0, i + by))] ?? tab
@@ -6535,7 +6596,15 @@ export function register(on: On, options: PluginOptions) {
       redraw()
     }
     // Widths of the top rows' items, to know how many lines they take once wrapped
-    const row1 = [LOGO, `1: ${reviewTabLabel}`, `2: ${mineTabLabel}`, `r: ${refreshLabel}`, `f: ${filterLabel}`, `u: ${helpLabel}`]
+    const row1 = [
+      LOGO,
+      `1: ${reviewTabLabel}`,
+      `2: ${mineTabLabel}`,
+      `3: ${issuesTabLabel}`,
+      `r: ${refreshLabel}`,
+      `f: ${filterLabel}`,
+      `u: ${helpLabel}`,
+    ]
     let topLines = wrappedRowLines(row1.map(textWidth), 2, columns)
     const top: El[] = [
       // Rows wrap as whole buttons on a narrow pane instead of breaking words
@@ -6557,6 +6626,7 @@ export function register(on: On, options: PluginOptions) {
           }),
           tabButton('review', reviewTabLabel, '1'),
           tabButton('mine', mineTabLabel, '2'),
+          tabButton('issues', issuesTabLabel, '3'),
           small('refresh', refreshLabel, 'r', () => refresh($)),
           small('filter', filterLabel, 'f', () => {
             filtering = !filtering
@@ -6598,7 +6668,7 @@ export function register(on: On, options: PluginOptions) {
         Input({
           key: 'filter-input',
           label: 'Filter',
-          placeholder: 'repository, number, title or @author',
+          placeholder: tab === 'issues' ? 'repository, number, title, @author or label' : 'repository, number, title or @author',
           value: filterText,
           submitLabel: 'done',
           autoFocus: true,
@@ -6726,6 +6796,11 @@ export function register(on: On, options: PluginOptions) {
 
     // Keys that do nothing for this PR or tab say why, instead of falling through to the prompt
     const whyNot = (k: string): string => {
+      // On the issues tab only o (and j / k) act on the selected issue; the PR keys say where they work
+      if (tab === 'issues') {
+        if (k === 'o') return filterText ? 'o: no issue matches the filter · f: change it' : 'o: no issue is selected'
+        if ('abcdeimpsvwxyz'.includes(k)) return `${k} acts on PRs (1: To review, 2: My PRs) · on issues, o opens one on GitHub`
+      }
       const n = pr ? askLabel(pr) : 'this PR'
       const ownTab = 'on your PRs (2: My PRs)'
       // Keys that act on the selected PR, with none selected
@@ -7264,7 +7339,7 @@ export function register(on: On, options: PluginOptions) {
             redraw()
           })
         : undefined
-    const snoozedHere = tab === 'review' ? g.snoozedReview : g.snoozedMine
+    const snoozedHere = tab === 'review' ? g.snoozedReview : tab === 'mine' ? g.snoozedMine : []
     if (snoozedHere.length > 0) {
       folds.push(
         small(
@@ -7358,14 +7433,15 @@ export function register(on: On, options: PluginOptions) {
           'the list',
           [
             ['j / k', 'next / previous PR'],
-            ['1 / 2', 'To review / My PRs · h / l: the tab to the left / right'],
+            ['1 / 2 / 3', 'To review / My PRs / issues assigned to you · h / l: the tab to the left / right'],
             ['b', 'AI review every bot PR not reviewed yet, then approve those that passed in one panel (y) · b again stops'],
             ['z', 'show or hide snoozed PRs'],
-            ['f', 'filter by repository, number, title or @author · empty clears it'],
+            ['f', 'filter by repository, number, title or @author (and label on issues) · empty clears it'],
             ['n', 'next page of the details (the description and conversation come last), when they do not fit'],
             ['r', 'refresh: fetch again'],
           ],
         ],
+        ['the selected issue (3)', [['o', 'open on GitHub · issues are only listed: nothing reads or changes them']]],
         [
           'the reader (d)',
           [
@@ -7443,6 +7519,120 @@ export function register(on: On, options: PluginOptions) {
         legend.reduce((n, [, what]) => n + wrappedLines(what, textColumns), 0)
       const helpTree = [...top, rule(), ...helpRows]
       return Box({ flexDirection: 'column', children: [...helpTree, ...catcher(helpTree)] })
+    }
+
+    if (tab === 'issues') {
+      const issues = assigned.filter(matchesFilter)
+      ensureSelection(issues)
+      const issue = issues.find((i) => i.url === selected)
+      const issueKeys: El[] = []
+      if (issue) {
+        const href = safeHref(issue.url)
+        issueKeys.push(
+          ...(href
+            ? [
+                Button({
+                  key: 'issue-open',
+                  label: 'open on GitHub',
+                  hotkey: 'o',
+                  plain: true,
+                  onPress: () => void $.process.run(['gh', 'issue', 'view', href, '--web']),
+                }),
+              ]
+            : []),
+          Box({
+            display: 'none',
+            children: [
+              small('nav-down', '↓', 'j', () => {
+                moveSelection(issues, 1)
+                redraw()
+              }),
+              small('nav-up', '↑', 'k', () => {
+                moveSelection(issues, -1)
+                redraw()
+              }),
+            ],
+          }),
+        )
+      }
+      const issueFooter = !issue
+        ? []
+        : focused
+          ? [Box({ key: 'footer', flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: issueKeys })]
+          : [Text({ color: NEON.muted, children: ['ctrl+x tab: use the keys'] })]
+      const labelWidth = Math.min(
+        24,
+        Math.max(5, ...issues.map((i) => textWidth(`${i.repository.nameWithOwner.split('/')[1] ?? ''}#${i.number}`))),
+      )
+      const issueWidth = Math.max(5, Math.min(labelWidth, columns - 16 - 28))
+      const issueRow = (i: Issue) => {
+        const isSelected = selected === i.url
+        const repo = i.repository.nameWithOwner.split('/')[1] ?? i.repository.nameWithOwner
+        const label = shortLabel(`${repo}#${i.number}`, issueWidth)
+        const href = safeHref(i.url)
+        const talk = i.comments?.totalCount ?? 0
+        const right = ` ${talk > 0 ? `${talk}`.padStart(3) : '   '} ${short(i.updatedAt, now).padStart(4)}`
+        const lead = `${isSelected ? '▸' : ' '}  `
+        const width = Math.max(8, columns - textWidth(lead) - issueWidth - 2 - textWidth(right))
+        const names = (i.labels?.nodes ?? []).map((l) => l?.name ?? '').filter(Boolean)
+        const tags = names.length ? `  ${names.join(' · ')}` : ''
+        // The title first; the labels get what is left, at most a third
+        const title = fit(i.title, Math.max(8, width - Math.min(textWidth(tags), Math.floor(width / 3))))
+        const tagText = tags ? fit(tags, Math.max(0, width - textWidth(title))) : ''
+        const pad = ' '.repeat(Math.max(0, width - textWidth(title) - textWidth(tagText)))
+        return Box({
+          key: `line-${i.url}`,
+          flexDirection: 'row',
+          ...(isSelected && focused ? { backgroundColor: NEON.selection } : {}),
+          children: [
+            Text({ color: focused ? NEON.pink : NEON.muted, bold: true, children: [lead] }),
+            href ? (isSelected ? link(href, label, true) : quietLink(href, label)) : Text({ children: [label] }),
+            Text({ children: [' '.repeat(Math.max(0, issueWidth - textWidth(label)) + 1)] }),
+            Text({
+              bold: isSelected,
+              ...(isSelected && focused ? { backgroundColor: NEON.selection, color: NEON.onSelection } : {}),
+              ...(isSelected && !focused ? { underline: true } : {}),
+              dimColor: !focused,
+              wrap: 'truncate-end',
+              children: [title],
+            }),
+            Text({ color: NEON.muted, wrap: 'truncate-end', children: [`${tagText}${pad}`] }),
+            Text({ dimColor: true, children: [right] }),
+          ],
+        })
+      }
+      // The rows around the selection when they do not fit
+      const issueRoom = Math.max(3, paneLimit - topLines - 3 - issueFooter.length)
+      let shownIssues = issues
+      const issueMore: El[] = []
+      if (issues.length > issueRoom) {
+        const at = Math.max(
+          0,
+          issues.findIndex((i) => i.url === selected),
+        )
+        const lo = Math.max(0, Math.min(at - Math.floor((issueRoom - 1) / 2), issues.length - (issueRoom - 1)))
+        shownIssues = issues.slice(lo, lo + issueRoom - 1)
+        const below = issues.length - lo - shownIssues.length
+        const parts = [lo > 0 ? `↑ ${lo} more` : '', below > 0 ? `↓ ${below} more` : ''].filter(Boolean)
+        issueMore.push(Text({ dimColor: true, children: [`  ${parts.join('  ')} · j/k: move`] }))
+      }
+      const empty = !fetchedAt
+        ? loading
+          ? `  ${SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]} fetching your issues…`
+          : '  not fetched yet · r: refresh'
+        : filterText
+          ? `  No issues match "${filterText}" · f: change or clear the filter`
+          : error
+            ? '  Nothing to show until GitHub answers · r: retry'
+            : '  No open issues are assigned to you'
+      const issueList = issues.length > 0 ? shownIssues.map(issueRow) : [Text({ dimColor: true, children: [empty] })]
+      const issueHead = Text({
+        color: NEON.muted,
+        children: [`   ${'ISSUE'.padEnd(issueWidth)} TITLE`.padEnd(Math.max(0, columns - 10)) + ' CMT  UPD'],
+      })
+      const issueTree = [...top, focusRule(), ...(issues.length > 0 ? [issueHead] : []), ...issueList, ...issueMore, rule(), ...issueFooter]
+      lastHeight = topLines + 2 + (issues.length > 0 ? 1 : 0) + issueList.length + issueMore.length + issueFooter.length
+      return Box({ flexDirection: 'column', children: [...issueTree, ...catcher(issueTree)] })
     }
 
     const list: El[] = []
