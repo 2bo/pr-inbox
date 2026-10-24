@@ -1380,6 +1380,8 @@ type WritePanel = {
   yes: string
   // What a PR that got new commits since the panel opened is told
   movedNote: string
+  // A PR that moved is only a warning (y still goes ahead, as a gh stack merge is not pinned), not a refusal
+  movedWarns?: boolean
   // Shown while the write runs
   progress: string
   // The write y does (see runWrite)
@@ -1425,7 +1427,14 @@ async function sendPanel($: EngineInterface, p: WritePanel): Promise<void> {
 
 // "pick a method: 1 squash · 2 merge commit · 3 rebase"
 function pickText(p: WritePanel): string {
-  return `pick a method: ${p.choices.map((c) => `${c.key} ${c.word}`).join(' · ')}`
+  return `pick a method: ${offered(p)
+    .map((c) => `${c.key} ${c.word}`)
+    .join(' · ')}`
+}
+
+// The choices this panel offers (the repository allows)
+function offered(p: WritePanel): PanelChoice[] {
+  return p.choices.filter((c) => !c.refused)
 }
 
 // The word of the choice picked ('' before one is)
@@ -4620,7 +4629,7 @@ async function mergePr($: EngineInterface, pr: PR): Promise<void> {
       verb: 'auto-merge off',
       notes: [{ text: `Auto-merge is on (${autoMergeWord(pr)}): GitHub merges it once every review and check passes` }],
       sendsLead: 'y turns auto-merge off: ',
-      sends: `${full} (${autoMergeWord(pr)})`,
+      sends: `${full} (auto-merge was set to ${autoMergeWord(pr)})`,
       yes: 'auto-merge off',
       movedNote: 'auto-merge is still on',
       progress: '⟳ turning auto-merge off…',
@@ -4633,11 +4642,11 @@ async function mergePr($: EngineInterface, pr: PR): Promise<void> {
       notes: [
         { text: `Not ready yet: ${notReadyShort(pr, fetchedAt || Date.now())}`, color: 'yellow' },
         {
-          text: 'GitHub then merges it on its own once every review and check passes, at the commit it is at then; if it is ready now, it merges now',
+          text: 'After y, GitHub merges it on its own once every review and check passes, at whatever commit it is at then. If GitHub already finds it ready, it merges at once, which cannot be undone',
         },
       ],
       sendsLead: 'y turns auto-merge on: ',
-      sends: `${full}${into} ({choice}), now at ${sha}`,
+      sends: `${full} at ${sha}${into} ({choice})`,
       choices: methodChoices(pr),
       yes: 'auto-merge on',
       movedNote: 'auto-merge will not be turned on',
@@ -4660,23 +4669,26 @@ async function mergePr($: EngineInterface, pr: PR): Promise<void> {
   })
 }
 
+// GitHub refused a merge or auto-merge: the list is fetched again. If the PR got new commits (its head moved, or gh
+// says the head branch was modified), the panel closes and a toast says so: the row now shows the new commits.
+// Any other refusal goes back to the panel as its reason, so y can try again once it is fixed
+async function refused($: EngineInterface, pr: PR, stderr: string, what: string): Promise<string> {
+  await refresh($)
+  const now = findPr(pr.url)?.headRefOid
+  if ((now && now !== pr.headRefOid) || /head branch was modified/i.test(stderr)) {
+    $.ui.toast(`${what}: ${askLabel(pr)} has new commits since ${pr.headRefOid.slice(0, 7)} · refreshed`, { timeoutMs: 10000 })
+    return ''
+  }
+  return fit(clean(stderr) || 'GitHub refused it', 160)
+}
+
 // Merges a ready PR with the method picked in the panel. Pinned to the commit the panel opened with: if the head
 // moved, GitHub refuses it, and the panel closes (the list is fetched again and says so). Any other refusal stays in
 // the panel, so y can try again
 async function mergeNow($: EngineInterface, pr: PR, method: Method): Promise<string> {
   const sha = pr.headRefOid.slice(0, 7)
   const r = await $.process.run(['gh', 'pr', 'merge', pr.url, method.flag, '--match-head-commit', pr.headRefOid]).catch(ghMissing)
-  if (r.exitCode !== 0) {
-    const moved = /head|match|expected/i.test(r.stderr)
-    $.ui.toast(
-      moved
-        ? `Not merged: ${askLabel(pr)} has new commits since ${sha} · refreshed`
-        : `Not merged: ${fit(clean(r.stderr), 90)} · refreshed`,
-      { timeoutMs: 10000 },
-    )
-    await refresh($)
-    return moved ? '' : `not merged: ${fit(clean(r.stderr), 120)}`
-  }
+  if (r.exitCode !== 0) return refused($, pr, r.stderr, 'Not merged')
   $.ui.toast(`✦ merged ${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number} · ${method.word}`)
   $.ui.log(`pr-inbox merged ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${method.word}): you pressed y in the merge panel of m`)
   await refresh($)
@@ -4690,17 +4702,7 @@ async function mergeNow($: EngineInterface, pr: PR, method: Method): Promise<str
 async function enableAutoMerge($: EngineInterface, pr: PR, method: Method): Promise<string> {
   const sha = pr.headRefOid.slice(0, 7)
   const r = await $.process.run(['gh', 'pr', 'merge', pr.url, '--auto', method.flag, '--match-head-commit', pr.headRefOid]).catch(ghMissing)
-  if (r.exitCode !== 0) {
-    const moved = /head|match|expected/i.test(r.stderr)
-    $.ui.toast(
-      moved
-        ? `Auto-merge not turned on: ${askLabel(pr)} has new commits since ${sha} · refreshed`
-        : `Auto-merge not turned on: ${fit(clean(r.stderr), 90)} · refreshed`,
-      { timeoutMs: 10000 },
-    )
-    await refresh($)
-    return moved ? '' : `auto-merge not turned on: ${fit(clean(r.stderr), 120)}`
-  }
+  if (r.exitCode !== 0) return refused($, pr, r.stderr, 'Auto-merge not turned on')
   $.ui.toast(`✦ auto-merge on: ${askLabel(pr)} merges by itself once it is ready · ${method.word}`)
   $.ui.log(
     `pr-inbox turned auto-merge on for ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${method.word}): you pressed y in the merge panel of m`,
@@ -4713,9 +4715,8 @@ async function enableAutoMerge($: EngineInterface, pr: PR, method: Method): Prom
 async function disableAutoMerge($: EngineInterface, pr: PR): Promise<string> {
   const r = await $.process.run(['gh', 'pr', 'merge', pr.url, '--disable-auto']).catch(ghMissing)
   if (r.exitCode !== 0) {
-    $.ui.toast(`Auto-merge still on: ${fit(clean(r.stderr), 90)} · refreshed`, { timeoutMs: 10000 })
     await refresh($)
-    return `auto-merge still on: ${fit(clean(r.stderr), 120)}`
+    return `still on: ${fit(clean(r.stderr) || 'GitHub refused it', 160)}`
   }
   $.ui.toast(`auto-merge off for ${askLabel(pr)}`)
   $.ui.log(`pr-inbox turned auto-merge off for ${pr.repository.nameWithOwner}#${pr.number}: you pressed y in the merge panel of m`)
@@ -4753,10 +4754,14 @@ async function openStackMerge($: EngineInterface, pr: PR): Promise<void> {
     })
     .filter(Boolean)
   const list = goes.map((n) => `#${n.pullRequest.number}`).join(', ')
+  // The PR it was opened on first (it is the one gh stack merges up to), then those below that you can see
+  const below = goes
+    .map((n) => mine.find((m) => m.repository.nameWithOwner === pr.repository.nameWithOwner && m.number === n.pullRequest.number))
+    .filter((m): m is PR => m !== undefined && m.url !== pr.url)
   openPanel($, {
     verb: 'merge stack',
-    prs: [pr],
-    title: `stack #${stack.number} of ${pr.repository.nameWithOwner} up to #${pr.number}`,
+    prs: [pr, ...below],
+    title: `#${stack.number} of ${pr.repository.nameWithOwner} up to #${pr.number}`,
     notes: [
       { text: `${plural(goes.length, 'PR')} go, all or nothing: ${list} → ${clean(stack.baseRefName)}` },
       ...notReady.map((w) => ({ text: `⚠ GitHub may refuse it: ${w}`, color: 'yellow' as const })),
@@ -4767,7 +4772,8 @@ async function openStackMerge($: EngineInterface, pr: PR): Promise<void> {
     sends: `${pr.repository.nameWithOwner} stack #${stack.number}: ${list} → ${clean(stack.baseRefName)}, all or nothing ({choice})`,
     choices: methodChoices(pr),
     yes: 'merge stack',
-    movedNote: 'gh stack merges it as it is now',
+    movedNote: 'y merges them too (gh stack is not pinned to commits)',
+    movedWarns: true,
     progress: '⟳ merging stack… (up to 2 min)',
     write: { kind: 'merge stack', list },
   })
@@ -4782,10 +4788,8 @@ async function mergeStack($: EngineInterface, pr: PR, method: Method, list: stri
     timeoutMs: 120000,
   })
   if (r.exitCode !== 0) {
-    const why = fit(clean(r.stderr || r.stdout), 120)
-    $.ui.toast(`Stack merge failed, nothing merged: ${fit(clean(r.stderr || r.stdout), 90)} · refreshed`, { timeoutMs: 10000 })
     await refresh($)
-    return `stack merge failed, nothing merged: ${why}`
+    return `nothing merged: ${fit(clean(r.stderr || r.stdout) || 'gh stack failed', 160)}`
   }
   $.ui.toast(`✦ merged stack #${stack.number} up to #${pr.number} (${list}) · ${method.word}`)
   $.ui.log(
@@ -5277,7 +5281,7 @@ export function register(on: On, options: PluginOptions) {
     })
   })
 
-  // The write panel (a, b), over the list, the reader or the picker: each PR at its commit, what is known about it, and
+  // The write panel (a, b, m), over the list, the reader or the picker: each PR at its commit, what is known about it, and
   // what y sends. y does it, q or n leaves, and any other key only says so
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE || !writePanel) return next(e)
@@ -5330,7 +5334,11 @@ export function register(on: On, options: PluginOptions) {
     const color = (c: PanelNote['color']) => (c ? { color: { red: NEON.red, yellow: NEON.yellow, green: NEON.green }[c] } : {})
     const body: El[] = p.notes.map((n) => Text({ ...color(n.color), wrap: 'wrap', children: [clean(n.text)] }))
     for (const pr of p.prs.filter(moved))
-      body.push(Text({ color: NEON.red, wrap: 'wrap', children: [`✗ ${label(pr)} has new commits since it opened: ${p.movedNote}`] }))
+      body.push(
+        p.movedWarns
+          ? Text({ color: NEON.yellow, wrap: 'wrap', children: [`⚠ ${label(pr)} has new commits since the panel opened: ${p.movedNote}`] })
+          : Text({ color: NEON.red, wrap: 'wrap', children: [`✗ ${label(pr)} has new commits since it opened: ${p.movedNote}`] }),
+      )
     // Until a choice is picked, the line says to pick one; then exactly what y sends, with the choice in it
     const waiting = p.choices.length > 0 && !p.chosen
     const sends = waiting
@@ -5353,7 +5361,7 @@ export function register(on: On, options: PluginOptions) {
             children: p.choices.map((c) =>
               Button({
                 key: `panel-choice-${c.key}`,
-                label: `${c.key === p.chosen ? '◉' : '○'} ${c.word}`,
+                label: `${c.key === p.chosen ? '◉' : '○'} ${c.word}${c.refused ? ' (not allowed)' : ''}`,
                 hotkey: c.key,
                 plain: true,
                 dimColor: c.refused !== '',
@@ -5399,7 +5407,9 @@ export function register(on: On, options: PluginOptions) {
       ],
     })
     const tree: El[] = [head, rule(true), ...body, rule(), ...choices, ...status, keys]
-    const picks = p.choices.map((c) => `${c.key} ${c.word} · `).join('')
+    const picks = offered(p)
+      .map((c) => `${c.key} ${c.word} · `)
+      .join('')
     return Box({
       key: 'panel',
       flexDirection: 'column',

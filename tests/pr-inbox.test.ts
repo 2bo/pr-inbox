@@ -2380,6 +2380,9 @@ test('a merge method the repository does not allow is dim and its key says why; 
   await ui.press({ key: 'tab-mine' })
   await ui.press({ key: 'act-merge' })
   expect((await ui.find({ key: 'panel-choice-2' }))?.props.dimColor).toBe(true)
+  expect((await ui.find({ key: 'panel-choice-2' }))?.props.label).toBe('○ merge commit (not allowed)')
+  // Only what it allows is offered, and still not picked for you
+  expect(((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text).toContain('pick a method: 1 squash · then y')
   await ui.press({ key: 'panel-choice-2' })
   expect(s.toasts.at(-1)).toBe('2: acme/app does not allow merge commits (repository settings)')
   await ui.press({ key: 'panel-yes' })
@@ -2401,7 +2404,7 @@ test('m on a PR that is not ready turns auto-merge on with the method picked, pi
   expect(await isSelected(ui, 23)).toBe(true)
   await pressMerge(ui, s, '1')
   expect(s.panels.at(-1)).toContain('Not ready yet: waiting for reviews')
-  expect(s.panels.at(-1)).toContain('GitHub then merges it on its own once every review and check passes')
+  expect(s.panels.at(-1)).toContain('After y, GitHub merges it on its own once every review and check passes')
   expect(s.calls).toContainEqual(['gh', 'pr', 'merge', WAITING.url, '--auto', '--squash', '--match-head-commit', HEAD])
   expect(s.toasts.at(-1)).toContain('auto-merge on: app#23')
   expect(s.logs.some((l) => l.includes('pr-inbox turned auto-merge on for acme/app#23 at aaaaaaa (squash)'))).toBe(true)
@@ -2425,6 +2428,22 @@ test('auto-merge is not turned on when the panel is cancelled, or when the PR mo
   await ui.unmount()
 })
 
+test('a refusal that only mentions the head or what is expected is not taken for new commits', async ($, on) => {
+  const s = stubs(on, {
+    stderr: 'Required status check "lint" is expected; head branch is not up to date with the base branch',
+    fail: ['gh pr'],
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'nav-down' })
+  await pressMerge(ui, s, '1')
+  const panel = (await ui.find({ key: 'panel' })) as { text?: string } | undefined
+  expect(panel?.text).toContain('✗ Not sent: Required status check "lint" is expected')
+  expect(s.toasts.some((t) => t.includes('has new commits'))).toBe(false)
+  await ui.unmount()
+})
+
 test('a merge GitHub refuses for another reason stays in the panel with the reason, and y tries again', async ($, on) => {
   const s = stubs(on, { stderr: 'Pull request is not mergeable: required status check "lint" has not run', fail: ['gh pr'] })
   await start($, s.clock)
@@ -2434,7 +2453,7 @@ test('a merge GitHub refuses for another reason stays in the panel with the reas
   await pressMerge(ui, s, '1')
   const panel = (await ui.find({ key: 'panel' })) as { text?: string } | undefined
   expect(panel?.text).toContain(
-    '✗ Not sent: not merged: Pull request is not mergeable: required status check "lint" has not run · y: try again · q: cancel',
+    '✗ Not sent: Pull request is not mergeable: required status check "lint" has not run · y: try again · q: cancel',
   )
   expect((await ui.find({ key: 'panel-yes' }))?.props.label).toBe('try again')
   await ui.unmount()
@@ -2455,7 +2474,7 @@ test('a PR with auto-merge on says so, and m turns it off after y in its panel',
   // The row says so at a glance
   expect(await lineOf(ui, 23)).toContain('⇢ AUTO')
   await pressMerge(ui, s, undefined, false)
-  expect(s.panels.at(-1)).toContain('y turns auto-merge off: acme/app#23 (squash)')
+  expect(s.panels.at(-1)).toContain('y turns auto-merge off: acme/app#23 (auto-merge was set to squash)')
   expect(s.calls.some((c) => c[2] === 'merge')).toBe(false)
   await pressMerge(ui, s)
   expect(s.calls).toContainEqual(['gh', 'pr', 'merge', WAITING.url, '--disable-auto'])
@@ -3021,7 +3040,7 @@ test('m on a stacked PR merges the stack up to it with gh stack, naming every PR
   await ui.press({ key: 'nav-down' })
   expect(await isSelected(ui, 72)).toBe(true)
   await pressMerge(ui, s, '1')
-  expect(s.panels.at(-1)).toContain('merge stackstack #70 of acme/app up to #72')
+  expect(s.panels.at(-1)).toContain('merge stack#70 of acme/app up to #72')
   expect(s.panels.at(-1)).toContain('2 PRs go, all or nothing: #71, #72 → main')
   expect(s.panels.at(-1)).toContain('Not pinned to commits: gh stack merges each branch as it is when you press y')
   expect(s.panels.at(-1)).toContain('y merges stack: acme/app stack #70: #71, #72 → main, all or nothing (squash)')
