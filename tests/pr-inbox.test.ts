@@ -1989,6 +1989,232 @@ test('b again stops the bulk review', { options: { ai_approve: 'auto' } }, async
   await ui.unmount()
 })
 
+// ---- AI review on its own (auto_review) ----
+
+const reviewedUrls = (s: Stubs) => [...new Set(reviewsOf(s).map((c) => c.prompt.match(/acme\/app#(\d+)/)?.[1]))]
+
+test('auto_review off reviews nothing until v', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  await settleReview(s)
+  expect(s.reviewCalls).toEqual([])
+})
+
+test(
+  'auto_review reviews every review request on its own, one at a time, and leaves approving to a',
+  { options: { auto_review: 'review requests' } },
+  async ($, on) => {
+    const s = stubs(on)
+    await start($, s.clock)
+    for (let i = 0; i < 3; i++) await settleReview(s)
+    // Longest-waiting first (the bot PR has no request event: it counts from its creation)
+    expect(reviewedUrls(s)).toEqual(['12', '11', '13'])
+    expect(s.questions).toEqual([])
+    expect(approvedAt(s)).toEqual([])
+    // One toast for the round, not one per PR
+    expect(s.toasts.filter((t) => t.includes('AI review passed'))).toEqual([])
+    expect(s.toasts).toContain('auto_review: 3 passed (a: approve)')
+    expect(s.logs.some((l) => l.includes('acme/app#11 started on its own (auto_review)'))).toBe(true)
+    // The next fetch finds a review of each current commit: nothing runs again
+    const before = s.reviewCalls.length
+    await s.clock.advance(5 * 60_000)
+    for (let i = 0; i < 3; i++) await settleReview(s)
+    expect(s.reviewCalls.length).toBe(before)
+  },
+)
+
+test('auto_review bots reviews only bot PRs', { options: { auto_review: 'bots' } }, async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  for (let i = 0; i < 3; i++) await settleReview(s)
+  expect(reviewedUrls(s)).toEqual(['12'])
+})
+
+test('auto_review skips a PR a gate would stop', { options: { auto_review: 'review requests' } }, async ($, on) => {
+  const s = stubs(on, { graphql: only(member({ isDraft: true })) })
+  await start($, s.clock)
+  await settleReview(s)
+  expect(s.reviewCalls).toEqual([])
+  expect(s.toasts.some((t) => t.includes('AI review not run'))).toBe(false)
+})
+
+test(
+  'auto_review with ai_approve auto approves a member PR with no one asked',
+  { options: { auto_review: 'review requests', ai_approve: 'auto' } },
+  async ($, on) => {
+    const s = stubs(on, { graphql: only(member()) })
+    await start($, s.clock)
+    await settleReview(s)
+    expect(s.questions).toEqual([])
+    expect(approvedAt(s)).toEqual([AUTO_APPROVE_11])
+  },
+)
+
+test('auto_review starts at most 6 reviews an hour', { options: { auto_review: 'review requests' } }, async ($, on) => {
+  const many = Array.from({ length: 8 }, (_, i) =>
+    pr({ number: 31 + i, url: `https://github.com/acme/app/pull/${31 + i}`, ...requested('2026-10-02T00:00:00Z', 'me') }),
+  )
+  const s = stubs(on, { graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: many }, mine: { nodes: [] } } }) })
+  await start($, s.clock)
+  for (let i = 0; i < 8; i++) await settleReview(s)
+  expect(reviewedUrls(s).length).toBe(6)
+  // An hour later, the rest
+  await s.clock.advance(60 * 60_000)
+  for (let i = 0; i < 4; i++) await settleReview(s)
+  expect(reviewedUrls(s).length).toBe(8)
+})
+
+const AUTO = { options: { auto_review: 'review requests' } }
+
+test('auto_review starts nothing in a -p run', AUTO, async ($, on) => {
+  const s = stubs(on)
+  await $.session.start({ surface: 'terminal', isInteractive: false, cwd: '/work' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  await settleReview(s)
+  expect(s.reviewCalls).toEqual([])
+})
+
+test('auto_review waits for CI that is still running', AUTO, async ($, on) => {
+  const s = stubs(on, { graphql: only(member({ commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING' } } }] } })) })
+  await start($, s.clock)
+  await settleReview(s)
+  expect(s.reviewCalls).toEqual([])
+})
+
+test('auto_review leaves a PR another session reviews, or has reviewed, to that session', AUTO, async ($, on) => {
+  const s = stubs(on, {
+    store: {
+      // Another session holds #11, and has reviewed #13 at its current commit
+      [`auto-review:${HUMAN.url}`]: { head: HEAD, until: NOW + 10 * 60_000, attempts: 0, retryAt: 0 },
+      [`review:${HUMAN2.url}`]: { head: HEAD, state: 'passed', problems: [], findings: [], verdicts: [], warnings: [] },
+    },
+  })
+  await start($, s.clock)
+  for (let i = 0; i < 3; i++) await settleReview(s)
+  expect(reviewedUrls(s)).toEqual(['12'])
+})
+
+test('auto_review does not review again a commit whose review was cancelled, even after a restart', AUTO, async ($, on) => {
+  const s = stubs(on, {
+    graphql: only(member()),
+    store: { [`review:${HUMAN.url}`]: { head: HEAD, state: 'cancelled', problems: [], findings: [], verdicts: [], warnings: [] } },
+  })
+  await start($, s.clock)
+  await settleReview(s)
+  expect(s.reviewCalls).toEqual([])
+})
+
+test('cancelling a review auto_review started pauses auto_review for an hour', AUTO, async ($, on) => {
+  // The stub reads graphql on every fetch, so a new commit can arrive later
+  const opts: StubOptions = { graphql: only(member()), slow: true }
+  const s = stubs(on, opts)
+  await start($, s.clock)
+  await settleReview(s)
+  const ui = await $.ui.mount(PANE)
+  expect((await ui.find({ key: 'act-ai-review' }))?.props.label).toBe('cancel AI review')
+  await ui.press({ key: 'act-ai-review' })
+  await s.clock.advance(60_000)
+  await settleReview(s)
+  expect(s.toasts.some((t) => t.includes('auto_review paused for an hour'))).toBe(true)
+  // A new commit arrives, but the next fetches start nothing until the hour is over
+  const before = s.reviewCalls.length
+  opts.graphql = only(member({ headRefOid: 'b'.repeat(40) }))
+  await s.clock.advance(10 * 60_000)
+  await settleReview(s)
+  expect(s.reviewCalls.length).toBe(before)
+  await s.clock.advance(60 * 60_000)
+  await settleReview(s)
+  expect(s.reviewCalls.length).toBeGreaterThan(before)
+  await ui.unmount()
+})
+
+test('auto_review tries a review that failed again later, and gives up after a few tries', AUTO, async ($, on) => {
+  const s = stubs(on, { graphql: only(member()), review: () => 'no JSON here' })
+  await start($, s.clock)
+  await settleReview(s)
+  const first = reviewsOf(s).length
+  expect(first).toBeGreaterThan(0)
+  // Not at the next fetch, but after the backoff
+  await s.clock.advance(5 * 60_000)
+  await settleReview(s)
+  expect(reviewsOf(s).length).toBe(first)
+  for (let i = 0; i < 40; i++) {
+    await s.clock.advance(60 * 60_000)
+    await settleReview(s)
+  }
+  // MAX_ATTEMPTS tries in all
+  expect(reviewsOf(s).length).toBe(first * 4)
+})
+
+test(
+  'auto_review waits for the pane when analysis is when opened',
+  { options: { auto_review: 'review requests', analysis: 'when opened' } },
+  async ($, on) => {
+    const s = stubs(on, { graphql: only(member()) })
+    on('command.run', () => ({ text: '' }))
+    on('ui.open', () => ({ value: { isPlaced: true as const } }))
+    await start($, s.clock)
+    await settleReview(s)
+    expect(s.reviewCalls).toEqual([])
+    await $.command.run({ command: 'pr-inbox', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+    await settleReview(s)
+    expect(reviewedUrls(s)).toEqual(['11'])
+  },
+)
+
+test('the pane says which reviews auto_review ran, and why it has not reviewed a PR yet', AUTO, async ($, on) => {
+  const pending = { commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING' } } }] } }
+  const s = stubs(on, {
+    graphql: JSON.stringify({
+      data: {
+        viewer: { login: 'me' },
+        review: { nodes: [HUMAN, pr({ ...HUMAN2, ...pending }), pr({ ...BOT, isDraft: true })] },
+        mine: { nodes: [] },
+      },
+    }),
+  })
+  await start($, s.clock)
+  for (let i = 0; i < 3; i++) await settleReview(s)
+  const ui = await $.ui.mount(PANE)
+  // The details under the list are the selected PR's: #11, #13, then the bot #12
+  expect(await lineOf(ui, 11)).toContain('AI review (auto) ✓ passed')
+  await ui.press({ key: 'nav-down' })
+  expect(await lineOf(ui, 13)).toContain('auto_review waits for CI to finish · v: review now')
+  await ui.press({ key: 'nav-down' })
+  expect(await lineOf(ui, 12)).toContain('auto_review skips it: it is a draft')
+  await ui.unmount()
+})
+
+test('at its hourly limit auto_review says so under the row and in the status line', AUTO, async ($, on) => {
+  const s = stubs(on, { store: { 'auto-review-starts': [NOW - 30 * 60_000, NOW - 30 * 60_000, NOW - 20 * 60_000, NOW, NOW, NOW] } })
+  await start($, s.clock)
+  await settleReview(s)
+  expect(s.reviewCalls).toEqual([])
+  const ui = await $.ui.mount(PANE)
+  expect(await lineOf(ui, 11)).toContain('auto_review waits for its hourly limit (30m) · v: review now')
+  expect(s.statuses.at(-1)).toContain('auto at limit')
+  await ui.unmount()
+})
+
+test(
+  'b approves bot PRs that passed before in one dialog, without reviewing them again',
+  { options: { auto_review: 'bots' } },
+  async ($, on) => {
+    const s = stubs(on, { graphql: twoBots, answer: 'Approve all 2' })
+    await start($, s.clock)
+    for (let i = 0; i < 3; i++) await settleReview(s)
+    const reviewed = s.reviewCalls.length
+    const ui = await $.ui.mount(PANE)
+    expect((await ui.find({ key: 'review-bots' }))?.props.label).toBe('approve 2 passed')
+    await ui.press({ key: 'review-bots' })
+    await settleReview(s)
+    expect(s.reviewCalls.length).toBe(reviewed)
+    expect(s.questions.at(-1)).toContain('Approve 2 bot PRs that passed the AI review?')
+    expect(approvedAt(s).length).toBe(2)
+    await ui.unmount()
+  },
+)
+
 test('m merges a ready PR with the chosen method, pinned to the commit on screen', async ($, on) => {
   const s = stubs(on, { answer: 'Squash and merge' })
   await start($, s.clock)
