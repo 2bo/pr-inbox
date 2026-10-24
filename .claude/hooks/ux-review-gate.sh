@@ -36,8 +36,12 @@ fi
 if [ "${1:-}" = "mark" ]; then
   head=$(git rev-parse HEAD 2>/dev/null) || { echo "not in a git repository" >&2; exit 1; }
   dir=$(marker_dir) || exit 1
-  mkdir -p "$dir" && : >"$dir/$head" && echo "UX review recorded for $head"
-  exit 0
+  if mkdir -p "$dir" && : >"$dir/$head"; then
+    echo "UX review recorded for $head"
+    exit 0
+  fi
+  echo "could not record the UX review in $dir" >&2
+  exit 1
 fi
 
 command -v jq >/dev/null 2>&1 || exit 0
