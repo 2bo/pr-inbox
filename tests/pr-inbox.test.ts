@@ -1191,6 +1191,15 @@ async function pressApprove(ui: Pressable, s: Stubs, key = 'act-approve') {
   await answerPanel(ui, s)
 }
 
+// c, then in the panel it opens: the choice key, then y
+async function pressCi(ui: Pressable, s: Stubs, choice?: '1' | '2') {
+  await ui.press({ key: 'act-ci' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  if (choice) await ui.press({ key: `panel-choice-${choice}` })
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+}
+
 // m, then in the merge panel: what it says goes to s.panels, the method key if given, then y (or q)
 async function pressMerge(ui: Pressable, s: Stubs, method?: '1' | '2' | '3', yes = true) {
   await ui.press({ key: 'act-merge' })
@@ -2571,14 +2580,20 @@ test('m does nothing when the merge panel is cancelled', async ($, on) => {
   await ui.unmount()
 })
 
-test('c, then re-run, re-runs only the failed GitHub Actions runs', async ($, on) => {
-  const s = stubs(on, { answer: 'Re-run the failed jobs' })
+test('c, then 2 and y, re-runs only the failed GitHub Actions runs', async ($, on) => {
+  const s = stubs(on)
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   expect(await isSelected(ui, 21)).toBe(true)
   await ui.press({ key: 'act-ci' })
-  expect(s.choices.at(-1)).toEqual(['Cancel', 'Fix with Claude (asks before push)', 'Re-run the failed jobs'])
+  expect(s.questions).toEqual([])
+  const text = async () => ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+  expect(await text()).toContain('pick what to do: 1 fix with Claude · 2 re-run the failed jobs · then y')
+  await ui.press({ key: 'panel-choice-2' })
+  expect(await text()).toContain('y: re-runs the failed jobs of 1 run on acme/app#21')
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
   const reruns = s.calls.filter((c) => c[1] === 'run')
   expect(reruns).toEqual([['gh', 'run', 'rerun', '1', '--failed', '-R', 'acme/app']])
   // A ready PR has no failed CI: no c
@@ -3082,12 +3097,17 @@ const fixGit =
   }
 
 test('c, then fix: a worktree at the PR head, a request to fix and commit, and a push only after you say so', async ($, on) => {
-  const s = stubs(on, { answer: 'Fix with Claude (asks before push)', git: fixGit(), locale: { HOME: '/home/me' } })
+  const tails: unknown[] = []
+  on('ui.render', { component: 'PromptHint' }, (_, e) => {
+    tails.push((e.props as { tail?: unknown }).tail)
+    return { type: 'engine', ref: 0 } as never
+  })
+  const s = stubs(on, { git: fixGit(), locale: { HOME: '/home/me' } })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  await ui.press({ key: 'act-ci' })
+  await pressCi(ui, s, '1')
   expect(s.calls).toContainEqual(['git', '-C', '/work', 'fetch', 'origin', 'refs/heads/fix-21:refs/remotes/origin/fix-21'])
   expect(s.calls).toContainEqual(['git', '-C', '/work', 'worktree', 'add', '--detach', WORKTREE, 'origin/fix-21'])
   const text = s.submitted.at(-1) ?? ''
@@ -3097,30 +3117,93 @@ test('c, then fix: a worktree at the PR head, a request to fix and commit, and a
   // Not the read-only turn of e: Claude has to edit and commit
   expect(text).not.toContain('Only use read-only commands')
 
-  // The turn ends: the push waits for the dialog, which starts at Cancel
+  // The turn ends: nothing opens by itself; the toast names the PR, and c opens the push panel
   await $.turn.start({ text, turnId: 'fix1' })
-  s.setAnswer('Push')
-  await $.turn.complete({ turnId: 'fix1', answer: '' } as never)
+  await $.turn.complete({ turnId: 'fix1', answer: '', reason: 'answer' } as never)
   for (let i = 0; i < 10; i++) await s.clock.settle()
-  expect(s.questions.at(-1)).toContain('Push 1 commit to fix-21 of acme/app (#21)? abc1234 Fix the flaky login spec')
-  expect(s.choices.at(-1)?.[0]).toBe('Cancel')
-  expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'push', 'origin', 'HEAD:refs/heads/fix-21'])
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
+  expect(s.toasts.at(-1)).toContain('⇡ fix ready for acme/app#21: 1 commit not pushed')
+  expect(s.calls.some((c) => c.includes('push'))).toBe(false)
+  // It stays in sight under the prompt until it is pushed or forgotten
+  const hint = await $.ui.mount({
+    plugin: 'pr-inbox',
+    component: 'PromptHint',
+    surface: 'terminal',
+    viewport: { columns: 160, rows: 40 },
+    props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
+  } as never)
+  expect(String(tails.at(-1))).toContain('⇡ fix ready: acme/app#21 · c in pr-inbox')
+  await hint.unmount()
+  await ui.press({ key: 'act-ci' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+  expect(panel).toContain('abc1234 Fix the flaky login spec')
+  expect(panel).toContain('y pushes: 1 commit to fix-21 of acme/app (#21), up to aaaaaaa')
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  // Exactly the commit the panel showed, never with force
+  expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'push', 'origin', `${HEAD}:refs/heads/fix-21`])
   expect(s.calls.filter((c) => c.includes('push')).some((c) => c.includes('--force') || c.includes('-f'))).toBe(false)
+  expect(s.logs.some((l) => l.includes('you pressed y in the push panel of c'))).toBe(true)
   await ui.unmount()
 })
 
-test('after the fix turn, Cancel pushes nothing, and no commit means nothing to ask', async ($, on) => {
-  const s = stubs(on, { answer: 'Fix with Claude (asks before push)', git: fixGit(''), locale: { HOME: '/home/me' } })
+test('a commit Claude makes after the push panel opened is not pushed: the panel says to look again', async ($, on) => {
+  let heads = 0
+  const moving = (argv: readonly string[]) => {
+    if (argv.join(' ') === `git -C ${WORKTREE} rev-parse HEAD`) return { stdout: `${heads++ === 0 ? HEAD : 'b'.repeat(40)}\n` }
+    return fixGit()(argv)
+  }
+  const s = stubs(on, { git: moving, locale: { HOME: '/home/me' } })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
+  await pressCi(ui, s, '1')
+  await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'fixm' })
+  await $.turn.complete({ turnId: 'fixm', answer: '' } as never)
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  await pressCi(ui, s)
+  expect(((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text).toContain(
+    'Claude committed again since this opened · q, then c shows the new list',
+  )
+  expect(s.calls.some((c) => c.includes('push'))).toBe(false)
+  await ui.unmount()
+})
+
+test('x in the push panel forgets the fix; its commits stay in the worktree', async ($, on) => {
+  const s = stubs(on, { git: fixGit(), locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await pressCi(ui, s, '1')
+  await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'fixx' })
+  await $.turn.complete({ turnId: 'fixx', answer: '' } as never)
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(await lineOf(ui, 21)).toContain('⇡ PUSH')
   await ui.press({ key: 'act-ci' })
-  const asked = s.questions.length
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  await ui.press({ key: 'panel-forget' })
+  expect(s.toasts.at(-1)).toContain(`Forgot the fix of app#21; its commits stay in ${WORKTREE}`)
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
+  expect(await lineOf(ui, 21)).not.toContain('⇡ PUSH')
+  expect(s.calls.some((c) => c.includes('push'))).toBe(false)
+  await ui.unmount()
+})
+
+test('after the fix turn, no commit means nothing to push and nothing opens', async ($, on) => {
+  const s = stubs(on, { git: fixGit(''), locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await pressCi(ui, s, '1')
   await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'fix2' })
   await $.turn.complete({ turnId: 'fix2', answer: '' } as never)
   for (let i = 0; i < 10; i++) await s.clock.settle()
-  expect(s.questions.length).toBe(asked)
+  expect(s.questions).toEqual([])
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
   expect(s.toasts.at(-1)).toContain('No new commit for app#21')
   expect(s.calls.some((c) => c.includes('push'))).toBe(false)
   await ui.unmount()
@@ -3893,43 +3976,49 @@ test('w on a review request says it is for your own PRs, and points to b for the
   await ui.unmount()
 })
 
-test('after the fix, you can look at its diff first; c then pushes it', async ($, on) => {
-  const s = stubs(on, { answer: 'Fix with Claude (asks before push)', git: fixGit(), locale: { HOME: '/home/me' } })
+test('after the fix, d in the push panel shows its diff first; c brings the panel back', async ($, on) => {
+  const s = stubs(on, { git: fixGit(), locale: { HOME: '/home/me' } })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   await ui.press({ key: 'act-ci' })
-  expect(s.questions.at(-1)).toContain('✗ rspec')
-  expect(s.questions.at(-1)).toContain('Nothing is pushed until you say so')
+  const text = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+  expect(text).toContain('✗ rspec')
+  expect(text).toContain('Nothing is pushed until you say so')
+  await ui.press({ key: 'panel-choice-1' })
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
   // While Claude works, the row says so
   expect(await lineOf(ui, 21)).toContain('⟳ WIP')
   await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'fix3' })
-  s.setAnswer('Show the diff first')
   await $.turn.complete({ turnId: 'fix3', answer: '' } as never)
   for (let i = 0; i < 10; i++) await s.clock.settle()
-  expect(s.choices.at(-1)).toEqual(['Cancel', 'Push', 'Show the diff first'])
+  await ui.press({ key: 'act-ci' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  await ui.press({ key: 'panel-diff' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
   expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'diff', 'origin/fix-21..HEAD'])
   expect(await ui.find({ type: 'Text', text: /^⇡ the fix, not pushed yet/ })).toBeDefined()
   expect(s.calls.some((c) => c.includes('push'))).toBe(false)
-  // Back in the list it waits as ⇡ PUSH; c offers the push
+  // Back in the list it waits as ⇡ PUSH; c opens the push panel again
   await ui.press({ key: 'diff-close' })
   expect(await lineOf(ui, 21)).toContain('⇡ PUSH')
-  s.setAnswer('Push 1 commit')
   await ui.press({ key: 'act-ci' })
-  expect(s.questions.at(-2)).toContain('A fix of app#21 waits')
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text).toContain('y pushes: 1 commit to fix-21')
   await ui.unmount()
 })
 
 // ---- Trust, recovery and the daily flow ----
 
 test('while Claude fixes CI, it cannot push, merge, approve, post or ask for reviews through gh; committing is fine', async ($, on) => {
-  const s = stubs(on, { answer: 'Fix with Claude (asks before push)', git: fixGit(), locale: { HOME: '/home/me' } })
+  const s = stubs(on, { git: fixGit(), locale: { HOME: '/home/me' } })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  await ui.press({ key: 'act-ci' })
+  await pressCi(ui, s, '1')
   await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'fixg' })
   for (const command of [
     'git push origin HEAD:fix-21',
@@ -3949,36 +4038,44 @@ test('while Claude fixes CI, it cannot push, merge, approve, post or ask for rev
   await ui.unmount()
 })
 
-test('a worktree with commits left from before asks before going on; a turn cut short says so at the push', async ($, on) => {
+test('a worktree with commits left from before asks in a panel before going on', async ($, on) => {
   const left = (argv: readonly string[]) => {
     const a = argv.join(' ')
     if (a === `git -C ${WORKTREE} rev-parse --is-inside-work-tree`) return { stdout: 'true' }
     return fixGit('old1111 An earlier try')(argv)
   }
-  const s = stubs(on, { answer: 'Fix with Claude (asks before push)', git: left, locale: { HOME: '/home/me' } })
+  const s = stubs(on, { git: left, locale: { HOME: '/home/me' } })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  s.setAnswer('Fix with Claude (asks before push)')
-  await ui.press({ key: 'act-ci' })
-  expect(s.questions.at(-1)).toContain('The worktree of app#21 has 1 commit not on fix-21: old1111 An earlier try')
-  expect(s.choices.at(-1)).toEqual(['Cancel', 'Go on from them', 'Start again from the PR head'])
+  await pressCi(ui, s, '1')
+  const text = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+  expect(text).toContain(`The worktree ${WORKTREE} has 1 commit not on fix-21, from an earlier fix:`)
+  expect(text).toContain('old1111 An earlier try')
+  expect(text).toContain('pick how to go on: 1 go on from them · 2 start again from the PR head · then y')
+  expect(s.submitted.length).toBe(0)
+  await ui.press({ key: 'panel-choice-1' })
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.submitted.at(-1)).toContain(`Work only in the git worktree ${WORKTREE}`)
   await ui.unmount()
 })
 
-test('a fix turn that was interrupted says so in the push dialog', async ($, on) => {
-  const s = stubs(on, { answer: 'Fix with Claude (asks before push)', git: fixGit(), locale: { HOME: '/home/me' } })
+test('a fix turn that was interrupted says so in its toast and in the push panel', async ($, on) => {
+  const s = stubs(on, { git: fixGit(), locale: { HOME: '/home/me' } })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  await ui.press({ key: 'act-ci' })
+  await pressCi(ui, s, '1')
   await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'fixi' })
-  s.setAnswer('Cancel')
   await $.turn.complete({ turnId: 'fixi', answer: '', reason: 'aborted', isAborted: true } as never)
   for (let i = 0; i < 10; i++) await s.clock.settle()
-  expect(s.questions.at(-1)).toStartWith('The fix turn stopped before it finished. Push 1 commit')
+  expect(s.toasts.at(-1)).toContain('the fix turn stopped before it finished; 1 commit not pushed')
+  await ui.press({ key: 'act-ci' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text).toContain('The fix turn stopped before it finished')
   await ui.unmount()
 })
 

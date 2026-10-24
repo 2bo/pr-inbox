@@ -1349,7 +1349,8 @@ const REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 // ---- Write panels ----
 
 // Every write the pane makes to GitHub is confirmed in a write panel, drawn over the list, the reader or the picker:
-// a and b (approve), m (merge, auto-merge, stack merge), s (the AI review's findings as a review). It names in full what y sends, each PR at the commit the write is pinned to; y does it,
+// a and b (approve), m (merge, auto-merge, stack merge), s (the AI review's findings as a review), c (fix CI, re-run,
+// push the fix). It names in full what y sends, each PR at the commit the write is pinned to; y does it,
 // q or n leaves, and every other key only says so. A panel opens only from the person's own key, never on its own
 // or by taking focus, and pane keys come only from the keyboard, so no model can press y
 type PanelNote = { text: string; color?: 'red' | 'yellow' | 'green' }
@@ -1363,10 +1364,18 @@ type PanelWrite =
   | { kind: 'merge stack'; list: string }
   // The AI review's findings, one per item of the panel, in the same order
   | { kind: 'findings'; findings: Finding[] }
+  // c: fix with Claude or re-run (choices 1/2); while Claude fixes: push early or stop watching; a clone to make; a
+  // worktree with commits left from before; and the push itself, pinned to the worktree's HEAD when it opened
+  | { kind: 'ci' }
+  | { kind: 'fixing'; job: FixJob }
+  | { kind: 'clone' }
+  | { kind: 'worktree' }
+  | { kind: 'push'; job: FixJob; head: string }
 // A row to check or uncheck (x, or its number key), such as an AI review finding; note is said after it, dim
 type PanelItem = { text: string; note: string; checked: boolean }
 // A choice y needs first (the merge method), picked with its number key; refused says why a key is not offered here
-type PanelChoice = { key: string; word: string; refused: string }
+// sends: what y does with this choice, when it differs by choice
+type PanelChoice = { key: string; word: string; refused: string; sends?: string }
 type WritePanel = {
   // What y does, in a word: the header's first word and y's label
   verb: string
@@ -1466,7 +1475,8 @@ function sendsText(p: WritePanel): string {
     const at = pr ? `${pr.repository.nameWithOwner}#${pr.number} at ${pr.headRefOid.slice(0, 7)}` : ''
     return `1 review on ${at} as ${chosenWord(p)}: ${placed} on their lines, ${chosen.length - placed} in the body`
   }
-  return p.sends.replace('{choice}', chosenWord(p))
+  const own = p.choices.find((c) => c.key === p.chosen)?.sends
+  return own ?? p.sends.replace('{choice}', chosenWord(p))
 }
 
 // The word of the choice picked ('' before one is)
@@ -1490,6 +1500,11 @@ async function runWrite($: EngineInterface, p: WritePanel): Promise<string> {
     )
   }
   if (p.write.kind === 'auto-merge off') return disableAutoMerge($, pr)
+  if (p.write.kind === 'ci') return p.chosen === '1' ? fixCi($, pr) : rerunFailed($, pr)
+  if (p.write.kind === 'fixing') return p.chosen === '1' ? afterFix($, p.write.job, 'early') : stopWatching($, p.write.job)
+  if (p.write.kind === 'clone') return cloneAndFix($, pr)
+  if (p.write.kind === 'worktree') return fixCi($, pr, p.chosen === '1' ? 'go on' : 'start again')
+  if (p.write.kind === 'push') return sendPush($, p.write.job, p.write.head)
   if (!method) return ''
   if (p.write.kind === 'merge') return mergeNow($, pr, method)
   if (p.write.kind === 'auto-merge on') return enableAutoMerge($, pr, method)
@@ -4851,12 +4866,9 @@ function failedRuns(pr: PR): string[] {
 }
 
 // Re-runs only the failed jobs of those runs. Checks from other CI systems are left to their own pages
-async function rerunFailed($: EngineInterface, pr: PR): Promise<void> {
+async function rerunFailed($: EngineInterface, pr: PR): Promise<string> {
   const runs = failedRuns(pr)
-  if (runs.length === 0) {
-    $.ui.toast(`No failed GitHub Actions run to re-run on ${askLabel(pr)}; open the check for other CI`, { timeoutMs: 8000 })
-    return
-  }
+  if (runs.length === 0) return `no failed GitHub Actions run to re-run on ${askLabel(pr)}; open the check for other CI`
   const failed: string[] = []
   for (const id of runs) {
     const r = await $.process.run(['gh', 'run', 'rerun', id, '--failed', '-R', pr.repository.nameWithOwner]).catch(ghMissing)
@@ -4869,13 +4881,25 @@ async function rerunFailed($: EngineInterface, pr: PR): Promise<void> {
     { timeoutMs: 8000 },
   )
   await refresh($)
+  return ''
 }
 
 // ---- Fix CI in a worktree (c) ----
 
 // Claude fixes the failing CI of one of your PRs in a git worktree of its own, at the PR's head (detached), commits,
 // and stops: pr-inbox asks you before it pushes. The turn runs with your session's usual permissions
-type FixJob = { pr: PR; repo: string; branch: string; dir: string; base: string; startedAt: number; turnId?: string; commits?: string[] }
+type FixJob = {
+  pr: PR
+  repo: string
+  branch: string
+  dir: string
+  base: string
+  startedAt: number
+  turnId?: string
+  commits?: string[]
+  // The fix turn stopped before it finished: the push panel says so
+  interrupted?: boolean
+}
 let fixJob: FixJob | undefined
 // Fixes that made commits you have not pushed yet (you cancelled, or looked at the diff first), by PR URL: c pushes them
 const fixReady = new Map<string, FixJob>()
@@ -4898,8 +4922,10 @@ async function cloneOf($: EngineInterface, dir: string, repo: string): Promise<b
   return r.exitCode === 0 && githubRepoOf(r.stdout).toLowerCase() === repo.toLowerCase()
 }
 
-// Your clone of the repository: the session's directory when it is one, else the one ghq knows, else (asked) ghq get
-async function findClone($: EngineInterface, repo: string): Promise<string | undefined> {
+// Your clone of the repository: the session's directory when it is one, else the one ghq knows. With neither, and ghq
+// there, the clone panel opens (y: ghq get, then the fix goes on); without ghq, a toast says how to clone it
+async function findClone($: EngineInterface, pr: PR): Promise<string | undefined> {
+  const repo = pr.repository.nameWithOwner
   const top = await $.process.run(['git', 'rev-parse', '--show-toplevel'])
   if (top.exitCode === 0 && top.stdout.trim() && (await cloneOf($, top.stdout.trim(), repo))) return top.stdout.trim()
   const listed = async () => {
@@ -4914,83 +4940,88 @@ async function findClone($: EngineInterface, repo: string): Promise<string | und
     $.ui.toast(`No clone of ${repo} found: clone it (gh repo clone ${repo}) and press c again`, { timeoutMs: 10000 })
     return undefined
   }
-  let answer = ''
-  try {
-    answer = await $.ui.ask(`No clone of ${repo} found here or in ghq. Clone it with ghq get?`, {
-      options: ['Cancel', 'Clone'],
-      header: 'Clone',
-    })
-  } catch {
-    // Dismissed
-  }
-  await focusPane($)
-  if (answer !== 'Clone') return undefined
-  $.ui.toast(`Cloning ${repo}…`)
-  const got = await $.process.run(['ghq', 'get', `github.com/${repo}`], { timeoutMs: 600000 })
-  if (got.exitCode !== 0) {
-    $.ui.toast(`Could not clone ${repo}: ${fit(clean(got.stderr), 80)}`, { timeoutMs: 10000 })
-    return undefined
-  }
-  return listed()
+  openPanel($, {
+    verb: 'clone',
+    prs: [pr],
+    title: '',
+    notes: [{ text: `No clone of ${repo} found here or in ghq: the fix needs one to make its worktree from` }],
+    sendsLead: 'y runs: ',
+    sends: `ghq get github.com/${repo}, then Claude fixes ${repo}#${pr.number}`,
+    yes: 'clone',
+    movedNote: 'the fix starts from its new head',
+    progress: `⟳ cloning ${repo} with ghq… (up to 10 min)`,
+    write: { kind: 'clone' },
+  })
+  return undefined
 }
 
-async function fixCi($: EngineInterface, pr: PR): Promise<void> {
+// y in the clone panel: ghq get, then the fix
+async function cloneAndFix($: EngineInterface, pr: PR): Promise<string> {
+  const repo = pr.repository.nameWithOwner
+  const got = await $.process.run(['ghq', 'get', `github.com/${repo}`], { timeoutMs: 600000 })
+  if (got.exitCode !== 0) return `could not clone ${repo}: ${fit(clean(got.stderr), 120)}`
+  return fixCi($, pr)
+}
+
+// Starts Claude on the fix. A message it returns says why it did not start (the panel shows it, or /pr-inbox fix
+// toasts it); a question on the way (a clone, commits left in the worktree) opens its own panel and returns ''
+async function fixCi($: EngineInterface, pr: PR, left?: 'go on' | 'start again'): Promise<string> {
   const repo = pr.repository.nameWithOwner
   const branch = pr.headRefName ?? ''
-  if (!REPO_NAME.test(repo) || !BRANCH_NAME.test(branch) || pr.isCrossRepository) {
-    $.ui.toast(`Cannot fix ${askLabel(pr)} here: its branch is not in ${repo} or has an unexpected name`, { timeoutMs: 8000 })
-    return
-  }
-  if (fixJob) {
-    $.ui.toast(`Claude is still fixing ${askLabel(fixJob.pr)}: wait for it to finish`, { timeoutMs: 8000 })
-    return
-  }
-  const clone = await findClone($, repo)
-  if (!clone) return
+  if (!REPO_NAME.test(repo) || !BRANCH_NAME.test(branch) || pr.isCrossRepository)
+    return `cannot fix ${askLabel(pr)} here: its branch is not in ${repo} or has an unexpected name`
+  if (fixJob) return `Claude is still fixing ${askLabel(fixJob.pr)}: wait for it to finish`
+  const clone = await findClone($, pr)
+  if (!clone) return ''
   const fetched = await $.process.run(['git', '-C', clone, 'fetch', 'origin', `refs/heads/${branch}:refs/remotes/origin/${branch}`], {
     timeoutMs: 120000,
   })
-  if (fetched.exitCode !== 0) {
-    $.ui.toast(`Could not fetch ${branch}: ${fit(clean(fetched.stderr), 80)}`, { timeoutMs: 8000 })
-    return
-  }
+  if (fetched.exitCode !== 0) return `could not fetch ${branch}: ${fit(clean(fetched.stderr), 120)}`
   const home = (await $.env.get('HOME')) || ''
-  if (!home.startsWith('/')) {
-    $.ui.toast('Cannot tell where your home directory is (HOME), so there is nowhere to put the worktree', { timeoutMs: 8000 })
-    return
-  }
+  if (!home.startsWith('/')) return 'cannot tell where your home directory is (HOME), so there is nowhere to put the worktree'
   // One worktree per PR, outside your clone; a second c on the same PR goes on in the same one
   const dir = `${home}/.cache/pr-inbox/worktrees/${repo}/pr-${pr.number}`
   const there = await $.process.run(['git', '-C', dir, 'rev-parse', '--is-inside-work-tree']).catch(() => ({ exitCode: 1 }))
   if (there.exitCode !== 0) {
     const added = await $.process.run(['git', '-C', clone, 'worktree', 'add', '--detach', dir, `origin/${branch}`], { timeoutMs: 120000 })
-    if (added.exitCode !== 0) {
-      $.ui.toast(`Could not make a worktree: ${fit(clean(added.stderr), 80)}`, { timeoutMs: 8000 })
-      return
-    }
+    if (added.exitCode !== 0) return `could not make a worktree: ${fit(clean(added.stderr), 120)}`
   } else {
     // The worktree is there from before: commits of an earlier fix not on the branch would go out with this one, so
-    // say so and let you choose
-    const left = await commitsAhead($, dir, branch)
-    if (left.length > 0) {
-      let answer = ''
-      try {
-        answer = await $.ui.ask(
-          `The worktree of ${askLabel(pr)} has ${plural(left.length, 'commit')} not on ${branch}: ${left.slice(0, 3).join('; ')}. Go on from them, or start again from the PR head?`,
-          { options: ['Cancel', 'Go on from them', 'Start again from the PR head'], header: 'Worktree' },
-        )
-      } catch {
-        // Dismissed
-      }
-      await focusPane($)
-      if (answer === 'Start again from the PR head') {
-        const dirty = (await $.process.run(['git', '-C', dir, 'status', '--porcelain'])).stdout.trim()
-        if (dirty) {
-          $.ui.toast(`The worktree has uncommitted changes; clean ${dir} first`, { timeoutMs: 10000 })
-          return
-        }
-        await $.process.run(['git', '-C', dir, 'checkout', '--detach', `origin/${branch}`])
-      } else if (answer !== 'Go on from them') return
+    // the worktree panel says so and lets you choose
+    const earlier = await commitsAhead($, dir, branch)
+    if (earlier.length > 0 && !left) {
+      const n = plural(earlier.length, 'commit')
+      openPanel($, {
+        verb: 'fix CI',
+        prs: [pr],
+        title: '',
+        notes: [
+          { text: `The worktree ${dir} has ${n} not on ${branch}, from an earlier fix:`, color: 'yellow' },
+          ...earlier.map((c) => ({ text: `  ${c}` })),
+        ],
+        sendsLead: 'y: ',
+        sends: '',
+        choiceWhat: 'how to go on',
+        choices: [
+          { key: '1', word: 'go on from them', refused: '', sends: `Claude goes on in ${dir} from those ${n}` },
+          {
+            key: '2',
+            word: 'start again from the PR head',
+            refused: '',
+            sends: `the ${n} leave the worktree, and Claude starts from ${branch} as fetched`,
+          },
+        ],
+        yes: 'go on',
+        movedNote: 'the fix starts from its new head',
+        progress: '⟳ starting the fix…',
+        write: { kind: 'worktree' },
+      })
+      return ''
+    }
+    if (earlier.length > 0 && left === 'start again') {
+      const dirty = (await $.process.run(['git', '-C', dir, 'status', '--porcelain'])).stdout.trim()
+      if (dirty) return `the worktree has uncommitted changes; clean ${dir} first`
+      await $.process.run(['git', '-C', dir, 'checkout', '--detach', `origin/${branch}`])
     }
   }
   // Commits are counted from the branch as GitHub had it at the fetch: exactly what a push would send
@@ -5010,6 +5041,7 @@ async function fixCi($: EngineInterface, pr: PR): Promise<void> {
       $.ui.invalidate('ui.render')
     }
   })
+  return ''
 }
 
 function fixRequest(job: FixJob): string {
@@ -5039,9 +5071,11 @@ async function commitsAhead($: EngineInterface, dir: string, branch: string): Pr
   return log.exitCode === 0 ? log.stdout.split('\n').map(clean).filter(Boolean) : []
 }
 
-// The turn ended, was cut short, or you asked early: what it committed waits for your word to push
+// The turn ended, was cut short, or you asked early: what it committed waits for your word to push. When the turn
+// ends, nothing opens (a y meant for something else must never land in a push panel): the row, a toast and the hint
+// under the prompt say a fix is ready, and c opens the push panel. Asked early, it opens now: you pressed it
 type FixEnd = 'done' | 'interrupted' | 'early'
-async function afterFix($: EngineInterface, job: FixJob, end: FixEnd = 'done'): Promise<void> {
+async function afterFix($: EngineInterface, job: FixJob, end: FixEnd = 'done'): Promise<string> {
   // Asked early, Claude goes on: keep following it, so what it commits later is offered too
   if (fixJob === job && end !== 'early') fixJob = undefined
   const commits = await commitsAhead($, job.dir, job.branch)
@@ -5049,55 +5083,95 @@ async function afterFix($: EngineInterface, job: FixJob, end: FixEnd = 'done'): 
   if (commits.length === 0) {
     fixReady.delete(job.pr.url)
     $.ui.toast(`No new commit for ${askLabel(job.pr)} in ${job.dir}`, { timeoutMs: 8000 })
-    return
+    return ''
   }
-  const ready = { ...job, commits }
-  if (end !== 'early') fixReady.set(job.pr.url, ready)
-  await askPush($, ready, end)
+  const ready: FixJob = { ...job, commits, ...(end === 'interrupted' ? { interrupted: true } : {}) }
+  if (end === 'early') return openPush($, ready, 'early')
+  fixReady.set(job.pr.url, ready)
+  const full = `${job.pr.repository.nameWithOwner}#${job.pr.number}`
+  const how = end === 'interrupted' ? 'the fix turn stopped before it finished; ' : ''
+  $.ui.toast(
+    `⇡ fix ready for ${full}: ${how}${plural(commits.length, 'commit')} not pushed · ${paneOpen ? 'c' : '/pr-inbox, then c'}: push panel`,
+    { timeoutMs: 15000 },
+  )
+  return ''
 }
 
-// The push dialog: the commits, then Push, or a look at the diff first (Cancel first). Never a force push
-async function askPush($: EngineInterface, job: FixJob, end: FixEnd = 'done'): Promise<void> {
-  const commits = job.commits ?? []
-  const how =
-    end === 'interrupted'
-      ? 'The fix turn stopped before it finished. '
-      : end === 'early'
-        ? 'Claude is still working: these are the commits so far, and later ones are offered when it ends. '
-        : ''
+// The push panel: every commit a push sends (from the branch as fetched to the worktree's HEAD), pinned to that HEAD.
+// d shows the diff, x forgets the fix (the worktree stays), y pushes. Never a force push
+async function openPush($: EngineInterface, job: FixJob, end: FixEnd = 'done'): Promise<string> {
+  const commits = await commitsAhead($, job.dir, job.branch)
+  const head = (await $.process.run(['git', '-C', job.dir, 'rev-parse', 'HEAD'])).stdout.trim()
+  if (commits.length === 0 || !/^[0-9a-f]{40}$/.test(head)) {
+    fixReady.delete(job.pr.url)
+    $.ui.invalidate('ui.render')
+    return `no commit to push in ${job.dir}`
+  }
+  const ready: FixJob = { ...job, commits }
+  if (end !== 'early') fixReady.set(job.pr.url, ready)
   const dirty = (await $.process.run(['git', '-C', job.dir, 'status', '--porcelain'])).stdout.trim()
-  const shown = commits.slice(0, 5).join('; ') + (commits.length > 5 ? `; and ${commits.length - 5} more` : '')
-  let answer = ''
-  try {
-    answer = await $.ui.ask(
-      `${how}Push ${plural(commits.length, 'commit')} to ${job.branch} of ${job.repo} (#${job.pr.number})? ${shown}${dirty ? ' (uncommitted changes stay in the worktree)' : ''}`,
-      { options: ['Cancel', 'Push', 'Show the diff first'], header: 'Push' },
-    )
-  } catch {
-    // Dismissed
-  }
-  await focusPane($)
-  if (answer === 'Show the diff first') return openFixDiff($, job)
-  if (answer !== 'Push') {
-    $.ui.toast(`Not pushed · c: push it or show the diff (${job.dir})`, { timeoutMs: 8000 })
-    return
-  }
-  const r = await $.process.run(['git', '-C', job.dir, 'push', 'origin', `HEAD:refs/heads/${job.branch}`], { timeoutMs: 120000 })
+  const how =
+    end === 'early'
+      ? 'Claude is still working: these are the commits so far; later ones come with c once it ends'
+      : job.interrupted
+        ? 'The fix turn stopped before it finished'
+        : ''
+  openPanel($, {
+    verb: 'push',
+    prs: [job.pr],
+    title: '',
+    notes: [
+      ...(how ? [{ text: how, color: 'yellow' as const }] : []),
+      { text: `${plural(commits.length, 'commit')} from ${job.dir}:` },
+      ...commits.map((c) => ({ text: `  ${c}` })),
+      { text: `To ${job.branch} of ${job.repo}, never forced${dirty ? ' · uncommitted changes stay in the worktree' : ''}` },
+    ],
+    sendsLead: 'y pushes: ',
+    sends: `${plural(commits.length, 'commit')} to ${job.branch} of ${job.repo} (#${job.pr.number}), up to ${head.slice(0, 7)}`,
+    yes: 'push',
+    movedNote: 'GitHub will refuse the push (the branch moved)',
+    progress: `⟳ pushing to ${job.branch}…`,
+    write: { kind: 'push', job: ready, head },
+  })
+  return ''
+}
+
+// y in the push panel. HEAD is read again first: if Claude committed since the panel opened, nothing is pushed, as
+// the panel did not list it. Then exactly that commit goes to the PR's branch
+async function sendPush($: EngineInterface, job: FixJob, head: string): Promise<string> {
+  const now = (await $.process.run(['git', '-C', job.dir, 'rev-parse', 'HEAD'])).stdout.trim()
+  if (now !== head) return 'Claude committed again since this opened · q, then c shows the new list'
+  const commits = job.commits ?? []
+  const r = await $.process.run(['git', '-C', job.dir, 'push', 'origin', `${head}:refs/heads/${job.branch}`], { timeoutMs: 120000 })
   if (r.exitCode !== 0) {
-    const moved = /non-fast-forward|fetch first|rejected/i.test(r.stderr)
-    $.ui.toast(
-      moved
-        ? `Not pushed: ${job.branch} has new commits on GitHub. Your ${plural(commits.length, 'commit')} stay in ${job.dir} · c: show them`
-        : `Push failed: ${fit(clean(r.stderr), 100)} · your commits stay in ${job.dir}`,
-      { timeoutMs: 10000 },
-    )
     fixReady.set(job.pr.url, job)
-    return
+    const moved = /non-fast-forward|fetch first|rejected/i.test(r.stderr)
+    return moved
+      ? `${job.branch} has new commits on GitHub; your ${plural(commits.length, 'commit')} stay in ${job.dir}`
+      : `push failed: ${fit(clean(r.stderr), 120)} · your commits stay in ${job.dir}`
   }
   fixReady.delete(job.pr.url)
-  $.ui.toast(`✦ pushed ${plural(commits.length, 'commit')} to ${job.branch} · CI runs again`, { timeoutMs: 8000 })
-  $.ui.log(`pr-inbox pushed ${commits.length} commit(s) to ${job.repo} ${job.branch} from ${job.dir}: you chose it in the dialog after c`)
+  $.ui.toast(`✦ pushed ${plural(commits.length, 'commit')} to ${job.branch} of ${job.repo} · CI runs again`, { timeoutMs: 8000 })
+  $.ui.log(
+    `pr-inbox pushed ${commits.length} commit(s) up to ${head.slice(0, 7)} to ${job.repo} ${job.branch} from ${job.dir}: you pressed y in the push panel of c`,
+  )
   await refresh($)
+  return ''
+}
+
+// x in the push panel: the fix is set aside; its commits stay in the worktree
+function forgetFix($: EngineInterface, job: FixJob): void {
+  fixReady.delete(job.pr.url)
+  if (writePanel?.write.kind === 'push') writePanel = undefined
+  $.ui.toast(`Forgot the fix of ${askLabel(job.pr)}; its commits stay in ${job.dir}`, { timeoutMs: 8000 })
+  $.ui.invalidate('ui.render')
+}
+
+async function stopWatching($: EngineInterface, job: FixJob): Promise<string> {
+  if (fixJob === job) fixJob = undefined
+  $.ui.toast(`Stopped following the fix of ${askLabel(job.pr)}; the worktree stays in ${job.dir}`, { timeoutMs: 8000 })
+  $.ui.invalidate('ui.render')
+  return ''
 }
 
 // The fix's own diff (from the worktree) in the reader, before you push it
@@ -5111,7 +5185,7 @@ async function openFixDiff($: EngineInterface, job: FixJob): Promise<void> {
     at: FIRST_FILE,
     block: 0,
     cursor: 0,
-    note: `the fix, not pushed yet: ${plural(job.commits?.length ?? 0, 'commit')} in ${job.dir} · q, then c pushes it`,
+    note: `the fix, not pushed yet: ${plural(job.commits?.length ?? 0, 'commit')} in ${job.dir} · q, then c: push panel`,
     list: false,
     loading: false,
     error: r.exitCode === 0 ? '' : clean(r.stderr) || 'git diff failed',
@@ -5120,60 +5194,77 @@ async function openFixDiff($: EngineInterface, job: FixJob): Promise<void> {
   $.ui.invalidate('ui.render')
 }
 
-// c on one of your PRs: while Claude fixes it, push now or stop following; with a fix not pushed, push or look at it;
-// with a failed CI, say what a fix would do and start it, or re-run the failed jobs
-const FIX_IT = 'Fix with Claude (asks before push)'
+// c on one of your PRs: while Claude fixes it, push now or stop following; with a fix not pushed, the push panel;
+// with a failed CI, what a fix would do, or a re-run of the failed jobs. Each is a panel: a choice, then y
 async function ciMenu($: EngineInterface, pr: PR): Promise<void> {
-  const ask = async (question: string, options: string[], header: string) => {
-    let answer = ''
-    try {
-      answer = await $.ui.ask(question, { options: ['Cancel', ...options], header })
-    } catch {
-      // Dismissed
-    }
-    await focusPane($)
-    return answer
-  }
+  const full = `${pr.repository.nameWithOwner}#${pr.number}`
   if (fixJob?.pr.url === pr.url) {
     const job = fixJob
-    const answer = await ask(
-      `Claude is fixing ${askLabel(pr)} in ${job.dir} (${elapsed(new Date(job.startedAt).toISOString(), Date.now())}).`,
-      ['Ask to push what it has now', 'Stop watching (Claude keeps working; Esc in the prompt stops it)'],
-      'Fixing',
-    )
-    if (answer === 'Ask to push what it has now') await afterFix($, job, 'early')
-    else if (answer.startsWith('Stop watching')) {
-      fixJob = undefined
-      $.ui.toast(`Stopped following the fix of ${askLabel(pr)}; the worktree stays in ${job.dir}`, { timeoutMs: 8000 })
-      $.ui.invalidate('ui.render')
-    }
+    openPanel($, {
+      verb: 'fixing',
+      prs: [pr],
+      title: '',
+      notes: [{ text: `Claude is fixing ${full} in ${job.dir} (${elapsed(new Date(job.startedAt).toISOString(), Date.now())})` }],
+      sendsLead: 'y: ',
+      sends: '',
+      choiceWhat: 'what to do',
+      choices: [
+        {
+          key: '1',
+          word: 'push what it has now',
+          refused: '',
+          sends: 'opens the push panel with the commits so far (Claude keeps working)',
+        },
+        {
+          key: '2',
+          word: 'stop watching',
+          refused: '',
+          sends: `stops following the fix (Claude keeps working; Esc in the prompt stops it)`,
+        },
+      ],
+      yes: 'go',
+      movedNote: 'the fix works on the head it started from',
+      progress: '⟳ reading the worktree…',
+      write: { kind: 'fixing', job },
+    })
     return
   }
   const ready = fixReady.get(pr.url)
   if (ready) {
-    const n = ready.commits?.length ?? 0
-    const answer = await ask(
-      `A fix of ${askLabel(pr)} waits in ${ready.dir}: ${plural(n, 'commit')} not pushed.`,
-      [`Push ${plural(n, 'commit')}`, 'Show the diff', 'Forget it (the worktree stays)'],
-      'Fix ready',
-    )
-    if (answer.startsWith('Push')) await askPush($, ready)
-    else if (answer === 'Show the diff') await openFixDiff($, ready)
-    else if (answer.startsWith('Forget')) {
-      fixReady.delete(pr.url)
-      $.ui.invalidate('ui.render')
-    }
+    const why = await openPush($, ready)
+    if (why) $.ui.toast(why, { timeoutMs: 8000 })
     return
   }
-  const failed = failedChecks(pr).map((c) => `✗ ${c.name}`)
-  const answer = await ask(
-    `CI failed on ${pr.repository.nameWithOwner}#${pr.number}: ${failed.join(', ') || 'see the checks'}. ` +
-      `A fix: Claude reads the failed logs and fixes it in a worktree of its own (~/.cache/pr-inbox/worktrees), with this session's permissions, runs the tests and commits. Nothing is pushed until you say so.`,
-    [FIX_IT, 'Re-run the failed jobs'],
-    'CI',
-  )
-  if (answer === FIX_IT) await fixCi($, pr)
-  else if (answer === 'Re-run the failed jobs') await rerunFailed($, pr)
+  const runs = failedRuns(pr)
+  const failed = failedChecks(pr).map((c) => c.name)
+  const dir = `~/.cache/pr-inbox/worktrees/${pr.repository.nameWithOwner}/pr-${pr.number}`
+  openPanel($, {
+    verb: 'fix CI',
+    prs: [pr],
+    title: '',
+    notes: [
+      { text: `CI failed: ${failed.map((n) => `✗ ${n}`).join(', ') || 'see the checks'}`, color: 'red' },
+      {
+        text: "A fix: Claude reads the failed logs and fixes it in a worktree of its own, with this session's permissions, runs the tests and commits. Nothing is pushed until you say so",
+      },
+    ],
+    sendsLead: 'y: ',
+    sends: '',
+    choiceWhat: 'what to do',
+    choices: [
+      { key: '1', word: 'fix with Claude', refused: '', sends: `Claude fixes ${full} in ${dir}, then you push it from c` },
+      {
+        key: '2',
+        word: 're-run the failed jobs',
+        refused: runs.length ? '' : 'no failed GitHub Actions run here; open the check for other CI',
+        sends: `re-runs the failed jobs of ${plural(runs.length, 'run')} on ${full}: ${failed.join(', ')}`,
+      },
+    ],
+    yes: 'go',
+    movedNote: 'the fix starts from its new head',
+    progress: '⟳ starting…',
+    write: { kind: 'ci' },
+  })
 }
 
 // ---- Language ----
@@ -5235,7 +5326,12 @@ export function register(on: On, options: PluginOptions) {
         return { text: hits.length ? `${ref} matches several of your PRs: give repo#number` : `${ref} is not one of your open PRs` }
       // A command cannot start a turn while it runs: the request goes out right after it
       const target = hits[0] as PR
-      $.clock.after(0, () => fixCi($, target))
+      $.clock.after(0, async () => {
+        const why = await fixCi($, target)
+        if (why) $.ui.toast(`Not fixing ${askLabel(target)}: ${why}`, { timeoutMs: 10000 })
+        // A question on the way (a clone, commits left in the worktree) is a panel: show the pane you asked from
+        if (writePanel && !paneOpen) await focusPane($)
+      })
       return { text: `Fixing the CI of ${target.url}` }
     }
     if (e.args.trim() === 'refresh') {
@@ -5318,7 +5414,13 @@ export function register(on: On, options: PluginOptions) {
   // The hint line under the prompt says how to move between the prompt and the open pane
   on('ui.render', { component: 'PromptHint' }, async (_, e, next) => {
     // An armed p says what your next prompt goes with
-    const about = asking ? ` · next prompt → ${askLabel(asking.pr)} (${asking.write ? 'may change files' : 'read-only'})` : ''
+    const asked = asking ? ` · next prompt → ${askLabel(asking.pr)} (${asking.write ? 'may change files' : 'read-only'})` : ''
+    // A fix waiting for your push stays in sight until it is pushed or forgotten
+    const first = [...fixReady.values()][0]
+    const ready = first
+      ? ` · ⇡ fix ready: ${first.pr.repository.nameWithOwner}#${first.pr.number}${fixReady.size > 1 ? ` (+${fixReady.size - 1})` : ''} · c in pr-inbox`
+      : ''
+    const about = `${asked}${ready}`
     if (!paneOpen) return about ? next({ ...e, props: { ...e.props, tail: about } }) : next(e)
     return next({
       ...e,
@@ -5326,7 +5428,7 @@ export function register(on: On, options: PluginOptions) {
     })
   })
 
-  // The write panel (a, b, m, s), over the list, the reader or the picker: each PR at its commit, what is known about it, and
+  // The write panel (a, b, m, s, c), over the list, the reader or the picker: each PR at its commit, what is known about it, and
   // what y sends. y does it, q or n leaves, and any other key only says so
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE || !writePanel) return next(e)
@@ -5439,6 +5541,22 @@ export function register(on: On, options: PluginOptions) {
         ...(p.items.length ? [key('panel-toggle', 'check / uncheck', 'x', () => toggle(p.cursor))] : []),
         Box({ display: 'none', children: [key('panel-no', 'cancel', 'n', leave)] }),
         key('panel-yes', p.error ? 'try again' : p.yes, 'y', () => void sendPanel($, p)),
+        // The push panel: the fix's diff in the reader (c brings the panel back), or set the fix aside
+        ...(p.write.kind === 'push'
+          ? (() => {
+              const job = p.write.job
+              return [
+                key('panel-diff', 'show the diff', 'd', () => {
+                  if (p.sending) return
+                  writePanel = undefined
+                  void openFixDiff($, job)
+                }),
+                key('panel-forget', 'forget the fix', 'x', () => {
+                  if (!p.sending) forgetFix($, job)
+                }),
+              ]
+            })()
+          : []),
         ...(only
           ? [
               key(
@@ -7067,7 +7185,7 @@ export function register(on: On, options: PluginOptions) {
               'm',
               'ready: merge now in the merge panel: 1/2/3 picks the method, then y (a stack: gh stack merge) · not ready: auto-merge when ready (⇢ AUTO), or off again · also on bot PRs (1)',
             ],
-            ['c', 'CI failed: Claude fixes it in a worktree (asks before push), or re-run'],
+            ['c', 'CI failed: 1 Claude fixes it in a worktree, 2 re-run, then y · a fix ready: the push panel (y push, d diff, x forget)'],
             ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · s in it sends'],
           ],
         ],
