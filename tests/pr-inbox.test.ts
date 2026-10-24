@@ -3046,7 +3046,7 @@ test('on the issues tab the PR keys say where they work, and the filter matches 
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-issues' })
   await ui.press({ key: 'unbound-a' })
-  expect(s.toasts.at(-1)).toBe('a acts on PRs (1: To review, 2: My PRs) · on issues, o opens one on GitHub')
+  expect(s.toasts.at(-1)).toBe('a acts on PRs (1: To review, 2: My PRs) · on issues: o opens, c closes or reopens')
   expect(approved(s.calls)).toBe(false)
   await ui.press({ key: 'filter' })
   await ui.input({ key: 'filter-input', text: 'docs', kind: 'change' })
@@ -3064,6 +3064,147 @@ test('more assigned issues than the search returns are counted as 50+ and the li
   await ui.press({ key: 'tab-issues' })
   expect((await ui.find({ key: 'tab-issues' }))?.props.label).toBe('◉ issues 50+')
   expect(await ui.find({ type: 'Text', text: /50 of 73 shown/ })).toBeDefined()
+  await ui.unmount()
+})
+
+// The details of an issue, as the GraphQL resource query answers them
+const issueDetails = (over: Record<string, unknown> = {}) =>
+  JSON.stringify({
+    data: {
+      resource: {
+        body: 'Steps:\n\n1. Open the page\u001b[31m\n<!-- hidden -->',
+        stateReason: null,
+        comments: { totalCount: 1, nodes: [{ author: { login: 'bob' }, createdAt: '2026-10-02T00:00:00Z', body: 'Seen it \u202etoo' }] },
+        subIssues: {
+          nodes: [
+            {
+              number: 70,
+              title: 'Done part',
+              url: 'https://github.com/acme/app/issues/70',
+              state: 'CLOSED',
+              repository: { nameWithOwner: 'acme/app' },
+            },
+            {
+              number: 71,
+              title: 'Left part',
+              url: 'https://github.com/acme/app/issues/71',
+              state: 'OPEN',
+              repository: { nameWithOwner: 'acme/app' },
+            },
+          ],
+        },
+        ...over,
+      },
+    },
+  })
+const detailsAnswer = (argv: readonly string[]) => (argv.some((a) => a.startsWith('url=')) ? { stdout: issueDetails() } : undefined)
+
+test('the selected issue shows its description, comments and sub-issues, cleaned and never sent to a model', async ($, on) => {
+  const s = stubs(on, { graphql: withIssues(issue({ subIssuesSummary: { total: 2, completed: 1 } })), gh: detailsAnswer })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  await s.clock.advance(500)
+  await s.clock.settle()
+  expect(s.calls.find((c) => c.some((a) => a.startsWith('url=')))?.at(-1)).toBe('url=https://github.com/acme/app/issues/7')
+  const panel = JSON.stringify(await ui.find({ key: 'panel-https://github.com/acme/app/issues/7' }))
+  expect(panel).toContain('Open the page')
+  expect(panel).not.toContain('hidden')
+  expect(panel).not.toContain('\\u001b')
+  expect(panel).toContain('@bob')
+  expect(panel).toContain('Seen it too')
+  expect(panel).toContain('1 of 2 closed')
+  expect(panel).toContain('Left part')
+  // The row counts the sub-issues closed
+  expect(JSON.stringify(await ui.find({ key: 'line-https://github.com/acme/app/issues/7' }))).toContain('1/2')
+  expect(JSON.stringify([s.prompts, s.screened, s.reviewCalls])).not.toContain('Open the page')
+  await ui.unmount()
+})
+
+test('a sub-issue goes under its listed parent; one whose parent is not listed names it', async ($, on) => {
+  const parent = issue({ number: 3, title: 'Epic', url: 'https://github.com/acme/app/issues/3', updatedAt: '2026-09-01T00:00:00Z' })
+  const ref = {
+    number: 3,
+    title: 'Epic',
+    url: 'https://github.com/acme/app/issues/3',
+    state: 'OPEN',
+    repository: { nameWithOwner: 'acme/app' },
+  }
+  const child = issue({ parent: ref })
+  const orphan = issue({
+    number: 9,
+    url: 'https://github.com/acme/app/issues/9',
+    updatedAt: '2026-08-01T00:00:00Z',
+    parent: { ...ref, number: 4, url: 'https://github.com/acme/app/issues/4' },
+  })
+  const s = stubs(on, { graphql: withIssues(child, parent, orphan) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  // The parent first (in its place), its sub-issue right under it, though updated later
+  expect(await isSelectedUrl(ui, parent.url)).toBe(true)
+  await ui.press({ key: 'nav-down' })
+  expect(await isSelectedUrl(ui, child.url)).toBe(true)
+  expect(JSON.stringify(await ui.find({ key: `line-${child.url}` }))).toContain('└ ')
+  expect(JSON.stringify(await ui.find({ key: `line-${orphan.url}` }))).toContain('↑#4')
+  await ui.unmount()
+})
+
+test('c closes an issue only after a reason is picked and y, then c on it under closed here reopens it', async ($, on) => {
+  let state = 'OPEN'
+  const s = stubs(on, {
+    graphql: withIssues(issue()),
+    gh: (argv) => {
+      if (argv.some((a) => a.startsWith('assigned='))) return { stdout: state === 'OPEN' ? withIssues(issue()) : withIssues() }
+      if (argv[1] === 'issue' && argv[2] === 'view') return { stdout: JSON.stringify({ state }) }
+      if (argv[1] === 'issue' && argv[2] === 'close') state = 'CLOSED'
+      if (argv[1] === 'issue' && argv[2] === 'reopen') state = 'OPEN'
+      return detailsAnswer(argv)
+    },
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  await ui.press({ key: 'issue-state' })
+  const panel = JSON.stringify(await ui.find({ key: 'panel' }))
+  expect(panel).toContain('app#7 Fix the login page')
+  // No reason is picked for you: y does nothing until one is
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(s.calls.some((c) => c[2] === 'close')).toBe(false)
+  await ui.press({ key: 'panel-choice-2' })
+  expect(JSON.stringify(await ui.find({ key: 'panel' }))).toContain('acme/app#7 as not planned')
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.calls).toContainEqual(['gh', 'issue', 'close', 'https://github.com/acme/app/issues/7', '--reason', 'not planned'])
+  expect(s.toasts.at(-1)).toContain('closed acme/app#7 as not planned')
+  // Gone from the assigned list, kept under closed here, where c reopens it
+  expect(await ui.find({ type: 'Text', text: /✓ closed here 1/ })).toBeDefined()
+  expect((await ui.find({ key: 'issue-state' }))?.props.label).toBe('reopen')
+  await ui.press({ key: 'issue-state' })
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.calls).toContainEqual(['gh', 'issue', 'reopen', 'https://github.com/acme/app/issues/7'])
+  expect(await ui.find({ type: 'Text', text: /closed here/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('closing an issue already closed on GitHub sends nothing and says so; q leaves the panel', async ($, on) => {
+  const s = stubs(on, {
+    graphql: withIssues(issue()),
+    gh: (argv) => (argv[1] === 'issue' && argv[2] === 'view' ? { stdout: JSON.stringify({ state: 'CLOSED' }) } : detailsAnswer(argv)),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  await ui.press({ key: 'issue-state' })
+  await ui.press({ key: 'panel-choice-1' })
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.calls.some((c) => c[2] === 'close')).toBe(false)
+  expect(JSON.stringify(await ui.find({ key: 'panel' }))).toContain('closed already')
+  await ui.press({ key: 'panel-cancel' })
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
   await ui.unmount()
 })
 

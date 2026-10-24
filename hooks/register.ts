@@ -65,18 +65,26 @@ type PR = {
   requestEvents?: { nodes: (RequestEvent | null)[] }
 }
 
-// An open issue assigned to you (only listed: it never reaches a model, and nothing in the pane writes to it)
+// An open issue assigned to you. Drawn only, never sent to a model; the pane writes to it only to close or reopen it,
+// after y in its write panel (c)
 type Issue = {
   number: number
   title: string
   url: string
   createdAt: string
   updatedAt: string
+  // OPEN, or CLOSED on one closed from the pane (closedHere)
+  state?: string
   repository: { nameWithOwner: string }
   author: { login: string } | null
   labels?: { nodes: ({ name: string } | null)[] }
   comments?: { totalCount: number }
+  // The issue it is a sub-issue of, and how many sub-issues it has and how many of them are closed
+  parent?: IssueRef | null
+  subIssuesSummary?: { total: number; completed: number }
 }
+// An issue named beside another: a parent or a sub-issue
+type IssueRef = { number: number; title: string; url: string; state?: string; repository: { nameWithOwner: string } }
 
 // Someone asked to review: a person (login) or a team (combinedSlug, "org/slug")
 type Reviewer = { __typename: string; login?: string; combinedSlug?: string }
@@ -239,11 +247,13 @@ const QUERY = `query($review: String!, $mine: String!, $approved: String!, $assi
   assigned: search(query: $assigned, type: ISSUE, first: 50) { issueCount nodes { ...issue } }
 }
 fragment issue on Issue {
-  number title url createdAt updatedAt
+  number title url createdAt updatedAt state
   repository { nameWithOwner }
   author { login }
   labels(first: 20) { nodes { name } }
   comments { totalCount }
+  parent { number title url state repository { nameWithOwner } }
+  subIssuesSummary { total completed }
 }
 ${REVIEWED_FRAGMENT}
 ${ASKED_FRAGMENT}
@@ -387,6 +397,8 @@ let tab: 'review' | 'mine' | 'issues' = 'review'
 let expanded = ''
 // How far the details panel is paged down (n), for which PR and which view; another PR or view starts at the top
 let panelPage = { url: '', expanded: '', from: 0 }
+// The same for the details of the selected issue
+let issuePage = { url: '', from: 1 }
 // The filter typed after f (matched against repository, number, title and author), and whether its field is open
 let filterText = ''
 let filtering = false
@@ -409,6 +421,8 @@ let mine: PR[] = []
 let assigned: Issue[] = []
 // How many the search found: more than it returns when over its 50
 let assignedTotal = 0
+// Issues closed from the pane in this session, so c can reopen them
+let closedHere: Issue[] = []
 let fetchedAt = 0
 let loading = false
 let error = ''
@@ -469,10 +483,27 @@ function safeHref(url: string | null | undefined): string | undefined {
   }
 }
 
+// Sanitize every string of an issue named beside another
+function cleanIssueRef(ref: IssueRef | null | undefined): IssueRef | null {
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  if (!ref || typeof ref !== 'object') return null
+  return {
+    number: Number(ref.number) || 0,
+    title: clean(str(ref.title)),
+    url: str(ref.url),
+    state: str(ref.state),
+    repository: { nameWithOwner: clean(str(ref.repository?.nameWithOwner)) },
+  }
+}
+
 // Sanitize every string of an issue that gets drawn
 function cleanIssue(issue: Issue): Issue {
   const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  const subs = issue.subIssuesSummary
   return {
+    state: str(issue.state) || 'OPEN',
+    parent: cleanIssueRef(issue.parent),
+    subIssuesSummary: { total: Number(subs?.total) || 0, completed: Number(subs?.completed) || 0 },
     number: Number(issue.number) || 0,
     title: clean(str(issue.title)),
     url: str(issue.url),
@@ -1090,6 +1121,8 @@ async function fetchAll($: EngineInterface): Promise<void> {
       .filter((n): n is Issue => Boolean(n?.url))
       .map(cleanIssue)
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    // Reopened (here or elsewhere): listed again as assigned
+    closedHere = closedHere.filter((i) => !assigned.some((a) => a.url === i.url))
     // A description that could not be fetched is tried again after each fetch of the list
     for (const [url, a] of abouts) if (a.error) abouts.delete(url)
     fetchedAt = await $.clock.now()
@@ -1438,6 +1471,8 @@ type PanelWrite =
   | { kind: 'clone' }
   | { kind: 'worktree' }
   | { kind: 'push'; job: FixJob; head: string }
+  // c on the issues tab: close (the reason is the choice picked) or reopen
+  | { kind: 'issue'; issue: Issue; to: 'close' | 'reopen' }
 // A row to check or uncheck (x, or its number key), such as an AI review finding; note is said after it, dim
 type PanelItem = { text: string; note: string; checked: boolean }
 // A choice y needs first (the merge method), picked with its number key; refused says why a key is not offered here
@@ -1581,6 +1616,11 @@ async function runWrite($: EngineInterface, p: WritePanel): Promise<string> {
   const pr = p.prs[0]
   const method = METHODS.find((m) => m.key === p.chosen)
   if (p.write.kind === 'approve') return approveAll($, p, p.write.how)
+  if (p.write.kind === 'issue') {
+    const reason = CLOSE_REASONS.find((r) => r.key === p.chosen)?.flag ?? ''
+    if (p.write.to === 'close' && !reason) return ''
+    return setIssueState($, p.write.issue, p.write.to, reason)
+  }
   if (!pr) return ''
   if (p.write.kind === 'findings') {
     const event = p.chosen === 'r' ? 'REQUEST_CHANGES' : 'COMMENT'
@@ -4139,6 +4179,144 @@ async function fetchAbout($: EngineInterface, pr: PR): Promise<void> {
   $.ui.invalidate('ui.render')
 }
 
+// The description, conversation and sub-issues of the selected issue, for the details under the list: fetched once
+// the selection rests on it, again when it is updated. Drawn only, never sent to a model
+type IssueAbout = {
+  updatedAt: string
+  body: string
+  stateReason: string
+  talk: Talk[]
+  comments: number
+  subs: IssueRef[]
+  error: string
+}
+const issueAbouts = new Map<string, IssueAbout>()
+const issueAboutLoading = new Set<string>()
+// The latest comments fetched
+const ISSUE_COMMENTS = 30
+const ISSUE_QUERY = `query($url: URI!) {
+  resource(url: $url) {
+    ... on Issue {
+      body stateReason
+      comments(last: ${ISSUE_COMMENTS}) { totalCount nodes { author { login } createdAt body } }
+      subIssues(first: 50) { nodes { number title url state repository { nameWithOwner } } }
+    }
+  }
+}`
+
+let issueTimer: { url: string; cancel: () => void } | undefined
+function loadIssueAbout($: EngineInterface, issue: Issue): void {
+  const url = issue.url
+  if (issueAbouts.get(url)?.updatedAt === issue.updatedAt || issueAboutLoading.has(url) || issueTimer?.url === url) return
+  issueTimer?.cancel()
+  const timer = $.clock.after(ABOUT_DELAY, () => {
+    issueTimer = undefined
+    if (selected === url) void fetchIssueAbout($, issue)
+  })
+  issueTimer = { url, cancel: () => timer.cancel() }
+}
+
+async function fetchIssueAbout($: EngineInterface, issue: Issue): Promise<void> {
+  issueAboutLoading.add(issue.url)
+  const r = await $.process.run(['gh', 'api', 'graphql', '-f', `query=${ISSUE_QUERY}`, '-f', `url=${issue.url}`]).catch(ghMissing)
+  issueAboutLoading.delete(issue.url)
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  const about: IssueAbout = { updatedAt: issue.updatedAt, body: '', stateReason: '', talk: [], comments: 0, subs: [], error: '' }
+  if (r.exitCode !== 0) about.error = clean(r.stderr) || `gh exited with code ${r.exitCode}`
+  else
+    try {
+      const v = (JSON.parse(r.stdout) as { data?: { resource?: Record<string, unknown> | null } }).data?.resource
+      if (!v || typeof v.body !== 'string') throw new Error('not an issue')
+      const comments = v.comments as { totalCount?: unknown; nodes?: unknown } | undefined
+      const subs = v.subIssues as { nodes?: unknown } | undefined
+      about.body = cleanBody(v.body)
+      about.stateReason = clean(str(v.stateReason))
+      about.comments = Number(comments?.totalCount) || 0
+      about.talk = (Array.isArray(comments?.nodes) ? (comments.nodes as Record<string, unknown>[]) : [])
+        .filter((c) => c && typeof c === 'object')
+        .map((c) => ({
+          kind: 'comment' as const,
+          author: clean(str((c.author as { login?: unknown } | null)?.login)),
+          at: str(c.createdAt),
+          body: cleanBody(str(c.body)),
+        }))
+      about.subs = (Array.isArray(subs?.nodes) ? (subs.nodes as IssueRef[]) : [])
+        .map(cleanIssueRef)
+        .filter((x): x is IssueRef => x !== null)
+    } catch {
+      about.error = 'unreadable answer from gh'
+    }
+  // Only issues still listed are kept
+  for (const url of issueAbouts.keys()) if (!findIssue(url)) issueAbouts.delete(url)
+  issueAbouts.set(issue.url, about)
+  $.ui.invalidate('ui.render')
+}
+
+// An issue on the issues tab: assigned to you, or closed from the pane in this session
+function findIssue(url: string): Issue | undefined {
+  return assigned.find((i) => i.url === url) ?? closedHere.find((i) => i.url === url)
+}
+
+// c on the issues tab: close the issue (as completed or not planned, picked with its number key, never one picked for
+// you) or reopen one closed here. The panel names the issue in full and what y sends
+const CLOSE_REASONS = [
+  { key: '1', word: 'completed', flag: 'completed' },
+  { key: '2', word: 'not planned', flag: 'not planned' },
+] as const
+
+function openIssueState($: EngineInterface, issue: Issue): void {
+  const to = issue.state === 'CLOSED' ? 'reopen' : 'close'
+  const full = `${issue.repository.nameWithOwner}#${issue.number}`
+  const subs = issue.subIssuesSummary ?? { total: 0, completed: 0 }
+  const notes: PanelNote[] = [{ text: `${full} ${issue.title}` }]
+  if (to === 'close' && subs.total > subs.completed)
+    notes.push({
+      text: `⚠ ${subs.total - subs.completed} of its ${plural(subs.total, 'sub-issue')} still open: closing it leaves them open`,
+      color: 'yellow',
+    })
+  if (to === 'close') notes.push({ text: 'It stays under closed here until the pane closes, so c can reopen it' })
+  openPanel($, {
+    verb: to,
+    prs: [],
+    title: `${issue.repository.nameWithOwner.split('/')[1] ?? issue.repository.nameWithOwner}#${issue.number} ${issue.title}`,
+    notes,
+    sendsLead: to === 'close' ? 'y closes: ' : 'y reopens: ',
+    sends: to === 'close' ? `${full} as {choice}` : full,
+    ...(to === 'close' ? { choices: CLOSE_REASONS.map((r) => ({ key: r.key, word: r.word, refused: '' })), choiceWhat: 'a reason' } : {}),
+    yes: to,
+    movedNote: '',
+    progress: to === 'close' ? '⟳ closing…' : '⟳ reopening…',
+    write: { kind: 'issue', issue, to },
+    failLead: to === 'close' ? 'Not closed' : 'Not reopened',
+  })
+}
+
+// y in the close or reopen panel: refused when GitHub has it in that state already
+async function setIssueState($: EngineInterface, issue: Issue, to: 'close' | 'reopen', reason: string): Promise<string> {
+  const full = `${issue.repository.nameWithOwner}#${issue.number}`
+  const now = await $.process.run(['gh', 'issue', 'view', issue.url, '--json', 'state']).catch(ghMissing)
+  let state = ''
+  try {
+    state = now.exitCode === 0 ? String((JSON.parse(now.stdout) as { state?: unknown }).state ?? '') : ''
+  } catch {
+    // Read below as unknown
+  }
+  if (now.exitCode !== 0 || !state) return `could not read its state: ${fit(clean(now.stderr) || 'unreadable answer from gh', 160)}`
+  if (state === (to === 'close' ? 'CLOSED' : 'OPEN')) {
+    await refresh($)
+    return `${full} is ${to === 'close' ? 'closed' : 'open'} already`
+  }
+  const argv = to === 'close' ? ['gh', 'issue', 'close', issue.url, '--reason', reason] : ['gh', 'issue', 'reopen', issue.url]
+  const r = await $.process.run(argv).catch(ghMissing)
+  if (r.exitCode !== 0) return fit(clean(r.stderr) || 'GitHub refused it', 160)
+  if (to === 'close') closedHere = [{ ...issue, state: 'CLOSED' }, ...closedHere.filter((i) => i.url !== issue.url)]
+  else closedHere = closedHere.filter((i) => i.url !== issue.url)
+  $.ui.toast(to === 'close' ? `✦ closed ${full} as ${reason} · c: reopen it (under closed here)` : `✦ reopened ${full}`)
+  $.ui.log(`pr-inbox ${to === 'close' ? `closed ${full} as ${reason}` : `reopened ${full}`}: you pressed y in the panel of c`)
+  await refresh($)
+  return ''
+}
+
 // y: markdown drawn as GitHub would, or the text as written (plain), in the details and the reader alike
 let plainText = false
 
@@ -5665,7 +5843,7 @@ export function register(on: On, options: PluginOptions) {
       Button({ key: k, label, hotkey, plain: true, dimColor: dim, onPress })
     const leave = () => {
       if (p.sending) {
-        const named = ['approve', 'merge', 'auto-merge on', 'auto-merge off', 'merge stack', 'findings'].includes(p.write.kind)
+        const named = ['approve', 'merge', 'auto-merge on', 'auto-merge off', 'merge stack', 'findings', 'issue'].includes(p.write.kind)
         toast(`q: wait, ${p.progress.replace(/^⟳ /, '').replace(/…$/, '')}${named ? ` ${sendsText(p)}` : ''}…`)
         return
       }
@@ -6812,12 +6990,11 @@ export function register(on: On, options: PluginOptions) {
             ? 'no issue matches the filter · f: change it'
             : 'no issues assigned to you'
         if (k === 'o')
-          return selected && assigned.some((i) => i.url === selected)
+          return selected && findIssue(selected)
             ? "o: this issue's link is not a plain https:// GitHub link, so it does not open"
             : `o: ${none}`
-        if (k === 'j' || k === 'k') return `${k}: ${none}`
-        if (k === 'n') return "n pages a PR's details (1, 2) · issues have none here: o opens one on GitHub"
-        if ('abcdeimpsvwxyz'.includes(k)) return `${k} acts on PRs (1: To review, 2: My PRs) · on issues, o opens one on GitHub`
+        if (k === 'j' || k === 'k' || k === 'c' || k === 'y') return `${k}: ${none}`
+        if ('abdeimpsvwxz'.includes(k)) return `${k} acts on PRs (1: To review, 2: My PRs) · on issues: o opens, c closes or reopens`
       }
       const n = pr ? askLabel(pr) : 'this PR'
       const ownTab = 'on your PRs (2: My PRs)'
@@ -7462,7 +7639,11 @@ export function register(on: On, options: PluginOptions) {
         [
           'the selected issue (3)',
           [
-            ['o', 'open on GitHub · issues are only listed: no model sees them, and the pane writes nothing to them'],
+            ['o', 'open on GitHub'],
+            ['c', 'close it (1 completed / 2 not planned, then y) · on one closed here: reopen it (y) · no model sees issues'],
+            ['y', 'its description and comments as markdown, or as plain text'],
+            ['n', 'next page of its details, when they do not fit'],
+            ['SUB', 'sub-issues closed / all · ├ └ under a listed parent · ↑#12 the parent, not listed'],
             ['TALK / UPD', 'comments · time since the last update'],
           ],
         ],
@@ -7546,9 +7727,30 @@ export function register(on: On, options: PluginOptions) {
     }
 
     if (tab === 'issues') {
-      const issues = assigned.filter(matchesFilter)
+      // A sub-issue goes under its parent when the parent is listed too, in the parent's place; those closed here last
+      const listed = assigned.filter(matchesFilter)
+      const listedUrls = new Set(listed.map((i) => i.url))
+      const depthOf = new Map<string, number>()
+      const lastChild = new Set<string>()
+      const ordered: Issue[] = []
+      const place = (i: Issue, depth: number) => {
+        if (depthOf.has(i.url)) return
+        depthOf.set(i.url, depth)
+        ordered.push(i)
+        const kids = listed.filter((c) => c.parent?.url === i.url && !depthOf.has(c.url))
+        const last = kids.at(-1)
+        if (last) lastChild.add(last.url)
+        for (const c of kids) place(c, depth + 1)
+      }
+      for (const i of listed) if (!(i.parent && listedUrls.has(i.parent.url))) place(i, 0)
+      // Parents that loop (GitHub does not allow it) are still listed, each once
+      for (const i of listed) place(i, 0)
+      const closed = closedHere.filter(matchesFilter)
+      const issues = [...ordered, ...closed]
       ensureSelection(issues)
       const issue = issues.find((i) => i.url === selected)
+      if (issue) loadIssueAbout($, issue)
+      const isClosed = (i: Issue) => i.state === 'CLOSED'
       const issueKeys: El[] = []
       if (issue) {
         const href = safeHref(issue.url)
@@ -7564,6 +7766,17 @@ export function register(on: On, options: PluginOptions) {
                 }),
               ]
             : []),
+          Button({
+            key: 'issue-state',
+            label: isClosed(issue) ? 'reopen' : 'close',
+            hotkey: 'c',
+            plain: true,
+            onPress: () => openIssueState($, issue),
+          }),
+          small('issue-plain', plainText ? 'markdown' : 'plain text', 'y', () => {
+            plainText = !plainText
+            redraw()
+          }),
           Box({
             display: 'none',
             children: [
@@ -7588,22 +7801,36 @@ export function register(on: On, options: PluginOptions) {
         24,
         Math.max(5, ...issues.map((i) => textWidth(`${i.repository.nameWithOwner.split('/')[1] ?? ''}#${i.number}`))),
       )
-      const issueWidth = Math.max(5, Math.min(labelWidth, columns - 16 - 28))
+      // SUB, TALK and UPD on the right
+      const RIGHT = 16
+      const issueWidth = Math.max(5, Math.min(labelWidth, columns - 3 - RIGHT - 28))
+      // "#12" for a parent in the same repository, "repo#12" for one elsewhere
+      const refLabel = (ref: IssueRef, from: Issue) =>
+        ref.repository.nameWithOwner === from.repository.nameWithOwner
+          ? `#${ref.number}`
+          : `${ref.repository.nameWithOwner.split('/')[1] ?? ref.repository.nameWithOwner}#${ref.number}`
       const issueRow = (i: Issue) => {
         const isSelected = selected === i.url
         const repo = i.repository.nameWithOwner.split('/')[1] ?? i.repository.nameWithOwner
         const label = shortLabel(`${repo}#${i.number}`, issueWidth)
         const href = safeHref(i.url)
         const talk = i.comments?.totalCount ?? 0
-        const right = ` ${talk > 0 ? `${talk}`.padStart(3) : '   '} ${short(i.updatedAt, now).padStart(4)}`
-        const lead = `${isSelected ? '▸' : ' '}  `
-        const width = Math.max(8, columns - textWidth(lead) - issueWidth - 2 - textWidth(right))
+        const subs = i.subIssuesSummary ?? { total: 0, completed: 0 }
+        const sub = subs.total > 0 ? `${subs.completed}/${subs.total}` : ''
+        const done = subs.total > 0 && subs.completed >= subs.total
+        const lead = `${isSelected ? '▸' : ' '}${isClosed(i) ? '✓' : ' '} `
+        const width = Math.max(8, columns - 1 - textWidth(lead) - issueWidth - 1 - RIGHT)
+        // Under a listed parent: the rail; with a parent that is not listed: which one it belongs to
+        const depth = depthOf.get(i.url) ?? 0
+        const rail = depth > 0 ? `${'  '.repeat(depth - 1)}${lastChild.has(i.url) ? '└' : '├'} ` : ''
+        const parentNote = depth === 0 && i.parent ? `↑${refLabel(i.parent, i)} ` : ''
         const names = (i.labels?.nodes ?? []).map((l) => l?.name ?? '').filter(Boolean)
         const tags = names.length ? `  ${names.join(' · ')}` : ''
-        // The title first; the labels get what is left, at most a third
-        const title = fit(i.title, Math.max(8, width - Math.min(textWidth(tags), Math.floor(width / 3))))
-        const tagText = tags ? fit(tags, Math.max(0, width - textWidth(title))) : ''
-        const pad = ' '.repeat(Math.max(0, width - textWidth(title) - textWidth(tagText)))
+        const lead2 = fit(`${rail}${parentNote}`, Math.max(0, Math.floor(width / 3)))
+        const titleRoom = Math.max(8, width - textWidth(lead2) - Math.min(textWidth(tags), Math.floor(width / 3)))
+        const title = fit(i.title, titleRoom)
+        const tagText = tags ? fit(tags, Math.max(0, width - textWidth(lead2) - textWidth(title))) : ''
+        const pad = ' '.repeat(Math.max(0, width - textWidth(lead2) - textWidth(title) - textWidth(tagText)))
         return Box({
           key: `line-${i.url}`,
           flexDirection: 'row',
@@ -7612,21 +7839,187 @@ export function register(on: On, options: PluginOptions) {
             Text({ color: focused ? NEON.pink : NEON.muted, bold: true, children: [lead] }),
             href ? (isSelected ? link(href, label, true) : quietLink(href, label)) : Text({ children: [label] }),
             Text({ children: [' '.repeat(Math.max(0, issueWidth - textWidth(label)) + 1)] }),
+            Text({ color: NEON.muted, children: [lead2] }),
             Text({
               bold: isSelected,
               ...(isSelected && focused ? { backgroundColor: NEON.selection, color: NEON.onSelection } : {}),
               ...(isSelected && !focused ? { underline: true } : {}),
-              dimColor: !focused,
+              dimColor: !focused || isClosed(i),
               wrap: 'truncate-end',
               children: [title],
             }),
             Text({ color: NEON.muted, wrap: 'truncate-end', children: [`${tagText}${pad}`] }),
-            Text({ dimColor: true, children: [right] }),
+            Text({ ...(sub ? { color: done ? NEON.green : NEON.cyan } : { dimColor: true }), children: [` ${sub.padStart(5)}`] }),
+            Text({ dimColor: true, children: [` ${(talk > 0 ? `${talk}` : '').padStart(4)} ${short(i.updatedAt, now).padStart(4)}`] }),
           ],
         })
       }
-      // The rows around the selection when they do not fit
-      const issueRoom = Math.max(3, paneLimit - topLines - 3 - issueFooter.length)
+      const closedHeading = (n: number) =>
+        Box({
+          flexDirection: 'row',
+          children: [
+            Text({ color: NEON.rule, children: ['── '] }),
+            Text({ color: NEON.violet, bold: true, children: [`✓ closed here ${n} `] }),
+            Text({ color: NEON.muted, children: ['· c: reopen '] }),
+            Text({ color: NEON.rule, children: ['─'.repeat(Math.max(0, columns - textWidth(`── ✓ closed here ${n} · c: reopen `)))] }),
+          ],
+        })
+
+      // The details of the selected issue: what it is, its parent and sub-issues, its description, then the latest
+      // comments, as markdown (y: as written). Paged with n when they do not fit
+      const issuePanel = (i: Issue, budget: number) => {
+        const about = issueAbouts.get(i.url)
+        const children: El[] = []
+        const heights: number[] = []
+        const add = (el: El, lines: number) => {
+          children.push(el)
+          heights.push(lines)
+        }
+        const state = isClosed(i)
+          ? `closed${about?.stateReason ? ` as ${about.stateReason.toLowerCase().replace(/_/g, ' ')}` : ''}`
+          : 'open'
+        const facts = [
+          state,
+          `@${i.author?.login ?? '?'}`,
+          `opened ${elapsed(i.createdAt, now)} ago`,
+          `updated ${elapsed(i.updatedAt, now)} ago`,
+        ]
+        add(
+          Box({
+            paddingLeft: INDENT,
+            flexDirection: 'row',
+            columnGap: 2,
+            children: [
+              Text({ color: isClosed(i) ? NEON.muted : NEON.green, bold: true, children: [facts[0] ?? ''] }),
+              Text({ dimColor: true, wrap: 'wrap', children: [facts.slice(1).join(' · ')] }),
+            ],
+          }),
+          wrappedLines(facts.join('  '), bodyColumns),
+        )
+        const refRow = (mark: string, color: string, ref: IssueRef, note = '') => {
+          const href = safeHref(ref.url)
+          const lbl = refLabel(ref, i)
+          return Box({
+            paddingLeft: INDENT,
+            flexDirection: 'row',
+            columnGap: 1,
+            children: [
+              Text({ color, children: [mark] }),
+              href ? quietLink(href, lbl) : Text({ children: [lbl] }),
+              Text({ wrap: 'truncate-end', children: [fit(ref.title, Math.max(10, bodyColumns - textWidth(lbl) - textWidth(note) - 6))] }),
+              ...(note ? [Text({ color: NEON.muted, children: [note] })] : []),
+            ],
+          })
+        }
+        if (i.parent) add(refRow('↑', NEON.violet, i.parent, '(parent)'), 1)
+        const section = (name: string, note: string) =>
+          add(
+            Box({
+              paddingLeft: INDENT,
+              marginTop: 1,
+              flexDirection: 'row',
+              columnGap: 2,
+              children: [
+                Text({ bold: true, color: NEON.cyan, children: [name] }),
+                Text({ dimColor: true, wrap: 'wrap', children: [note] }),
+              ],
+            }),
+            1 + wrappedLines(`${name}  ${note}`, bodyColumns),
+          )
+        const prose = (text: string, indent: number) => {
+          for (const [k, block] of markdownBlocks(text).entries()) {
+            add(
+              Box({
+                paddingLeft: INDENT + indent,
+                marginTop: k > 0 ? 1 : 0,
+                children: [plainText ? Text({ wrap: 'wrap', children: [block] }) : Markdown({ text: block })],
+              }),
+              (k > 0 ? 1 : 0) + block.split('\n').reduce((n, line) => n + wrappedLines(line, bodyColumns - indent), 0),
+            )
+          }
+        }
+        const view = plainText ? 'y: markdown' : 'y: plain text'
+        const subs = i.subIssuesSummary ?? { total: 0, completed: 0 }
+        if (!about) section(subs.total > 0 ? 'Sub-issues and description' : 'Description', 'fetching…')
+        else if (about.error)
+          section('Description', `could not fetch it: ${fit(about.error, Math.max(10, bodyColumns - 40))} · o: open on GitHub`)
+        else {
+          if (about.subs.length > 0) {
+            const open = about.subs.filter((x) => x.state !== 'CLOSED').length
+            section('Sub-issues', `${subs.completed || about.subs.length - open} of ${subs.total || about.subs.length} closed`)
+            // Open ones first, as they are what is left
+            for (const x of [...about.subs].sort((a, b) => Number(a.state === 'CLOSED') - Number(b.state === 'CLOSED')))
+              add(
+                refRow(
+                  x.state === 'CLOSED' ? '✓' : '○',
+                  x.state === 'CLOSED' ? NEON.green : NEON.cyan,
+                  x,
+                  assigned.some((a) => a.url === x.url) ? '(assigned to you)' : '',
+                ),
+                1,
+              )
+          }
+          section('Description', about.updatedAt !== i.updatedAt ? `updating… · ${view}` : view)
+          if (about.body) prose(about.body, 0)
+          else add(Box({ paddingLeft: INDENT, children: [Text({ color: NEON.muted, children: ['No description'] })] }), 1)
+          if (about.talk.length > 0) {
+            const n = about.comments
+            section('Conversation', n > about.talk.length ? `latest ${about.talk.length} of ${n} · o: all on GitHub` : plural(n, 'comment'))
+            for (const t of about.talk) {
+              const at = t.at ? `${elapsed(t.at, now)} ago` : ''
+              add(
+                Box({
+                  paddingLeft: INDENT,
+                  flexDirection: 'row',
+                  columnGap: 1,
+                  children: [
+                    Text({ color: NEON.cyan, bold: true, children: [`@${t.author || '?'}`] }),
+                    Text({ dimColor: true, children: [at] }),
+                  ],
+                }),
+                1,
+              )
+              if (t.body) prose(t.body, 2)
+            }
+          }
+        }
+        const total = heights.reduce((n, h) => n + h, 0)
+        if (total <= budget) return { el: Box({ key: `panel-${i.url}`, flexDirection: 'column', children }), lines: total }
+        if (issuePage.url !== i.url) issuePage = { url: i.url, from: 1 }
+        const from = Math.min(Math.max(1, issuePage.from), children.length - 1)
+        const linesOfParts = (a: number, b: number) => heights.slice(a, b).reduce((n, h) => n + h, 0)
+        let used = (heights[0] ?? 1) + (from > 1 ? 1 : 0)
+        let k = from
+        while (k < children.length && used + (heights[k] ?? 1) <= budget - 1) used += heights[k++] ?? 1
+        if (k === from) used += heights[k++] ?? 1
+        const below = linesOfParts(k, children.length)
+        const shownParts = [
+          children[0] as El,
+          ...(from > 1 ? [Text({ color: NEON.muted, children: [`  ↑ ${linesOfParts(1, from)} lines above`] })] : []),
+          ...children.slice(from, k),
+          Button({
+            key: 'panel-more',
+            label: below > 0 ? `↓ ${below} more lines` : '↑ back to the top',
+            hotkey: 'n',
+            plain: true,
+            dimColor: true,
+            onPress: () => {
+              issuePage = { url: i.url, from: below > 0 ? k : 1 }
+              redraw()
+            },
+          }),
+        ]
+        return { el: Box({ key: `panel-${i.url}`, flexDirection: 'column', children: shownParts }), lines: used + 1 }
+      }
+
+      // The list keeps at least three rows, or half the pane when it needs it; the details get the rest
+      const issueFooterLines = issue && focused ? wrappedRowLines([16, 8, 12], 2, columns) : issue ? 1 : 0
+      const headingLines = closed.length > 0 ? 1 : 0
+      const issueChrome = topLines + 2 + 1 + (issue ? 1 : 0) + headingLines + issueFooterLines
+      const listMin = Math.min(issues.length, 3) + (issues.length > 3 ? 1 : 0)
+      const listShare = Math.max(listMin, Math.min(issues.length, Math.ceil((paneLimit - issueChrome) / 2)))
+      const builtIssue = issue ? issuePanel(issue, Math.max(2, paneLimit - issueChrome - listShare)) : undefined
+      const issueRoom = Math.max(3, paneLimit - issueChrome - (builtIssue?.lines ?? 0))
       let shownIssues = issues
       const issueMore: El[] = []
       if (issues.length > issueRoom) {
@@ -7654,7 +8047,13 @@ export function register(on: On, options: PluginOptions) {
             : org
               ? `  No open issues assigned to you in ${org} · org_filter in /config`
               : '  No open issues are assigned to you'
-      const issueList = issues.length > 0 ? shownIssues.map(issueRow) : [Text({ dimColor: true, children: [empty] })]
+      const issueList: El[] = []
+      for (const i of shownIssues) {
+        if (isClosed(i) && (issueList.length === 0 || !isClosed(shownIssues[shownIssues.indexOf(i) - 1] as Issue)))
+          issueList.push(closedHeading(closed.length))
+        issueList.push(issueRow(i))
+      }
+      if (issues.length === 0) issueList.push(Text({ dimColor: true, children: [empty] }))
       // Over the search's 50: say how many are left out, and where to see them
       if (assignedTotal > assigned.length)
         issueMore.push(
@@ -7667,10 +8066,26 @@ export function register(on: On, options: PluginOptions) {
         )
       const issueHead = Text({
         color: NEON.muted,
-        children: [`   ${'ISSUE'.padEnd(issueWidth)} TITLE`.padEnd(Math.max(0, columns - 10)) + 'TALK  UPD'],
+        children: [`   ${'ISSUE'.padEnd(issueWidth)} TITLE`.padEnd(Math.max(0, columns - 1 - RIGHT)) + `   SUB TALK  UPD`],
       })
-      const issueTree = [...top, focusRule(), ...(issues.length > 0 ? [issueHead] : []), ...issueList, ...issueMore, rule(), ...issueFooter]
-      lastHeight = topLines + 2 + (issues.length > 0 ? 1 : 0) + issueList.length + issueMore.length + issueFooter.length
+      const issueTree = [
+        ...top,
+        focusRule(),
+        ...(issues.length > 0 ? [issueHead] : []),
+        ...issueList,
+        ...issueMore,
+        ...(builtIssue ? [rule(), builtIssue.el] : []),
+        rule(),
+        ...issueFooter,
+      ]
+      lastHeight =
+        topLines +
+        2 +
+        (issues.length > 0 ? 1 : 0) +
+        issueList.length +
+        issueMore.length +
+        (builtIssue ? 1 + builtIssue.lines : 0) +
+        issueFooter.length
       return Box({ flexDirection: 'column', children: [...issueTree, ...catcher(issueTree)] })
     }
 

@@ -472,7 +472,7 @@ const withRequests = (p) => {
 }
 const WEB_TEAM = ['lena-park', 'mtanaka', 'rkumar']
 // Open issues assigned to you (tab 3)
-const issue = (repo, number, title, author, hours, labels, comments) => ({
+const issue = (repo, number, title, author, hours, labels, comments, extra = {}) => ({
   number,
   title,
   url: `https://github.com/acme/${repo}/issues/${number}`,
@@ -482,12 +482,55 @@ const issue = (repo, number, title, author, hours, labels, comments) => ({
   author: { login: author },
   labels: { nodes: labels.map((name) => ({ name })) },
   comments: { totalCount: comments },
+  state: 'OPEN',
+  ...extra,
 })
-const ASSIGNED = [
-  issue('storefront', 512, 'Checkout button stays disabled after a coupon is removed', 'lena-park', 3, ['bug', 'checkout'], 4),
-  issue('billing-api', 233, 'Retry webhook deliveries with backoff', 'rkumar', 30, ['enhancement'], 1),
+const ref = (repo, number, title, state = 'OPEN') => ({
+  number,
+  title,
+  url: `https://github.com/acme/${repo}/issues/${number}`,
+  state,
+  repository: { nameWithOwner: `acme/${repo}` },
+})
+const EPIC = ref('storefront', 480, 'Checkout redesign')
+// The checkout epic and one of its sub-issues are yours; the webhook work belongs to an epic someone else holds
+const SUBS = {
+  'https://github.com/acme/storefront/issues/480': [
+    ref('storefront', 481, 'New coupon field', 'CLOSED'),
+    ref('storefront', 512, 'Checkout button stays disabled after a coupon is removed'),
+    ref('storefront', 515, 'Saved cards on the payment step'),
+  ],
+}
+const ASSIGNED_ALL = [
+  issue('storefront', 512, 'Checkout button stays disabled after a coupon is removed', 'lena-park', 3, ['bug', 'checkout'], 4, { parent: EPIC }),
+  issue('billing-api', 233, 'Retry webhook deliveries with backoff', 'rkumar', 30, ['enhancement'], 1, {
+    parent: ref('billing-api', 200, 'Webhooks v2'),
+  }),
+  issue('storefront', 480, 'Checkout redesign', 'sofia-ito', 24 * 2, ['epic'], 2, { subIssuesSummary: { total: 3, completed: 1 } }),
   issue('storefront', 498, 'Document the feature flag rollout steps', 'mtanaka', 24 * 9, ['docs'], 0),
 ]
+// Closed from the pane (c) during the demo: kept in the demo's state file
+const issueClosed = (url) => readState()[`closed:${url}`] === true
+const setIssueClosed = (url, closed) => {
+  if (!STATE) return
+  fs.writeFileSync(STATE, JSON.stringify({ ...readState(), [`closed:${url}`]: closed }))
+}
+const ASSIGNED = ASSIGNED_ALL.filter((i) => !issueClosed(i.url))
+// What the details under the list show for each issue
+const ISSUE_BODIES = {
+  'https://github.com/acme/storefront/issues/512':
+    'After removing a coupon on the cart page, **Place order** stays disabled until the page is reloaded.\n\n1. Add any item\n2. Apply `SPRING10`, then remove it\n3. The button stays grey',
+  'https://github.com/acme/billing-api/issues/233': 'Deliveries that fail are dropped today. Retry them with exponential backoff, up to 6 attempts.',
+  'https://github.com/acme/storefront/issues/480': 'One page checkout, in three parts. Each part is a sub-issue.',
+  'https://github.com/acme/storefront/issues/498': 'Write down how a flag goes from 1% to 100%, and who to ask at each step.',
+}
+const ISSUE_TALK = {
+  'https://github.com/acme/storefront/issues/512': [
+    { author: { login: 'lena-park' }, createdAt: ago(20), body: 'Happens on Safari and Chrome.' },
+    { author: { login: 'mtanaka' }, createdAt: ago(5), body: 'The coupon reducer never resets `canSubmit`.' },
+  ],
+  'https://github.com/acme/storefront/issues/480': [{ author: { login: 'sofia-ito' }, createdAt: ago(40), body: 'Coupon field is out. Next: the button bug.' }],
+}
 
 const PEOPLE = [
   { login: 'lena-park', name: 'Lena Park' },
@@ -514,7 +557,21 @@ if (args[0] === 'api' && args[1] === 'graphql') {
     requestEvents: p.requestEvents,
     latestReviews: p.latestReviews,
   })
-  if (query.includes('suggestedReviewers')) {
+  const issueUrl = (args.find((a) => a.startsWith('url=')) ?? '').slice('url='.length)
+  if (issueUrl) {
+    const talk = ISSUE_TALK[issueUrl] ?? []
+    const subs = (SUBS[issueUrl] ?? []).map((x) => (issueClosed(x.url) ? { ...x, state: 'CLOSED' } : x))
+    out({
+      data: {
+        resource: {
+          body: ISSUE_BODIES[issueUrl] ?? '',
+          stateReason: issueClosed(issueUrl) ? 'NOT_PLANNED' : null,
+          comments: { totalCount: talk.length, nodes: talk },
+          subIssues: { nodes: subs },
+        },
+      },
+    })
+  } else if (query.includes('suggestedReviewers')) {
     // Your recent PRs here: the web team asked on both, mtanaka reviewing; merged PRs reviewed by rkumar
     out({
       data: {
@@ -622,6 +679,13 @@ if (args[0] === 'api' && args[1] === 'graphql') {
   const q = String(args[2] ?? '').toLowerCase()
   const hits = (SEARCH[flag('--repo')] ?? []).filter((f) => f.words.some((w) => w.toLowerCase().includes(q) || q.includes(w.toLowerCase())))
   out(hits.map((h) => ({ path: h.path, textMatches: [{ fragment: FILES[flag('--repo')]?.[h.path] ?? '' }] })))
+} else if (args[0] === 'issue' && args[1] === 'view' && args.includes('--web')) {
+  out('')
+} else if (args[0] === 'issue' && args[1] === 'view' && flag('--json') === 'state') {
+  out({ state: issueClosed(args[2]) ? 'CLOSED' : 'OPEN' })
+} else if (args[0] === 'issue' && (args[1] === 'close' || args[1] === 'reopen')) {
+  setIssueClosed(args[2], args[1] === 'close')
+  out('')
 } else if (args[0] === 'issue' && args[1] === 'view') {
   fail('GraphQL: Could not resolve to an issue')
 } else if (args[0] === 'pr' && args[1] === 'view' && flag('-R')) {
