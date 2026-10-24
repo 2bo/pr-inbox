@@ -4510,13 +4510,16 @@ function openFindings($: EngineInterface, pr: PR): void {
     prs: [pr],
     title: '',
     notes: [
-      ...(run.summary ? [{ text: "The review's body: the AI review's summary, with @mentions defused" }] : []),
+      {
+        text: `Posted as you. @mentions in every comment are defused${run.summary ? "; the body starts with the AI review's summary" : ''}`,
+      },
       {
         text: 'A finding with no line goes in the body (→ body). If GitHub refuses a line outside the diff, all of them go in the body',
       },
     ],
     items: all.map((f) => ({
-      text: `${findingMark(f)} [${f.perspective}] ${f.location || 'general'} ${f.summary}`,
+      // Where and what first, as a narrow pane cuts the end
+      text: `${findingMark(f)} ${f.location || 'general'} ${f.summary} · ${f.perspective}`,
       note: findingPlace(f) ? '' : '→ body',
       checked: isCandidate(f),
     })),
@@ -4528,7 +4531,7 @@ function openFindings($: EngineInterface, pr: PR): void {
     sendsLead: 'y posts: ',
     sends: '',
     yes: 'post',
-    movedNote: 'nothing will be posted (v: review them)',
+    movedNote: 'nothing will be posted · q, then v reviews the new commit',
     progress: '⟳ posting…',
     write: { kind: 'findings', findings: all },
   })
@@ -4543,7 +4546,7 @@ async function sendFindings($: EngineInterface, pr: PR, chosen: Finding[], event
   // Pinned to the reviewed commit: if new commits came, the lines may have moved
   const { head } = await currentHead($, pr)
   if (head && head !== pr.headRefOid) {
-    $.ui.toast(`Not posted: ${askLabel(pr)} has new commits since ${sha} · v: review them`, { timeoutMs: 10000 })
+    $.ui.toast(`Not posted: ${askLabel(pr)} has new commits since ${sha} · v reviews the new commit`, { timeoutMs: 10000 })
     await refresh($)
     return ''
   }
@@ -4569,12 +4572,16 @@ async function sendFindings($: EngineInterface, pr: PR, chosen: Finding[], event
       .catch(ghMissing)
   let r = await send(placed, loose)
   // A line outside the diff is refused: then everything goes in the review's body, each with its place
-  if (r.exitCode !== 0 && placed.length > 0 && /line|position|diff|422|Unprocessable/i.test(r.stderr)) r = await send([], chosen)
-  if (r.exitCode !== 0) return fit(clean(r.stderr) || 'GitHub refused it', 160)
-  $.ui.toast(`✦ posted ${plural(chosen.length, 'comment')} on ${askLabel(pr)} (${verdict.toLowerCase()})`, { timeoutMs: 8000 })
-  $.ui.log(
-    `pr-inbox posted a review on ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${verdict.toLowerCase()}, ${plural(chosen.length, 'AI finding')}): you pressed y in the findings panel of s`,
-  )
+  let where = `${placed.length} on their lines, ${loose.length} in the body`
+  if (r.exitCode !== 0 && placed.length > 0 && /line|position|diff|422|Unprocessable/i.test(r.stderr)) {
+    r = await send([], chosen)
+    where = `all ${chosen.length} in the body, GitHub refused a line outside the diff`
+  }
+  if (r.exitCode !== 0)
+    return `GitHub refused the review: ${fit(friendlyError(clean(r.stderr)) || 'no reason given', 140)} · o: open on GitHub`
+  const what = `1 review on ${pr.repository.nameWithOwner}#${pr.number} (${verdict.toLowerCase()}): ${where}`
+  $.ui.toast(`✦ posted ${what}`, { timeoutMs: 8000 })
+  $.ui.log(`pr-inbox posted ${what}, at ${sha}: you pressed y in the findings panel of s`)
   await refresh($)
   return ''
 }
@@ -5429,6 +5436,7 @@ export function register(on: On, options: PluginOptions) {
       children: [
         // Cancel first; n is a hidden second way out
         key('panel-cancel', 'cancel', 'q', leave, p.sending),
+        ...(p.items.length ? [key('panel-toggle', 'check / uncheck', 'x', () => toggle(p.cursor))] : []),
         Box({ display: 'none', children: [key('panel-no', 'cancel', 'n', leave)] }),
         key('panel-yes', p.error ? 'try again' : p.yes, 'y', () => void sendPanel($, p)),
         ...(only
@@ -5459,7 +5467,9 @@ export function register(on: On, options: PluginOptions) {
           Text({
             color: NEON.violet,
             bold: true,
-            children: [`${p.items.filter((i) => i.checked).length} of ${plural(p.items.length, 'finding')} checked`],
+            children: [
+              `${p.items.filter((i) => i.checked).length} of ${plural(p.items.length, 'finding')} checked${p.write.kind === 'findings' ? ' (those that block start checked)' : ''}`,
+            ],
           }),
           ...(top > 0 ? [Text({ color: NEON.muted, children: [`  ${top} more ↑`] })] : []),
           ...p.items.slice(top, top + LIST_ROWS).map((item, k) => {
@@ -5473,10 +5483,11 @@ export function register(on: On, options: PluginOptions) {
                 Text({ color: focused ? NEON.pink : NEON.muted, bold: true, children: [here ? '▸' : ' '] }),
                 Text({ color: NEON.muted, children: [i < 9 ? `${i + 1}` : ' '] }),
                 Text({ color: item.checked ? NEON.green : NEON.muted, bold: item.checked, children: [item.checked ? ' [x] ' : ' [ ] '] }),
+                // The selected one in full: it is what you decide on
                 Text({
-                  wrap: 'truncate-end',
+                  wrap: here ? 'wrap' : 'truncate-end',
                   ...(here && focused ? { color: NEON.onSelection } : {}),
-                  children: [fit(clean(item.text), Math.max(10, columns - 14 - textWidth(item.note)))],
+                  children: [here ? clean(item.text) : fit(clean(item.text), Math.max(10, columns - 14 - textWidth(item.note)))],
                 }),
                 Text({ color: NEON.muted, children: [item.note ? ` ${item.note}` : ''] }),
               ],
@@ -5496,14 +5507,16 @@ export function register(on: On, options: PluginOptions) {
                 p.cursor = Math.max(0, p.cursor - 1)
                 redraw()
               }),
-              key('panel-toggle', 'check / uncheck', 'x', () => toggle(p.cursor)),
               ...p.items.slice(0, 9).map((_, i) => key(`panel-item-key-${i + 1}`, String(i + 1), String(i + 1), () => toggle(i))),
             ],
           }),
           rule(),
         ]
       : []
-    const tree: El[] = [head, rule(true), ...body, rule(), ...items, ...choices, ...status, keys]
+    const help = p.items.length
+      ? [Text({ color: NEON.muted, children: ['j/k move · 1-9 or x check a row · then pick what it is posted as · y'] })]
+      : []
+    const tree: El[] = [head, rule(true), ...body, rule(), ...items, ...choices, ...status, keys, ...help]
     const picks = offered(p)
       .map((c) => `${c.key} ${c.word} · `)
       .join('')

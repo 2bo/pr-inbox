@@ -4301,7 +4301,7 @@ test('s posts the AI review findings you check as comments on their lines, pinne
   expect(s.questions).toEqual([])
   // The one that blocks is checked to start with; what to post it as is not picked for you
   expect(await panelText(ui)).toContain('1 of 1 finding checked')
-  expect(await panelText(ui)).toContain('[x] ✗ [Correctness & compatibility] app/login.rb:12 nil check missing')
+  expect(await panelText(ui)).toContain('[x] ✗ app/login.rb:12 nil check missing · Correctness & compatibility')
   expect(await panelText(ui)).toContain('pick what it is posted as: r request changes · c comment · then y')
   await ui.press({ key: 'panel-yes' })
   expect(s.toasts.at(-1)).toBe('y: pick what it is posted as: r request changes · c comment first')
@@ -4323,7 +4323,10 @@ test('s posts the AI review findings you check as comments on their lines, pinne
   expect(body.comments[0]?.body).toContain('**Correctness & compatibility**: nil check missing')
   // Text a model wrote from the PR notifies no one
   expect(body.comments[0]?.body).toContain('@\u200bacme/security')
-  expect(s.logs.some((l) => l.includes('pr-inbox posted a review on acme/app#11') && l.includes('the findings panel of s'))).toBe(true)
+  expect(s.logs).toContain(
+    'pr-inbox posted 1 review on acme/app#11 (request changes): 1 on their lines, 0 in the body, at aaaaaaa: you pressed y in the findings panel of s',
+  )
+  expect(s.toasts).toContain('✦ posted 1 review on acme/app#11 (request changes): 1 on their lines, 0 in the body')
   expect(await ui.find({ key: 'panel' })).toBeUndefined()
   await ui.unmount()
 })
@@ -4352,7 +4355,7 @@ test('a finding with no line goes in the review body, and the panel says so', as
   await start($, s.clock)
   const ui = await pressReview($, s)
   await ui.press({ key: 'act-send' })
-  expect(await panelText(ui)).toContain('general nil check missing → body')
+  expect(await panelText(ui)).toContain('general nil check missing · Correctness & compatibility → body')
   await ui.press({ key: 'panel-choice-c' })
   expect(await panelText(ui)).toContain('as comment: 0 on their lines, 1 in the body')
   await ui.unmount()
