@@ -1229,7 +1229,8 @@ async function loadInboxState($: EngineInterface): Promise<void> {
   const storedIssues = await $.store.get('seenIssues')
   const listed = new Map(assigned.map((i) => [i.url, i]))
   seenIssues = storedIssues === undefined ? Object.fromEntries([...listed.values()].map((i) => [i.url, i.updatedAt])) : asMap(storedIssues)
-  seenIssues = Object.fromEntries(Object.entries(seenIssues).filter(([url]) => listed.has(url)))
+  // Over the search's 50, an issue left out of this fetch may still be open: its record stays until the list fits
+  if (assignedTotal <= assigned.length) seenIssues = Object.fromEntries(Object.entries(seenIssues).filter(([url]) => listed.has(url)))
   await $.store.set('seenIssues', seenIssues)
   for (const key of await $.store.keys()) {
     if (!key.startsWith('review:')) continue
@@ -4400,12 +4401,11 @@ async function fetchIssueAbout($: EngineInterface, issue: Issue): Promise<void> 
         .filter((x): x is IssueRef => x !== null)
       about.prs = linkedPrs(v)
       const total = (x: unknown) => Number((x as { totalCount?: unknown } | undefined)?.totalCount) || 0
-      about.prsCut =
-        total(v.closedByPullRequestsReferences) > LINKED_CLOSING
-          ? 'more close it · o: all on GitHub'
-          : total(v.timelineItems) > LINKED_MENTIONS
-            ? 'older references not looked at · o: on GitHub'
-            : ''
+      const cut = [
+        ...(total(v.closedByPullRequestsReferences) > LINKED_CLOSING ? ['more close it'] : []),
+        ...(total(v.timelineItems) > LINKED_MENTIONS ? ['older references not looked at'] : []),
+      ]
+      about.prsCut = cut.length > 0 ? `${cut.join(' · ')} · o: all on GitHub` : ''
     } catch {
       about.error = 'unreadable answer from gh'
     }

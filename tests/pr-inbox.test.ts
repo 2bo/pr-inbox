@@ -3361,6 +3361,16 @@ test('n in the issue reader marks the next issue as seen', async ($, on) => {
   await ui.unmount()
 })
 
+test('while the issues are over the search cap, the seen record of one left out of this fetch is kept', async ($, on) => {
+  const gone = 'https://github.com/acme/app/issues/99'
+  const s = stubs(on, {
+    graphql: JSON.stringify({ data: { ...JSON.parse(GRAPHQL).data, assigned: { issueCount: 60, nodes: [issue()] } } }),
+    store: { seenIssues: { [gone]: '2026-09-01T00:00:00Z' } },
+  })
+  await start($, s.clock)
+  expect((s.store.get('seenIssues') as Record<string, string>)[gone]).toBe('2026-09-01T00:00:00Z')
+})
+
 test('the first time issues are listed, every issue already assigned counts as seen', async ($, on) => {
   const s = stubs(on, { graphql: withIssues(issue(), OTHER_ISSUE) })
   await start($, s.clock)
@@ -3383,7 +3393,9 @@ test('linked PRs show under an issue; in the reader a digit reads one in your li
   const linked = {
     // GitHub has more than the 10 fetched
     closedByPullRequestsReferences: { totalCount: 11, nodes: [ref(11, 'OPEN', { title: 'ログイン画面を直す' }), ref(90, 'MERGED')] },
+    // And more cross-references than the latest 20: both are said
     timelineItems: {
+      totalCount: 30,
       nodes: [
         { source: ref(91, 'OPEN', { isDraft: true, title: 'Draft\u001b[31m one' }) },
         // A mention from an issue is not a PR
@@ -3413,7 +3425,7 @@ test('linked PRs show under an issue; in the reader a digit reads one in your li
   expect(panel).toContain('(merged · closes it)')
   expect(panel).toContain('(draft · mentions it)')
   expect(panel).toContain('other/app#92')
-  expect(panel).toContain('more close it · o: all on GitHub')
+  expect(panel).toContain('more close it · older references not looked at · o: all on GitHub')
   expect(panel).not.toContain('An issue')
   expect(panel).not.toContain('\\u001b')
   await ui.press({ key: 'issue-read' })
@@ -3446,7 +3458,7 @@ test('with no linked PR found but older references not looked at, the details st
   await s.clock.advance(500)
   await s.clock.settle()
   const panel = JSON.stringify(await ui.find({ key: 'panel-https://github.com/acme/app/issues/7' }))
-  expect(panel).toContain('none closes it · older references not looked at · o: on GitHub')
+  expect(panel).toContain('none closes it · older references not looked at · o: all on GitHub')
   expect(panel).not.toContain('1-9')
   await ui.unmount()
 })
