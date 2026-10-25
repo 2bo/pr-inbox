@@ -6070,8 +6070,11 @@ export function register(on: On, options: PluginOptions) {
     if (!asking || e.command === 'pr-inbox' || e.origin.kind !== 'composer') return next(e)
     const { pr, write } = asking
     asking = undefined
-    if (e.args.includes(pr.url) && !write) guardNextTurn = true
-    return next(e)
+    if (!e.args.includes(pr.url)) return next(e)
+    if (!write) guardNextTurn = true
+    // The note rides after the command's output, as a prompt carries it beside its text
+    const r = await next(e)
+    return { ...r, context: [...(r.context ?? []), askNote(write, pr.kind)] }
   })
 
   // The hint line under the prompt says how to move between the prompt and the open pane
