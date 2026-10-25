@@ -541,6 +541,26 @@ const ISSUE_TALK = {
   'https://github.com/acme/storefront/issues/480': [{ author: { login: 'sofia-ito' }, createdAt: ago(40), body: 'Coupon field is out. Next: the button bug.' }],
 }
 
+// PRs linked to an issue: closing it, or mentioning it
+const linkedPr = (repo, number, title, state = 'OPEN', isDraft = false) => ({
+  number,
+  title,
+  url: `https://github.com/acme/${repo}/pull/${number}`,
+  state,
+  isDraft,
+  repository: { nameWithOwner: `acme/${repo}` },
+})
+const ISSUE_PRS = {
+  'https://github.com/acme/storefront/issues/512': {
+    closing: [linkedPr('storefront', 470, 'Extract feature flag helpers into a module')],
+    mentioning: [linkedPr('storefront', 513, 'Reset canSubmit when a coupon is removed', 'OPEN', true)],
+  },
+  'https://github.com/acme/storefront/issues/480': {
+    closing: [],
+    mentioning: [linkedPr('storefront', 466, 'Coupon field on the cart page', 'MERGED')],
+  },
+}
+
 const PEOPLE = [
   { login: 'lena-park', name: 'Lena Park' },
   { login: 'mtanaka', name: 'Mei Tanaka' },
@@ -577,6 +597,8 @@ if (args[0] === 'api' && args[1] === 'graphql') {
           stateReason: readState()[`closed:${issueUrl}`] || null,
           comments: { totalCount: talk.length, nodes: talk },
           subIssues: { nodes: subs },
+          closedByPullRequestsReferences: { nodes: ISSUE_PRS[issueUrl]?.closing ?? [] },
+          timelineItems: { nodes: (ISSUE_PRS[issueUrl]?.mentioning ?? []).map((source) => ({ source })) },
         },
       },
     })
