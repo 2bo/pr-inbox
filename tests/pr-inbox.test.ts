@@ -2006,10 +2006,22 @@ test('an approved PR stays approved while the search still lists it as requested
   await ui.press({ key: 'refresh' })
   for (let i = 0; i < 5; i++) await s.clock.settle()
   expect(s.statuses.at(-1)).toMatch(/^to review 1 /)
-  // Someone else asked after it: still yours to wait on, not asked of you again
   const later = new Date(NOW + 60_000).toISOString()
-  const listing = (h: unknown) =>
-    JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [HUMAN2, h, BOT] }, mine: { nodes: [] } } })
+  const listing = (h: unknown, approvedToo = false) =>
+    JSON.stringify({
+      data: {
+        viewer: { login: 'me' },
+        review: { nodes: [HUMAN2, h, BOT] },
+        mine: { nodes: [] },
+        approved: { nodes: approvedToo ? [{ ...HUMAN, ...mineApproved(HEAD, new Date(NOW).toISOString()) }] : [] },
+      },
+    })
+  // The approved search caught up first, the review search not yet: still approved
+  opts.graphql = listing(HUMAN, true)
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(s.statuses.at(-1)).toMatch(/^to review 1 /)
+  // Someone else asked after it: still yours to wait on, not asked of you again
   opts.graphql = listing({ ...HUMAN, ...requested(later, 'bob') })
   await s.clock.advance(2 * 60_000)
   await ui.press({ key: 'refresh' })

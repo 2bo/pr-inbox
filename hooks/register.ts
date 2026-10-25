@@ -1095,9 +1095,9 @@ function refresh($: EngineInterface, again = false): Promise<void> {
 // The search behind each list lags GitHub by seconds to a minute or more, so a fetch right after a merge, a close or
 // an approval can still find the PR or issue where it was. Their own state is current: a PR or issue no longer open
 // leaves at once. One approved from the pane that the search still lists as asked of you is shown as approved, from
-// the fresh node with your approval on it, until the approved search finds it or SEARCH_LAG passes. Asked of you
-// again since (a request to you or a team, a new commit), it is a review request once more; gone from the review
-// search (merged, closed, or the search caught up), it is held no longer
+// the fresh node with your approval on it (the approved search may have caught up first, or not yet), until the
+// review search lets it go or SEARCH_LAG passes. Asked of you again since (a request to you or a team, a new commit),
+// it is a review request once more; gone from the review search (merged, closed, or caught up), it is held no longer
 function settleApprovedHere(now: number, found: PR[]): void {
   for (const [url, a] of approvedHere) {
     const asked = review.find((p) => p.url === url)
@@ -1110,12 +1110,12 @@ function settleApprovedHere(now: number, found: PR[]): void {
             Date.parse(n.createdAt) > a.at &&
             (n.requestedReviewer?.__typename !== 'User' || n.requestedReviewer.login === viewer),
         ))
-    if (!asked || again || found.some((p) => p.url === url) || now - a.at > SEARCH_LAG) {
+    if (!asked || again || now - a.at > SEARCH_LAG) {
       approvedHere.delete(url)
       continue
     }
     review = review.filter((p) => p.url !== url)
-    found.unshift({ ...asked, latestReviews: a.pr.latestReviews })
+    if (!found.some((p) => p.url === url)) found.unshift({ ...asked, latestReviews: a.pr.latestReviews })
   }
 }
 
