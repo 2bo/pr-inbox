@@ -2006,18 +2006,37 @@ test('an approved PR stays approved while the search still lists it as requested
   await ui.press({ key: 'refresh' })
   for (let i = 0; i < 5; i++) await s.clock.settle()
   expect(s.statuses.at(-1)).toMatch(/^to review 1 /)
-  // Asked again after the approval: a review request once more
-  opts.graphql = JSON.stringify({
-    data: {
-      viewer: { login: 'me' },
-      review: { nodes: [HUMAN2, { ...HUMAN, ...requested(new Date(NOW + 60_000).toISOString(), 'me') }, BOT] },
-      mine: { nodes: [] },
-    },
-  })
+  // Someone else asked after it: still yours to wait on, not asked of you again
+  const later = new Date(NOW + 60_000).toISOString()
+  const listing = (h: unknown) =>
+    JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [HUMAN2, h, BOT] }, mine: { nodes: [] } } })
+  opts.graphql = listing({ ...HUMAN, ...requested(later, 'bob') })
   await s.clock.advance(2 * 60_000)
   await ui.press({ key: 'refresh' })
   for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(s.statuses.at(-1)).toMatch(/^to review 1 /)
+  // Asked again after the approval: a review request once more
+  opts.graphql = listing({ ...HUMAN, ...requested(later, 'me') })
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
   expect(s.statuses.at(-1)).toMatch(/^to review 2 /)
+  await ui.unmount()
+})
+
+test('a PR approved from the pane and merged right after leaves at once, though the search still lists it', async ($, on) => {
+  const opts: StubOptions = { approve: true }
+  const s = stubs(on, opts)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await pressApprove(ui, s)
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeDefined()
+  opts.graphql = JSON.stringify({
+    data: { viewer: { login: 'me' }, review: { nodes: [HUMAN2, { ...HUMAN, state: 'MERGED' }, BOT] }, mine: { nodes: [] } },
+  })
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(await ui.find({ key: `line-${HUMAN.url}` })).toBeUndefined()
   await ui.unmount()
 })
 
