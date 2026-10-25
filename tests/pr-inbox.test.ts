@@ -3292,6 +3292,9 @@ test('d on an issue reads it on one page: description, sub-issues and every comm
   expect(page).toContain('5 comments, oldest first')
   // A block for each part j/k stop at: what it is, the description, the sub-issues, each comment
   expect(await ui.find({ key: 'block-7' })).toBeDefined()
+  // k at the top says so
+  await ui.press({ key: 'issue-reader-up' })
+  expect(s.toasts.at(-1)).toContain('Top of app#7')
   const before = s.toasts.length
   await ui.press({ key: 'issue-reader-down' })
   expect(s.toasts.length).toBe(before)
@@ -3306,6 +3309,25 @@ test('d on an issue reads it on one page: description, sub-issues and every comm
   await ui.press({ key: 'issue-close-reader' })
   expect(await ui.find({ key: 'issue-read' })).toBeDefined()
   expect(JSON.stringify([s.prompts, s.screened, s.reviewCalls])).not.toContain('Comment')
+  await ui.unmount()
+})
+
+test('the issue reader offers r to try again when the issue could not be fetched', async ($, on) => {
+  let fail = true
+  const s = stubs(on, {
+    graphql: withIssues(issue()),
+    gh: (argv) => (argv.some((a) => a.startsWith('url=')) ? (fail ? { stdout: '', exitCode: 1 } : { stdout: issueDetails() }) : undefined),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  await ui.press({ key: 'issue-read' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(JSON.stringify(await ui.drawn())).toContain('r: try again')
+  fail = false
+  await ui.press({ key: 'issue-reader-retry' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(JSON.stringify(await ui.drawn())).toContain('Open the page')
   await ui.unmount()
 })
 

@@ -6,7 +6,7 @@ A Claude Code mod that turns your review requests and your own pull requests int
 
 - **To review**: review requests, the longest-waiting first, then bots' under their own heading, then the PRs you approved that are not merged yet. Each request gets an AI summary, a risk level and its impact on release
 - **My PRs**: what needs you (changes requested, CI failed, conflict), then what is ready to merge, what is in review, and what has gone quiet
-- **Issues**: the open issues assigned to you (up to 50), the most recently updated first, with their labels, sub-issues closed of all (`SUB`), comment count (`TALK`) and time since the last update (`UPD`). A sub-issue sits under its parent when you have both (`├` `└`), and names its parent otherwise (`↑#12`). The selected issue's description, sub-issues and latest three comments show under the list; `d` reads it whole (every comment) and `c` closes or reopens it. Nothing the tab fetches is sent to a model (an issue a PR's description links to is read by the AI review, `v`, on its own; see [Security](#security))
+- **Issues**: the open issues assigned to you (up to 50), the most recently updated first, with their labels, sub-issues closed of all (`SUB`), comment count (`TALK`) and time since the last update (`UPD`). A sub-issue sits under its parent when you have both (`├` `└`), and names its parent otherwise (`↑#12`). The selected issue's description, sub-issues and latest three comments show under the list; `d` reads it whole (every comment, the latest 100) and `c` closes or reopens it. Nothing the tab fetches is sent to a model (an issue a PR's description links to is read by the AI review, `v`, on its own; see [Security](#security))
 - A status line under the prompt keeps the counts in view, and new review requests come as a toast and an OS notification (a newly assigned issue as a toast, and an OS notification with `desktop_notify` on `all`)
 
 Tested with Claude Code v2.1.289. Mods need v2.1.287 or later.
@@ -96,7 +96,7 @@ A stack is listed together, bottom first, so the PR that merges next comes first
 
 | Key | Action |
 | :- | :- |
-| `d` | Read it on one page: what it is, its description, its sub-issues and every comment (the latest 100), oldest first. `j` / `k` scroll by a block (the wheel, ↑↓ and PgUp/PgDn too), `n` reads the next issue, `c` closes or reopens it, `q` goes back |
+| `d` | Read it on one page: what it is, its description, its sub-issues and every comment (the latest 100), oldest first. `j` / `k` scroll by a block (the wheel, ↑↓ and PgUp / PgDn too), `n` reads the next issue, `c` closes or reopens it, `q` goes back |
 | `c` | Close it: a panel in the pane, `1` completed or `2` not planned (none is picked for you), then `y`. It warns when sub-issues are still open. A closed issue stays under **closed here** until the pane closes, where `c` and `y` reopen it |
 | `o` | Open on GitHub, in the browser |
 | `y` / `n` | Its description and comments as markdown or as written / the next page of them (the wheel and PgUp / PgDn scroll both ways) |
@@ -108,7 +108,7 @@ Three tabs, `1` description, `2` conversation (comments and reviews, oldest firs
 | Key | Action |
 | :- | :- |
 | `h` / `l` | Previous / next page |
-| `j` / `k` | Scroll by a block of lines, a block of the description or a comment (the wheel, ↑↓ and PgUp/PgDn scroll too) |
+| `j` / `k` | Scroll by a block of lines, a block of the description or a comment (the wheel, ↑↓ and PgUp / PgDn scroll too) |
 | `f` | File tree: the description, the conversation and the changed files (with each file's +/-, AI findings and comments): `j` / `k` move, `l` or `1`-`9` open |
 | `t` | On a `↻ RE` PR: the whole PR, or only what changed since your approval |
 | `g` | Show a folded lockfile or generated file |

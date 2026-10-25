@@ -6513,7 +6513,7 @@ export function register(on: On, options: PluginOptions) {
     }
     // j/k: the next or previous block of lines (of a file, of the description, a comment), scrolled to the top of the
     // pane
-    const descBlocks = at === 0 && v.body ? markdownBlocks(v.body) : []
+    const descBlocks = at === 0 && v.body ? markdownBlocks(v.body, Number.POSITIVE_INFINITY) : []
     const blocks = file
       ? isGenerated(file.path) && !v.showGenerated.has(file.path)
         ? 0
@@ -6522,8 +6522,13 @@ export function register(on: On, options: PluginOptions) {
         ? descBlocks.length
         : v.talk.length
     const scrollTo = (block: number) => {
-      if (blocks === 0) return toast(at < pages - 1 ? 'Nothing to scroll here · l: next page' : 'Nothing to scroll here · q: back to list')
-      v.block = Math.min(Math.max(0, block), blocks - 1)
+      const onward = at < pages - 1 ? (file ? 'l: next file' : 'l: next page') : 'n: next PR · q: back to list'
+      if (file && isGenerated(file.path) && !v.showGenerated.has(file.path))
+        return toast(`Generated or lock file, folded · g: show it · ${onward}`)
+      if (blocks === 0) return toast(`Nothing to scroll here · ${onward}`)
+      const to = Math.min(Math.max(0, block), blocks - 1)
+      if (to === v.block && block !== to) return toast(block > to ? `End of this page · ${onward}` : 'Top of this page · j: scroll down')
+      v.block = to
       $.ui.scroll(v.block === 0 ? { to: 'start', in: PANE } : { to: { key: `block-${v.block}` }, in: PANE, block: 'start' }).catch(() => {
         // A surface that does not scroll: the arrow keys still do
       })
@@ -6977,10 +6982,11 @@ export function register(on: On, options: PluginOptions) {
     if (!about || about.error) {
       const what = !about
         ? `${SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]} fetching…`
-        : `could not fetch it: ${fit(about.error, Math.max(10, columns - 40))} · o: open on GitHub`
+        : `could not fetch it: ${fit(about.error, Math.max(10, columns - 50))} · r: try again · o: open on GitHub`
       block([section('Description', what)])
     } else {
-      const text = markdownBlocks(about.body)
+      // Cut only at blank lines, so each block reads as written
+      const text = markdownBlocks(about.body, Number.POSITIVE_INFINITY)
       if (text.length === 0) block([section('Description', view), Text({ color: NEON.muted, children: ['No description'] })])
       for (const [i, b] of text.entries())
         block(
@@ -7030,8 +7036,11 @@ export function register(on: On, options: PluginOptions) {
           i > 0 ? 1 : 0,
         )
     }
-    const scrollTo = (to: number) => {
-      v.block = Math.min(Math.max(0, to), blocks.length - 1)
+    const scrollTo = (block: number) => {
+      const to = Math.min(Math.max(0, block), blocks.length - 1)
+      if (to === v.block && block !== to)
+        return toast(block > to ? `End of ${label} · n: next issue · q: back to list` : `Top of ${label} · j: scroll down`)
+      v.block = to
       $.ui.scroll(v.block === 0 ? { to: 'start', in: PANE } : { to: { key: `block-${v.block}` }, in: PANE, block: 'start' }).catch(() => {
         // A surface that does not scroll: the arrow keys still do
       })
@@ -7050,6 +7059,15 @@ export function register(on: On, options: PluginOptions) {
             key('issue-reader-up', '↑', 'k', () => scrollTo(v.block - 1)),
           ],
         }),
+        ...(about?.error
+          ? [
+              key('issue-reader-retry', 'try again', 'r', () => {
+                issueAbouts.delete(issue.url)
+                void fetchIssueAbout($, issue)
+                redraw()
+              }),
+            ]
+          : []),
         key('issue-reader-state', closedNow ? 'reopen issue' : 'close issue', 'c', () => openIssueState($, issue)),
         key('issue-reader-plain', plainText ? 'markdown' : 'plain text', 'y', () => {
           plainText = !plainText
@@ -7074,7 +7092,7 @@ export function register(on: On, options: PluginOptions) {
         keyCatcher(
           kit,
           tree,
-          (k) => `${k}: no such key in the reader · j/k: scroll · c: close or reopen · n: next issue · q: back to list`,
+          (k) => `${k}: no such key in the reader · j/k: scroll · c: ${closedNow ? 'reopen' : 'close'} · n: next issue · q: back to list`,
           toast,
         ),
       ],
@@ -8058,7 +8076,10 @@ export function register(on: On, options: PluginOptions) {
         [
           'the selected issue (3)',
           [
-            ['d', 'read it: description, sub-issues and every comment on one page · j / k scroll · n: next issue · q: back'],
+            [
+              'd',
+              'read it: description, sub-issues and every comment (the latest 100) on one page · j / k scroll (the wheel, ↑↓ and PgUp / PgDn too) · n: next issue · q: back',
+            ],
             ['o', 'open on GitHub'],
             ['c', 'close it (1 completed / 2 not planned, then y) · on one closed here: reopen it (y) · no model sees issues'],
             ['y', 'its description and comments as markdown, or as plain text'],
@@ -8071,7 +8092,7 @@ export function register(on: On, options: PluginOptions) {
           'the reader (d)',
           [
             ['1 / 2 / 3', 'description · conversation · files'],
-            ['h / l', 'previous / next page · j / k scroll (the wheel and the arrows too)'],
+            ['h / l', 'previous / next page · j / k scroll (the wheel, ↑↓ and PgUp / PgDn too)'],
             ['f', 'file tree: j / k move, l or 1-9 open · » comments on lines'],
             ['t / g', 'since your approval / the whole PR · show a folded generated file'],
             ['y', 'description and conversation: markdown or plain text'],
@@ -8380,7 +8401,14 @@ export function register(on: On, options: PluginOptions) {
           const talk = about.talk.slice(-LATEST)
           if (talk.length > 0) {
             const n = about.comments
-            section('Conversation', `${n > LATEST ? `latest ${LATEST} of ${n}` : plural(n, 'comment')} · d: read them all`)
+            section(
+              'Conversation',
+              n > ISSUE_COMMENTS
+                ? `latest ${LATEST} of ${n} · d: the latest ${ISSUE_COMMENTS}`
+                : n > LATEST
+                  ? `latest ${LATEST} of ${n} · d: read them all`
+                  : plural(n, 'comment'),
+            )
             for (const t of talk) {
               const at = t.at ? `${elapsed(t.at, now)} ago` : ''
               add(
