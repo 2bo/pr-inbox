@@ -530,7 +530,13 @@ const ISSUE_BODIES = {
 const ISSUE_TALK = {
   'https://github.com/acme/storefront/issues/512': [
     { author: { login: 'lena-park' }, createdAt: ago(20), body: 'Happens on Safari and Chrome.' },
+    { author: { login: 'jbaker' }, createdAt: ago(12), body: 'Also when the coupon expires while the cart is open.' },
     { author: { login: 'mtanaka' }, createdAt: ago(5), body: 'The coupon reducer never resets `canSubmit`.' },
+    {
+      author: { login: 'lena-park' },
+      createdAt: ago(4),
+      body: 'Good find. A test for it:\n\n```js\nexpect(cart.canSubmit).toBe(true)\n```',
+    },
   ],
   'https://github.com/acme/storefront/issues/480': [{ author: { login: 'sofia-ito' }, createdAt: ago(40), body: 'Coupon field is out. Next: the button bug.' }],
 }

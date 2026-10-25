@@ -402,6 +402,11 @@ let expanded = ''
 let panelPage = { url: '', expanded: '', from: 0 }
 // The same for the details of the selected issue
 let issuePage = { url: '', from: 1 }
+// The details as last drawn when they did not fit, for the wheel and the page keys (ui.scroll): see scrollParts
+type PanelParts = { key: string; heights: number[]; from: number; room: number; turn: (from: number) => void }
+let panelParts: PanelParts | undefined
+// The issue open in the reader (d on the issues tab), and the block of lines j/k last scrolled to
+let issueView: { url: string; block: number } | undefined
 // The filter typed after f (matched against repository, number, title and author), and whether its field is open
 let filterText = ''
 let filtering = false
@@ -4243,8 +4248,8 @@ type IssueAbout = {
 }
 const issueAbouts = new Map<string, IssueAbout>()
 const issueAboutLoading = new Set<string>()
-// The latest comments fetched
-const ISSUE_COMMENTS = 30
+// The latest comments fetched: the details show the last few, the reader (d) all of these
+const ISSUE_COMMENTS = 100
 const ISSUE_QUERY = `query($url: URI!) {
   resource(url: $url) {
     ... on Issue {
@@ -4339,6 +4344,18 @@ async function forgetClosedHere($: EngineInterface): Promise<void> {
 // An issue on the issues tab: assigned to you, or closed from the pane in this session
 function findIssue(url: string): Issue | undefined {
   return assigned.find((i) => i.url === url) ?? closedHere.find((i) => i.url === url)
+}
+
+// Sub-issues, open ones first, as they are what is left
+function openFirst(subs: IssueRef[]): IssueRef[] {
+  return [...subs].sort((a, b) => Number(a.state === 'CLOSED') - Number(b.state === 'CLOSED'))
+}
+
+// "#12" for an issue in the same repository, "repo#12" for one elsewhere
+function issueRefLabel(ref: IssueRef, from: Issue): string {
+  return ref.repository.nameWithOwner === from.repository.nameWithOwner
+    ? `#${ref.number}`
+    : `${ref.repository.nameWithOwner.split('/')[1] ?? ref.repository.nameWithOwner}#${ref.number}`
 }
 
 // c on the issues tab: close the issue (as completed or not planned, picked with its number key, never one picked for
@@ -4466,6 +4483,36 @@ function markdownBlocks(text: string, max = 10): string[] {
   }
   flush()
   return out
+}
+
+// Where the wheel or a page key turns details that go by parts (heights[0] is the header, always shown; `room` the
+// lines a page has for the rest): a page key (`by` a window or more) by about a page, the wheel by a part every
+// WHEEL_PART lines of ticks, or sooner for a shorter part. Never past the page that shows the end
+const WHEEL_PART = 3
+let wheelDebt = { key: '', lines: 0 }
+function scrollParts(p: Omit<PanelParts, 'turn'>, by: number): number {
+  const h = (i: number) => p.heights[i] ?? 1
+  // The first part of the last page: from there on, all that is left fits
+  let last = p.heights.length - 1
+  for (let fit = h(last); last > 1 && fit + h(last - 1) <= p.room; ) fit += h(--last)
+  const page = Math.abs(by) >= p.room
+  let debt = page ? 0 : (wheelDebt.key === p.key ? wheelDebt.lines : 0) + by
+  let moved = 0
+  let from = Math.min(p.from, Math.max(1, last))
+  const cost = (i: number) => (page ? h(i) : Math.min(h(i), WHEEL_PART))
+  while (by > 0 && from < last) {
+    if (page ? moved > 0 && moved + cost(from) > p.room : debt < cost(from)) break
+    moved += cost(from)
+    debt -= cost(from++)
+  }
+  while (by < 0 && from > 1) {
+    if (page ? moved > 0 && moved + cost(from - 1) > p.room : -debt < cost(from - 1)) break
+    moved += cost(from - 1)
+    debt += cost(--from)
+  }
+  // Ticks past an end do not pile up
+  wheelDebt = { key: p.key, lines: page || (by > 0 && from >= last) || (by < 0 && from <= 1) ? 0 : debt }
+  return from
 }
 
 // What a comment or review says of the PR: its verdict, or where a comment on a line is
@@ -6464,10 +6511,18 @@ export function register(on: On, options: PluginOptions) {
       const soft = found.length - bad
       return { bad, soft, text: [bad ? `✗${bad}` : '', soft ? `△${soft}` : ''].filter(Boolean).join(' ') }
     }
-    // j/k: the next or previous block of lines, scrolled to the top of the pane
-    const blocks = file && !(isGenerated(file.path) && !v.showGenerated.has(file.path)) ? file.pieces.length : 0
+    // j/k: the next or previous block of lines (of a file, of the description, a comment), scrolled to the top of the
+    // pane
+    const descBlocks = at === 0 && v.body ? markdownBlocks(v.body) : []
+    const blocks = file
+      ? isGenerated(file.path) && !v.showGenerated.has(file.path)
+        ? 0
+        : file.pieces.length
+      : at === 0
+        ? descBlocks.length
+        : v.talk.length
     const scrollTo = (block: number) => {
-      if (blocks === 0) return toast(file ? 'Nothing to scroll here · l: next file' : 'j/k scroll a file · l: next page')
+      if (blocks === 0) return toast(at < pages - 1 ? 'Nothing to scroll here · l: next page' : 'Nothing to scroll here · q: back to list')
       v.block = Math.min(Math.max(0, block), blocks - 1)
       $.ui.scroll(v.block === 0 ? { to: 'start', in: PANE } : { to: { key: `block-${v.block}` }, in: PANE, block: 'start' }).catch(() => {
         // A surface that does not scroll: the arrow keys still do
@@ -6691,25 +6746,31 @@ export function register(on: On, options: PluginOptions) {
           Text({ dimColor: true, children: [[author ? `by ${author}` : '', branchNote(pr)].filter(Boolean).join(' · ')] }),
         ],
       })
-      const text = v.body ? prose(v.body) : Text({ color: NEON.muted, children: ['No description'] })
-      return done([...head, keys, rule, ...sinceNote, title, text], notHere)
+      const text = descBlocks.length
+        ? descBlocks.map((b, i) => Box({ key: `block-${i}`, marginTop: i > 0 ? 1 : 0, children: [prose(b)] }))
+        : [Text({ color: NEON.muted, children: ['No description'] })]
+      return done([...head, keys, rule, ...sinceNote, title, ...text], notHere)
     }
     if (!file) {
       // Page 1: the conversation, oldest first: who, when, what they decided, what they wrote
-      const items = v.talk.flatMap((t) => {
+      const items = v.talk.map((t, i) => {
         const vd = talkVerdict(t)
-        return [
-          Box({
-            flexDirection: 'row',
-            columnGap: 1,
-            children: [
-              Text({ color: NEON.cyan, bold: true, children: [`@${t.author || '?'}`] }),
-              Text({ color: vd.color, children: [vd.text] }),
-              Text({ dimColor: true, children: [t.at ? `${elapsed(t.at, Date.now())} ago` : ''] }),
-            ],
-          }),
-          ...(t.body ? [Box({ paddingLeft: 2, children: [prose(t.body)] })] : []),
-        ]
+        return Box({
+          key: `block-${i}`,
+          flexDirection: 'column',
+          children: [
+            Box({
+              flexDirection: 'row',
+              columnGap: 1,
+              children: [
+                Text({ color: NEON.cyan, bold: true, children: [`@${t.author || '?'}`] }),
+                Text({ color: vd.color, children: [vd.text] }),
+                Text({ dimColor: true, children: [t.at ? `${elapsed(t.at, Date.now())} ago` : ''] }),
+              ],
+            }),
+            ...(t.body ? [Box({ paddingLeft: 2, children: [prose(t.body)] })] : []),
+          ],
+        })
       })
       const title = Box({
         flexDirection: 'row',
@@ -6805,9 +6866,237 @@ export function register(on: On, options: PluginOptions) {
     return done([...head, keys, rule, ...sinceNote, title, ...findings, ...body], notHere)
   })
 
+  // The issue reader (d on the issues tab), in the pane while it is open: what the issue is, its description, its
+  // sub-issues and its whole conversation (the latest ISSUE_COMMENTS), on one page. j/k scroll it a block at a time;
+  // the wheel and the scroll keys move it as any pane. Drawn only, never sent to a model
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
-    // The diff draws itself (above) while one is open
-    if (e.requestId !== PANE || diffView || picker || writePanel) return next(e)
+    if (e.requestId !== PANE || !issueView || diffView || picker || writePanel) return next(e)
+    const kit = $.ui.resolve(e)
+    const { Box, Link, Markdown } = kit
+    const { Text, Button } = glyphed(kit)
+    type El = ReturnType<typeof Box>
+    const redraw = () => $.ui.invalidate('ui.render')
+    const columns = Math.max(40, (e.props.bodyColumns ?? 80) - 1)
+    const focused = e.props.isFocused === true
+    const now = fetchedAt || Date.now()
+    const toast = (text: string) => $.ui.toast(text, { timeoutMs: 4000 })
+    const v = issueView
+    const key = (k: string, label: string, hotkey: string, onPress: () => void, dim = false) =>
+      Button({ key: k, label, hotkey, plain: true, dimColor: dim, onPress })
+    const close = key('issue-close-reader', 'back to list', 'q', () => {
+      issueView = undefined
+      redraw()
+    })
+    const rule = Text({ color: focused ? NEON.violet : NEON.rule, children: ['━'.repeat(columns)] })
+    const issue = findIssue(v.url)
+    if (!issue) {
+      const tree = [Text({ color: NEON.muted, children: ['This issue is no longer listed'] }), close]
+      return Box({ flexDirection: 'column', children: [...tree, keyCatcher(kit, tree, () => 'q: back to list', toast)] })
+    }
+    const about = issueAbouts.get(issue.url)
+    if (about?.updatedAt !== issue.updatedAt && !issueAboutLoading.has(issue.url)) void fetchIssueAbout($, issue)
+    const label = `${issue.repository.nameWithOwner.split('/')[1] ?? issue.repository.nameWithOwner}#${issue.number}`
+    const href = safeHref(issue.url)
+    const head = Box({
+      flexDirection: 'row',
+      columnGap: 1,
+      children: [
+        Text({ color: focused ? NEON.pink : NEON.rule, children: ['▍'] }),
+        Text({ color: NEON.pink, bold: true, children: ['read'] }),
+        href ? Link({ href, children: [Text({ color: NEON.cyan, underline: true, children: [label] })] }) : Text({ children: [label] }),
+        Text({ bold: true, wrap: 'truncate-end', children: [fit(issue.title, Math.max(10, columns - textWidth(label) - 8))] }),
+      ],
+    })
+    // n: the next issue in the list, read the same way
+    const nextIssue = () => {
+      const rows = issueRows()
+      const i = rows.findIndex((x) => x.url === issue.url)
+      const following = rows[i + 1] ?? (i < 0 ? rows[0] : undefined)
+      if (!following) return toast('This is the last issue in the list · q: back to list')
+      selected = following.url
+      issueView = { url: following.url, block: 0 }
+      void $.ui.scroll({ to: 'start', in: PANE }).catch(() => undefined)
+      redraw()
+    }
+    const prose = (text: string) => (plainText ? Text({ wrap: 'wrap', children: [text] }) : Markdown({ text }))
+    const section = (name: string, note: string) =>
+      Box({
+        marginTop: 1,
+        flexDirection: 'row',
+        columnGap: 2,
+        children: [Text({ bold: true, color: NEON.cyan, children: [name] }), Text({ dimColor: true, wrap: 'wrap', children: [note] })],
+      })
+    // Each block j/k stops at: a block of the description, the sub-issues, a comment
+    const blocks: El[] = []
+    const block = (children: El[], marginTop = 0) =>
+      blocks.push(Box({ key: `block-${blocks.length}`, flexDirection: 'column', marginTop, children }))
+    const refLine = (ref: IssueRef, mark: string, color: string, note: string): El => {
+      const link = safeHref(ref.url)
+      const lbl = issueRefLabel(ref, issue)
+      return Box({
+        flexDirection: 'row',
+        columnGap: 1,
+        children: [
+          Text({ color, children: [mark] }),
+          link ? Link({ href: link, children: [Text({ color: NEON.muted, children: [lbl] })] }) : Text({ children: [lbl] }),
+          Text({ wrap: 'truncate-end', children: [fit(ref.title, Math.max(10, columns - textWidth(lbl) - textWidth(note) - 6))] }),
+          ...(note ? [Text({ color: NEON.muted, children: [note] })] : []),
+        ],
+      })
+    }
+    const closedNow = issue.state === 'CLOSED'
+    const reason = issue.stateReason || about?.stateReason || ''
+    const names = (issue.labels?.nodes ?? []).map((l) => l?.name ?? '').filter(Boolean)
+    block([
+      Box({
+        flexDirection: 'row',
+        columnGap: 2,
+        children: [
+          Text({
+            color: closedNow ? NEON.muted : NEON.green,
+            bold: true,
+            children: [closedNow ? `closed${reason ? ` as ${reason.toLowerCase().replace(/_/g, ' ')}` : ''}` : 'open'],
+          }),
+          Text({
+            dimColor: true,
+            wrap: 'wrap',
+            children: [
+              [
+                `@${issue.author?.login ?? '?'}`,
+                `opened ${elapsed(issue.createdAt, now)} ago`,
+                `updated ${elapsed(issue.updatedAt, now)} ago`,
+                ...(names.length ? [names.join(' · ')] : []),
+              ].join(' · '),
+            ],
+          }),
+        ],
+      }),
+      ...(issue.parent ? [refLine(issue.parent, '↑', NEON.violet, '(parent)')] : []),
+    ])
+    const view = plainText ? 'y: markdown' : 'y: plain text'
+    if (!about || about.error) {
+      const what = !about
+        ? `${SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]} fetching…`
+        : `could not fetch it: ${fit(about.error, Math.max(10, columns - 40))} · o: open on GitHub`
+      block([section('Description', what)])
+    } else {
+      const text = markdownBlocks(about.body)
+      if (text.length === 0) block([section('Description', view), Text({ color: NEON.muted, children: ['No description'] })])
+      for (const [i, b] of text.entries())
+        block(
+          i === 0 ? [section('Description', about.updatedAt !== issue.updatedAt ? `updating… · ${view}` : view), prose(b)] : [prose(b)],
+          i > 0 ? 1 : 0,
+        )
+      if (about.subs.length > 0) {
+        const total = issue.subIssuesSummary?.total ?? about.subs.length
+        const done = about.subs.filter((x) => x.state === 'CLOSED').length
+        block([
+          section(
+            'Sub-issues',
+            `${done} of ${about.subs.length} closed${total > about.subs.length ? ` · first ${about.subs.length} of ${total}` : ''}`,
+          ),
+          ...openFirst(about.subs).map((x) =>
+            refLine(
+              x,
+              x.state === 'CLOSED' ? '✓' : '○',
+              x.state === 'CLOSED' ? NEON.green : NEON.muted,
+              assigned.some((a) => a.url === x.url) ? '(assigned to you)' : '',
+            ),
+          ),
+        ])
+      }
+      const n = about.comments
+      const talkNote =
+        n === 0
+          ? 'none yet'
+          : n > about.talk.length
+            ? `latest ${about.talk.length} of ${n}, oldest first · o: the rest on GitHub`
+            : `${plural(n, 'comment')}, oldest first`
+      if (about.talk.length === 0) block([section('Conversation', talkNote)])
+      for (const [i, t] of about.talk.entries())
+        block(
+          [
+            ...(i === 0 ? [section('Conversation', talkNote)] : []),
+            Box({
+              flexDirection: 'row',
+              columnGap: 1,
+              children: [
+                Text({ color: NEON.cyan, bold: true, children: [`@${t.author || '?'}`] }),
+                Text({ dimColor: true, children: [t.at ? `${elapsed(t.at, now)} ago` : ''] }),
+              ],
+            }),
+            ...(t.body ? [Box({ paddingLeft: 2, children: [prose(t.body)] })] : []),
+          ],
+          i > 0 ? 1 : 0,
+        )
+    }
+    const scrollTo = (to: number) => {
+      v.block = Math.min(Math.max(0, to), blocks.length - 1)
+      $.ui.scroll(v.block === 0 ? { to: 'start', in: PANE } : { to: { key: `block-${v.block}` }, in: PANE, block: 'start' }).catch(() => {
+        // A surface that does not scroll: the arrow keys still do
+      })
+    }
+    const keys = Box({
+      key: 'issue-reader-keys',
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      columnGap: 2,
+      children: [
+        // j / k scroll: hidden keys (in the help), so the actions fit one line
+        Box({
+          display: 'none',
+          children: [
+            key('issue-reader-down', '↓', 'j', () => scrollTo(v.block + 1)),
+            key('issue-reader-up', '↑', 'k', () => scrollTo(v.block - 1)),
+          ],
+        }),
+        key('issue-reader-state', closedNow ? 'reopen issue' : 'close issue', 'c', () => openIssueState($, issue)),
+        key('issue-reader-plain', plainText ? 'markdown' : 'plain text', 'y', () => {
+          plainText = !plainText
+          redraw()
+        }),
+        ...(href
+          ? [key('issue-reader-open', 'open on GitHub', 'o', () => void $.process.run(['gh', 'issue', 'view', href, '--web']), true)]
+          : []),
+        key('issue-reader-next', 'next issue', 'n', nextIssue, true),
+        close,
+      ],
+    })
+    const end = Text({
+      color: NEON.violet,
+      children: [`── end of ${label} · c: ${closedNow ? 'reopen' : 'close'} · n: next issue · q: back to list ──`],
+    })
+    const tree = [head, keys, rule, ...blocks, end]
+    return Box({
+      flexDirection: 'column',
+      children: [
+        ...tree,
+        keyCatcher(
+          kit,
+          tree,
+          (k) => `${k}: no such key in the reader · j/k: scroll · c: close or reopen · n: next issue · q: back to list`,
+          toast,
+        ),
+      ],
+    })
+  })
+
+  // The wheel and the page keys over the list: the list fits the pane, so the engine has nothing to move there; they
+  // turn the details under it instead while those go by pages. Elsewhere (the readers, the help) the engine scrolls
+  on('ui.scroll', { requestId: PANE }, async (_$, e, next) => {
+    const p = panelParts
+    if (!p || e.origin.kind !== 'person' || diffView || issueView || picker || writePanel || showHelp) return next(e)
+    const from = scrollParts(p, e.by)
+    // Ticks that come before the next draw go on from here
+    if (from === p.from) return {}
+    p.from = from
+    p.turn(from)
+    return {}
+  })
+
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
+    // The readers draw themselves (above) while one is open
+    if (e.requestId !== PANE || diffView || issueView || picker || writePanel) return next(e)
     // Follow the focus, so the hint under the prompt can say where Esc and ctrl+x tab go
     const focused = e.props.isFocused === true
     if (!paneOpen || focused !== paneFocused) {
@@ -6849,6 +7138,35 @@ export function register(on: On, options: PluginOptions) {
 
     const small = (key: string, label: string, hotkey: string, onPress: () => void) =>
       Button({ key, label, hotkey, plain: true, dimColor: true, onPress })
+
+    // Details too tall for their room: the header (the first part) stays, the rest goes by parts from `start`, turned
+    // by n, the wheel and the page keys (ui.scroll), so the keys stay on screen
+    panelParts = undefined
+    const pageParts = (key: string, children: El[], heights: number[], limit: number, start: number, turn: (from: number) => void) => {
+      const from = Math.min(Math.max(1, start), children.length - 1)
+      const linesOfParts = (a: number, b: number) => heights.slice(a, b).reduce((n, h) => n + h, 0)
+      // Header, "above" when paged down, then the parts that fit, and the line with n
+      let used = (heights[0] ?? 1) + (from > 1 ? 1 : 0)
+      let k = from
+      while (k < children.length && used + (heights[k] ?? 1) <= limit - 1) used += heights[k++] ?? 1
+      if (k === from) used += heights[k++] ?? 1
+      const below = linesOfParts(k, children.length)
+      panelParts = { key, heights, from, room: Math.max(1, limit - 2 - (heights[0] ?? 1)), turn }
+      const shownParts = [
+        children[0] as El,
+        ...(from > 1 ? [Text({ color: NEON.muted, children: [`  ↑ ${linesOfParts(1, from)} lines above · wheel or PgUp: back`] })] : []),
+        ...children.slice(from, k),
+        Button({
+          key: 'panel-more',
+          label: below > 0 ? `↓ ${below} more lines` : '↑ back to the top',
+          hotkey: 'n',
+          plain: true,
+          dimColor: true,
+          onPress: () => turn(below > 0 ? k : 1),
+        }),
+      ]
+      return { el: Box({ key, flexDirection: 'column', children: shownParts }), lines: used + 1 }
+    }
 
     // A thin full-width rule between the parts
     // Lit while the pane holds the keyboard, dark while the keys go to the prompt
@@ -7111,9 +7429,9 @@ export function register(on: On, options: PluginOptions) {
           return selected && findIssue(selected)
             ? "o: this issue's link is not a plain https:// GitHub link, so it does not open"
             : `o: ${none}`
-        if (k === 'j' || k === 'k' || k === 'c' || k === 'y') return `${k}: ${none}`
-        if ('abdeimpsvwxz'.includes(k))
-          return `${k} acts on PRs (1: To review, 2: My PRs) · on issues: c closes or reopens, o opens, y plain text`
+        if (k === 'j' || k === 'k' || k === 'c' || k === 'y' || k === 'd') return `${k}: ${none}`
+        if ('abeimpsvwxz'.includes(k))
+          return `${k} acts on PRs (1: To review, 2: My PRs) · on issues: d reads, c closes or reopens, o opens, y plain text`
       }
       const n = pr ? askLabel(pr) : 'this PR'
       const ownTab = 'on your PRs (2: My PRs)'
@@ -7549,31 +7867,10 @@ export function register(on: On, options: PluginOptions) {
       const limit = Math.min(budget, Math.max(share, own + 1))
       if (total <= limit) return { el: Box({ key: `panel-${p.url}`, flexDirection: 'column', children }), lines: total }
       if (panelPage.url !== p.url || panelPage.expanded !== expanded) panelPage = { url: p.url, expanded, from: 1 }
-      const from = Math.min(Math.max(1, panelPage.from), children.length - 1)
-      const linesOfParts = (a: number, b: number) => heights.slice(a, b).reduce((n, h) => n + h, 0)
-      // Header, "above" when paged down, then the parts that fit, and the line with n
-      let used = (heights[0] ?? 1) + (from > 1 ? 1 : 0)
-      let k = from
-      while (k < children.length && used + (heights[k] ?? 1) <= limit - 1) used += heights[k++] ?? 1
-      if (k === from) used += heights[k++] ?? 1
-      const below = linesOfParts(k, children.length)
-      const shownParts = [
-        children[0] as El,
-        ...(from > 1 ? [Text({ color: NEON.muted, children: [`  ↑ ${linesOfParts(1, from)} lines above`] })] : []),
-        ...children.slice(from, k),
-        Button({
-          key: 'panel-more',
-          label: below > 0 ? `↓ ${below} more lines` : '↑ back to the top',
-          hotkey: 'n',
-          plain: true,
-          dimColor: true,
-          onPress: () => {
-            panelPage = { url: p.url, expanded, from: below > 0 ? k : 1 }
-            redraw()
-          },
-        }),
-      ]
-      return { el: Box({ key: `panel-${p.url}`, flexDirection: 'column', children: shownParts }), lines: used + 1 }
+      return pageParts(`panel-${p.url}`, children, heights, limit, panelPage.from, (from) => {
+        panelPage = { url: p.url, expanded, from }
+        redraw()
+      })
     }
 
     // One line per PR: selection and unread marks, kind, a badge (risk, or state for my PRs), the PR, its title, then how
@@ -7751,17 +8048,21 @@ export function register(on: On, options: PluginOptions) {
             ['b', 'AI review every bot PR not reviewed yet, then approve those that passed in one panel (y) · b again stops'],
             ['z', 'show or hide snoozed PRs'],
             ['f', 'filter by repository, number, title or @author (and label on issues) · empty clears it'],
-            ['n', 'next page of the details (the description and conversation come last), when they do not fit'],
+            [
+              'n',
+              'next page of the details (the description and conversation come last), when they do not fit · the wheel and PgUp / PgDn scroll them both ways',
+            ],
             ['r', 'refresh: fetch again'],
           ],
         ],
         [
           'the selected issue (3)',
           [
+            ['d', 'read it: description, sub-issues and every comment on one page · j / k scroll · n: next issue · q: back'],
             ['o', 'open on GitHub'],
             ['c', 'close it (1 completed / 2 not planned, then y) · on one closed here: reopen it (y) · no model sees issues'],
             ['y', 'its description and comments as markdown, or as plain text'],
-            ['n', 'next page of its details, when they do not fit'],
+            ['n', 'next page of its details, when they do not fit · the wheel and PgUp / PgDn scroll them both ways'],
             ['SUB', 'sub-issues closed / all · ├ └ under a listed parent · ↑#12 the parent, not listed'],
             ['TALK / UPD', 'comments · time since the last update'],
           ],
@@ -7770,7 +8071,7 @@ export function register(on: On, options: PluginOptions) {
           'the reader (d)',
           [
             ['1 / 2 / 3', 'description · conversation · files'],
-            ['h / l', 'previous / next page · j / k scroll'],
+            ['h / l', 'previous / next page · j / k scroll (the wheel and the arrows too)'],
             ['f', 'file tree: j / k move, l or 1-9 open · » comments on lines'],
             ['t / g', 'since your approval / the whole PR · show a folded generated file'],
             ['y', 'description and conversation: markdown or plain text'],
@@ -7859,6 +8160,17 @@ export function register(on: On, options: PluginOptions) {
         const href = safeHref(issue.url)
         issueKeys.push(
           Button({
+            key: 'issue-read',
+            label: 'read',
+            hotkey: 'd',
+            plain: true,
+            onPress: () => {
+              issueView = { url: issue.url, block: 0 }
+              void $.ui.scroll({ to: 'start', in: PANE }).catch(() => undefined)
+              redraw()
+            },
+          }),
+          Button({
             key: 'issue-state',
             label: isClosed(issue) ? 'reopen issue' : 'close issue',
             hotkey: 'c',
@@ -7907,11 +8219,7 @@ export function register(on: On, options: PluginOptions) {
       // SUB, TALK and UPD on the right
       const RIGHT = 16
       const issueWidth = Math.max(5, Math.min(labelWidth, columns - 3 - RIGHT - 28))
-      // "#12" for a parent in the same repository, "repo#12" for one elsewhere
-      const refLabel = (ref: IssueRef, from: Issue) =>
-        ref.repository.nameWithOwner === from.repository.nameWithOwner
-          ? `#${ref.number}`
-          : `${ref.repository.nameWithOwner.split('/')[1] ?? ref.repository.nameWithOwner}#${ref.number}`
+      const refLabel = issueRefLabel
       const issueRow = (i: Issue) => {
         const isSelected = selected === i.url
         const repo = i.repository.nameWithOwner.split('/')[1] ?? i.repository.nameWithOwner
@@ -7968,8 +8276,8 @@ export function register(on: On, options: PluginOptions) {
           ],
         })
 
-      // The details of the selected issue: what it is, its parent and sub-issues, its description, then the latest
-      // comments, as markdown (y: as written). Paged with n when they do not fit
+      // The details of the selected issue: what it is, its parent, its description and sub-issues, then the latest
+      // comments, as markdown (y: as written). Paged with n, the wheel and the page keys when they do not fit
       const issuePanel = (i: Issue, budget: number) => {
         const about = issueAbouts.get(i.url)
         const children: El[] = []
@@ -8042,19 +8350,21 @@ export function register(on: On, options: PluginOptions) {
         }
         const view = plainText ? 'y: markdown' : 'y: plain text'
         const subs = i.subIssuesSummary ?? { total: 0, completed: 0 }
-        if (!about) section(subs.total > 0 ? 'Sub-issues and description' : 'Description', 'fetching…')
+        if (!about) section(subs.total > 0 ? 'Description and sub-issues' : 'Description', 'fetching…')
         else if (about.error)
           section(
             'Description',
             `could not fetch it: ${fit(about.error, Math.max(10, bodyColumns - 50))} · r: try again · o: open on GitHub`,
           )
         else {
+          section('Description', about.updatedAt !== i.updatedAt ? `updating… · ${view}` : view)
+          if (about.body) prose(about.body, 0)
+          else add(Box({ paddingLeft: INDENT, children: [Text({ color: NEON.muted, children: ['No description'] })] }), 1)
           if (about.subs.length > 0) {
             const open = about.subs.filter((x) => x.state !== 'CLOSED').length
             const more = subs.total > about.subs.length ? ` · first ${about.subs.length} of ${subs.total}` : ''
             section('Sub-issues', `${about.subs.length - open} of ${about.subs.length} closed${more}`)
-            // Open ones first, as they are what is left
-            for (const x of [...about.subs].sort((a, b) => Number(a.state === 'CLOSED') - Number(b.state === 'CLOSED')))
+            for (const x of openFirst(about.subs))
               add(
                 refRow(
                   x.state === 'CLOSED' ? '✓' : '○',
@@ -8065,13 +8375,13 @@ export function register(on: On, options: PluginOptions) {
                 1,
               )
           }
-          section('Description', about.updatedAt !== i.updatedAt ? `updating… · ${view}` : view)
-          if (about.body) prose(about.body, 0)
-          else add(Box({ paddingLeft: INDENT, children: [Text({ color: NEON.muted, children: ['No description'] })] }), 1)
-          if (about.talk.length > 0) {
+          // The latest few comments, oldest of them first; d reads them all
+          const LATEST = 3
+          const talk = about.talk.slice(-LATEST)
+          if (talk.length > 0) {
             const n = about.comments
-            section('Conversation', n > about.talk.length ? `latest ${about.talk.length} of ${n} · o: all on GitHub` : plural(n, 'comment'))
-            for (const t of about.talk) {
+            section('Conversation', `${n > LATEST ? `latest ${LATEST} of ${n}` : plural(n, 'comment')} · d: read them all`)
+            for (const t of talk) {
               const at = t.at ? `${elapsed(t.at, now)} ago` : ''
               add(
                 Box({
@@ -8092,30 +8402,10 @@ export function register(on: On, options: PluginOptions) {
         const total = heights.reduce((n, h) => n + h, 0)
         if (total <= budget) return { el: Box({ key: `panel-${i.url}`, flexDirection: 'column', children }), lines: total }
         if (issuePage.url !== i.url) issuePage = { url: i.url, from: 1 }
-        const from = Math.min(Math.max(1, issuePage.from), children.length - 1)
-        const linesOfParts = (a: number, b: number) => heights.slice(a, b).reduce((n, h) => n + h, 0)
-        let used = (heights[0] ?? 1) + (from > 1 ? 1 : 0)
-        let k = from
-        while (k < children.length && used + (heights[k] ?? 1) <= budget - 1) used += heights[k++] ?? 1
-        if (k === from) used += heights[k++] ?? 1
-        const below = linesOfParts(k, children.length)
-        const shownParts = [
-          children[0] as El,
-          ...(from > 1 ? [Text({ color: NEON.muted, children: [`  ↑ ${linesOfParts(1, from)} lines above`] })] : []),
-          ...children.slice(from, k),
-          Button({
-            key: 'panel-more',
-            label: below > 0 ? `↓ ${below} more lines` : '↑ back to the top',
-            hotkey: 'n',
-            plain: true,
-            dimColor: true,
-            onPress: () => {
-              issuePage = { url: i.url, from: below > 0 ? k : 1 }
-              redraw()
-            },
-          }),
-        ]
-        return { el: Box({ key: `panel-${i.url}`, flexDirection: 'column', children: shownParts }), lines: used + 1 }
+        return pageParts(`panel-${i.url}`, children, heights, budget, issuePage.from, (from) => {
+          issuePage = { url: i.url, from }
+          redraw()
+        })
       }
 
       // The list keeps at least three rows, or half the pane when it needs it; the details get the rest

@@ -2905,9 +2905,10 @@ test('d shows the description, then the diff one file at a time, drawn as a diff
   await ui.press({ key: 'act-diff' })
   expect(s.calls).toContainEqual(['gh', 'pr', 'diff', HUMAN.url])
   const diff = ui
-  // Page 0: the description as Markdown, template comments left out
-  const md = (await diff.find({ type: 'Markdown' }))?.props as { text: string } | undefined
-  expect(md?.text).toBe('## Why\n\nLogins were slow')
+  // Page 0: the description as Markdown, template comments left out, a block for j/k to stop at each
+  const md = (await diff.findAll({ type: 'Markdown' })).map((m) => (m.props as { text: string }).text)
+  expect(md).toEqual(['## Why', 'Logins were slow'])
+  expect(await diff.find({ key: 'block-1' })).toBeDefined()
   expect(await codes(diff)).toEqual([])
   // Page 1: the conversation, then the first file
   await diff.press({ key: 'diff-next' })
@@ -3126,7 +3127,7 @@ test('on the issues tab the PR keys say where they work, and the filter matches 
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-issues' })
   await ui.press({ key: 'unbound-a' })
-  expect(s.toasts.at(-1)).toBe('a acts on PRs (1: To review, 2: My PRs) · on issues: c closes or reopens, o opens, y plain text')
+  expect(s.toasts.at(-1)).toBe('a acts on PRs (1: To review, 2: My PRs) · on issues: d reads, c closes or reopens, o opens, y plain text')
   expect(approved(s.calls)).toBe(false)
   await ui.press({ key: 'filter' })
   await ui.input({ key: 'filter-input', text: 'docs', kind: 'change' })
@@ -3198,6 +3199,113 @@ test('the selected issue shows its description, comments and sub-issues, cleaned
   // The row counts the sub-issues closed
   expect(JSON.stringify(await ui.find({ key: 'line-https://github.com/acme/app/issues/7' }))).toContain('1/2')
   expect(JSON.stringify([s.prompts, s.screened, s.reviewCalls])).not.toContain('Open the page')
+  await ui.unmount()
+})
+
+test('the selected issue shows its description before its sub-issues, and only the latest comments: d reads them all', async ($, on) => {
+  const nodes = Array.from({ length: 5 }, (_, i) => ({ author: { login: 'bob' }, createdAt: '2026-10-02T00:00:00Z', body: `Comment ${i}` }))
+  const s = stubs(on, {
+    graphql: withIssues(issue({ subIssuesSummary: { total: 2, completed: 1 } })),
+    gh: (argv) => (argv.some((a) => a.startsWith('url=')) ? { stdout: issueDetails({ comments: { totalCount: 5, nodes } }) } : undefined),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  await s.clock.advance(500)
+  await s.clock.settle()
+  const panel = JSON.stringify(await ui.find({ key: 'panel-https://github.com/acme/app/issues/7' }))
+  expect(panel.indexOf('Open the page')).toBeGreaterThan(-1)
+  expect(panel.indexOf('Open the page')).toBeLessThan(panel.indexOf('Left part'))
+  expect(panel).toContain('latest 3 of 5 · d: read them all')
+  expect(panel).not.toContain('Comment 1')
+  expect(panel).toContain('Comment 4')
+  await ui.unmount()
+})
+
+// The person's wheel (a tick is 1) or a page key (a window's rows) over the pane
+const wheel = ($: TestEngine, by: number, bodyRows = 24) =>
+  ($.ui.scroll as unknown as (e: unknown) => Promise<unknown>)({
+    component: 'Pane',
+    requestId: 'pr-inbox',
+    offset: 0,
+    by,
+    bodyRows,
+    contentRows: bodyRows,
+    origin: { kind: 'person' },
+  })
+
+test('details that do not fit scroll both ways with the wheel and the page keys, not only n', async ($, on) => {
+  const body = Array.from({ length: 12 }, (_, i) => `Paragraph ${i}`).join('\n\n')
+  const s = stubs(on, {
+    graphql: withIssues(issue()),
+    gh: (argv) => (argv.some((a) => a.startsWith('url=')) ? { stdout: issueDetails({ body }) } : undefined),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, scroll: { offset: 0, bodyRows: 24 } } })
+  await ui.press({ key: 'tab-issues' })
+  await s.clock.advance(500)
+  await s.clock.settle()
+  const panel = async () => JSON.stringify(await ui.find({ key: 'panel-https://github.com/acme/app/issues/7' }))
+  expect(await panel()).toContain('Paragraph 0')
+  expect(await panel()).not.toContain('lines above')
+  // A tick is a line: the heading (a blank line and its own) turns after two
+  expect(await wheel($, 1)).toEqual({})
+  expect(await panel()).not.toContain('lines above')
+  await wheel($, 1)
+  expect(await panel()).toContain('lines above · wheel or PgUp: back')
+  // A page key turns about a page
+  await wheel($, 24)
+  expect(await panel()).not.toContain('Paragraph 1"')
+  // Up again, to the top, and ticks past the top do not pile up
+  await wheel($, -24)
+  await wheel($, -24)
+  await wheel($, -1)
+  expect(await panel()).not.toContain('lines above')
+  await wheel($, 2)
+  expect(await panel()).toContain('lines above')
+  // n still pages on
+  await ui.press({ key: 'panel-more' })
+  expect(await panel()).toContain('lines above')
+  await ui.unmount()
+})
+
+test('d on an issue reads it on one page: description, sub-issues and every comment, j/k scroll, n the next issue', async ($, on) => {
+  const nodes = Array.from({ length: 5 }, (_, i) => ({
+    author: { login: 'bob' },
+    createdAt: '2026-10-02T00:00:00Z',
+    body: `Comment ${i}‮`,
+  }))
+  const s = stubs(on, {
+    graphql: withIssues(issue({ subIssuesSummary: { total: 2, completed: 1 } })),
+    gh: (argv) => (argv.some((a) => a.startsWith('url=')) ? { stdout: issueDetails({ comments: { totalCount: 5, nodes } }) } : undefined),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  await ui.press({ key: 'issue-read' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  const page = JSON.stringify(await ui.drawn())
+  for (let i = 0; i < 5; i++) expect(page).toContain(`Comment ${i}`)
+  expect(page).not.toContain('\\u202e')
+  expect(page.indexOf('Open the page')).toBeLessThan(page.indexOf('Left part'))
+  expect(page.indexOf('Left part')).toBeLessThan(page.indexOf('Comment 0'))
+  expect(page).toContain('5 comments, oldest first')
+  // A block for each part j/k stop at: what it is, the description, the sub-issues, each comment
+  expect(await ui.find({ key: 'block-7' })).toBeDefined()
+  const before = s.toasts.length
+  await ui.press({ key: 'issue-reader-down' })
+  expect(s.toasts.length).toBe(before)
+  // c closes or reopens from here too, through the same panel
+  expect((await ui.find({ key: 'issue-reader-state' }))?.props.label).toBe('close issue')
+  // The only issue: no next one
+  await ui.press({ key: 'issue-reader-next' })
+  expect(s.toasts.at(-1)).toContain('last issue in the list')
+  // A PR key here says what works instead
+  await ui.press({ key: 'unbound-a' })
+  expect(s.toasts.at(-1)).toContain('no such key in the reader')
+  await ui.press({ key: 'issue-close-reader' })
+  expect(await ui.find({ key: 'issue-read' })).toBeDefined()
+  expect(JSON.stringify([s.prompts, s.screened, s.reviewCalls])).not.toContain('Comment')
   await ui.unmount()
 })
 
