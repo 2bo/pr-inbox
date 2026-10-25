@@ -3368,7 +3368,8 @@ test('linked PRs show under an issue; in the reader a digit reads one in your li
     ...extra,
   })
   const linked = {
-    closedByPullRequestsReferences: { nodes: [ref(11, 'OPEN', { title: 'ログイン画面を直す' }), ref(90, 'MERGED')] },
+    // GitHub has more than the 10 fetched
+    closedByPullRequestsReferences: { totalCount: 11, nodes: [ref(11, 'OPEN', { title: 'ログイン画面を直す' }), ref(90, 'MERGED')] },
     timelineItems: {
       nodes: [
         { source: ref(91, 'OPEN', { isDraft: true, title: 'Draft\u001b[31m one' }) },
@@ -3378,6 +3379,8 @@ test('linked PRs show under an issue; in the reader a digit reads one in your li
         },
         // Already listed as closing it
         { source: ref(11, 'OPEN') },
+        // In another owner's repository of the same name: named with its owner
+        { source: ref(92, 'CLOSED', { url: 'https://github.com/other/app/pull/92', repository: { nameWithOwner: 'other/app' } }) },
       ],
     },
   }
@@ -3396,11 +3399,13 @@ test('linked PRs show under an issue; in the reader a digit reads one in your li
   expect(panel).toContain('(open · closes it · to review)')
   expect(panel).toContain('(merged · closes it)')
   expect(panel).toContain('(draft · mentions it)')
+  expect(panel).toContain('other/app#92')
+  expect(panel).toContain('some left out · o: all on GitHub')
   expect(panel).not.toContain('An issue')
   expect(panel).not.toContain('\\u001b')
   await ui.press({ key: 'issue-read' })
   expect((await ui.find({ key: 'issue-reader-pr-1' }))?.props.hotkey).toBe('1')
-  expect(await ui.find({ key: 'issue-reader-pr-4' })).toBeUndefined()
+  expect(await ui.find({ key: 'issue-reader-pr-5' })).toBeUndefined()
   // In your lists: the PR reader, over the issue
   await ui.press({ key: 'issue-reader-pr-1' })
   for (let i = 0; i < 5; i++) await s.clock.settle()

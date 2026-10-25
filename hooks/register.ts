@@ -4279,11 +4279,16 @@ type IssueAbout = {
   comments: number
   subs: IssueRef[]
   prs: LinkedPr[]
+  // Some linked PRs were left out (more than LINKED_CLOSING close it, or more than LINKED_MENTIONS cross-references)
+  prsCut: boolean
   error: string
 }
 const issueAbouts = new Map<string, IssueAbout>()
 const issueAboutLoading = new Set<string>()
 const LINKED_PR = 'number title url state isDraft repository { nameWithOwner }'
+// The PRs that close the issue fetched, and the latest cross-references (from PRs and issues) looked through
+const LINKED_CLOSING = 10
+const LINKED_MENTIONS = 20
 // The latest comments fetched: the details show the last few, the reader (d) all of these
 const ISSUE_COMMENTS = 100
 const ISSUE_QUERY = `query($url: URI!) {
@@ -4292,8 +4297,9 @@ const ISSUE_QUERY = `query($url: URI!) {
       body stateReason
       comments(last: ${ISSUE_COMMENTS}) { totalCount nodes { author { login } createdAt body } }
       subIssues(first: 50) { nodes { number title url state repository { nameWithOwner } } }
-      closedByPullRequestsReferences(first: 10, includeClosedPrs: true) { nodes { ${LINKED_PR} } }
-      timelineItems(itemTypes: [CROSS_REFERENCED_EVENT], last: 20) {
+      closedByPullRequestsReferences(first: ${LINKED_CLOSING}, includeClosedPrs: true) { totalCount nodes { ${LINKED_PR} } }
+      timelineItems(itemTypes: [CROSS_REFERENCED_EVENT], last: ${LINKED_MENTIONS}) {
+        totalCount
         nodes { ... on CrossReferencedEvent { source { ... on PullRequest { ${LINKED_PR} } } } }
       }
     }
@@ -4359,7 +4365,17 @@ async function fetchIssueAbout($: EngineInterface, issue: Issue): Promise<void> 
   const r = await $.process.run(['gh', 'api', 'graphql', '-f', `query=${ISSUE_QUERY}`, '-f', `url=${issue.url}`]).catch(ghMissing)
   issueAboutLoading.delete(issue.url)
   const str = (v: unknown) => (typeof v === 'string' ? v : '')
-  const about: IssueAbout = { updatedAt: issue.updatedAt, body: '', stateReason: '', talk: [], comments: 0, subs: [], prs: [], error: '' }
+  const about: IssueAbout = {
+    updatedAt: issue.updatedAt,
+    body: '',
+    stateReason: '',
+    talk: [],
+    comments: 0,
+    subs: [],
+    prs: [],
+    prsCut: false,
+    error: '',
+  }
   if (r.exitCode !== 0) about.error = clean(r.stderr) || `gh exited with code ${r.exitCode}`
   else
     try {
@@ -4382,6 +4398,8 @@ async function fetchIssueAbout($: EngineInterface, issue: Issue): Promise<void> 
         .map(cleanIssueRef)
         .filter((x): x is IssueRef => x !== null)
       about.prs = linkedPrs(v)
+      const total = (x: unknown) => Number((x as { totalCount?: unknown } | undefined)?.totalCount) || 0
+      about.prsCut = total(v.closedByPullRequestsReferences) > LINKED_CLOSING || total(v.timelineItems) > LINKED_MENTIONS
     } catch {
       about.error = 'unreadable answer from gh'
     }
@@ -4434,11 +4452,13 @@ function openFirst(subs: IssueRef[]): IssueRef[] {
   return [...subs].sort((a, b) => Number(a.state === 'CLOSED') - Number(b.state === 'CLOSED'))
 }
 
-// "#12" for an issue in the same repository, "repo#12" for one elsewhere
+// "#12" for an issue in the same repository, "repo#12" in another of the same owner, "owner/repo#12" elsewhere
 function issueRefLabel(ref: IssueRef, from: Issue): string {
-  return ref.repository.nameWithOwner === from.repository.nameWithOwner
-    ? `#${ref.number}`
-    : `${ref.repository.nameWithOwner.split('/')[1] ?? ref.repository.nameWithOwner}#${ref.number}`
+  const [owner, repo] = ref.repository.nameWithOwner.split('/')
+  if (ref.repository.nameWithOwner === from.repository.nameWithOwner) return `#${ref.number}`
+  return owner === from.repository.nameWithOwner.split('/')[0] && repo
+    ? `${repo}#${ref.number}`
+    : `${ref.repository.nameWithOwner}#${ref.number}`
 }
 
 // c on the issues tab: close the issue (as completed or not planned, picked with its number key, never one picked for
@@ -7119,11 +7139,15 @@ export function register(on: On, options: PluginOptions) {
         ])
       }
       // 1-9: read a linked PR that is in your lists here (q comes back to the issue), any other on GitHub
-      if (about.prs.length > 0)
+      if (about.prs.length > 0 || about.prsCut)
         block([
           section(
             'Linked PRs',
-            `1-${Math.min(9, about.prs.length)}: read one in your lists here, any other on GitHub${about.prs.length > 9 ? ' · past 9: click its link' : ''}`,
+            [
+              ...(about.prs.length > 0 ? [`1-${Math.min(9, about.prs.length)}: read one in your lists here, any other on GitHub`] : []),
+              ...(about.prs.length > 9 ? ['past 9: click its link'] : []),
+              ...(about.prsCut ? ['some left out · o: all on GitHub'] : []),
+            ].join(' · '),
           ),
           ...about.prs.map((x, i) => {
             const st = linkedPrState(x)
@@ -8562,7 +8586,7 @@ export function register(on: On, options: PluginOptions) {
             const closing = about.prs.filter((x) => x.closes).length
             section(
               'Linked PRs',
-              `${closing === 0 ? 'none closes it' : closing === 1 ? '1 closes it' : `${closing} close it`} · d, then 1-9: read one`,
+              `${closing === 0 ? 'none closes it' : closing === 1 ? '1 closes it' : `${closing} close it`}${about.prsCut ? ' · some left out · o: all on GitHub' : ''} · d, then 1-9: read one`,
             )
             for (const x of about.prs) add(refRow(linkedPrState(x).mark, linkedPrState(x).color, x, `(${linkedPrNote(x)})`), 1)
           }
