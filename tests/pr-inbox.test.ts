@@ -1229,8 +1229,9 @@ test('v reviews from each perspective on the review model, then approves after c
   expect(s.panels.at(-1)).toContain(`y approves: acme/app#11 at ${HEAD.slice(0, 7)}`)
   expect(s.panels.at(-1)).toContain('All 5 AI reviewers passed it with no important findings.')
   expect(approvedAt(s)).toEqual([APPROVE_11])
-  // The selection moved on to the next request; back on #11, its review says approved
-  await ui.press({ key: 'nav-up' })
+  // The selection moved on to the next request; on #11, now under approved by you, its review says approved
+  for (let i = 0; i < 5 && !(await isSelected(ui, 11)); i++) await ui.press({ key: 'nav-down' })
+  expect(await isSelected(ui, 11)).toBe(true)
   expect(await ui.find({ type: 'Text', text: /^AI review ✓ approved at aaaaaaa: no blocking issues/ })).toBeDefined()
   await ui.unmount()
 })
@@ -1992,6 +1993,34 @@ test('an approval moves the PR to approved by you, in the same tab', async ($, o
   await ui.unmount()
 })
 
+test('an approved PR stays approved while the search still lists it as requested, until it is asked again', async ($, on) => {
+  const opts: StubOptions = { approve: true }
+  const s = stubs(on, opts)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await pressApprove(ui, s)
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  // The fetch after it still lists #11 as requested and not as approved
+  expect(s.calls.filter((c) => c[2] === 'graphql').length).toBeGreaterThan(1)
+  expect(s.statuses.at(-1)).toMatch(/^to review 1 /)
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(s.statuses.at(-1)).toMatch(/^to review 1 /)
+  // Asked again after the approval: a review request once more
+  opts.graphql = JSON.stringify({
+    data: {
+      viewer: { login: 'me' },
+      review: { nodes: [HUMAN2, { ...HUMAN, ...requested(new Date(NOW + 60_000).toISOString(), 'me') }, BOT] },
+      mine: { nodes: [] },
+    },
+  })
+  await s.clock.advance(2 * 60_000)
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(s.statuses.at(-1)).toMatch(/^to review 2 /)
+  await ui.unmount()
+})
+
 // ---- Approved by you, not merged ----
 
 const mineApproved = (oid: string, at = '2026-10-02T00:00:00Z') => ({
@@ -2417,6 +2446,24 @@ test('m merges a ready PR with the method picked in the merge panel, pinned to t
     true,
   )
   expect(await ui.find({ key: 'panel' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a merged PR leaves the list at once, though the search still finds it open', async ($, on) => {
+  const opts: StubOptions = {}
+  const s = stubs(on, opts)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'nav-down' })
+  // GitHub's search lags the merge: it still lists #22, whose own state says merged
+  const merged = { ...READY, state: 'MERGED' }
+  opts.graphql = JSON.stringify({
+    data: { viewer: { login: 'me' }, review: { nodes: [HUMAN2, HUMAN, BOT] }, mine: { nodes: [CHANGES, merged, WAITING, STALE] } },
+  })
+  await pressMerge(ui, s, '1')
+  expect(await ui.find({ key: `line-${READY.url}` })).toBeUndefined()
+  expect(s.statuses.at(-1)).not.toContain('✓1 ready')
   await ui.unmount()
 })
 

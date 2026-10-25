@@ -12,6 +12,8 @@ type PR = {
   number: number
   title: string
   url: string
+  // OPEN, CLOSED or MERGED: read from the PR itself, so it is current even when the search that found it lags
+  state?: string
   isDraft: boolean
   createdAt: string
   updatedAt: string
@@ -259,7 +261,7 @@ fragment issue on Issue {
 ${REVIEWED_FRAGMENT}
 ${ASKED_FRAGMENT}
 fragment pr on PullRequest {
-  number title url isDraft createdAt updatedAt headRefOid authorAssociation isCrossRepository additions deletions
+  number title url state isDraft createdAt updatedAt headRefOid authorAssociation isCrossRepository additions deletions
   repository { nameWithOwner autoMergeAllowed squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed defaultBranchRef { name } }
   author { login __typename }
   reviewDecision mergeable headRefName baseRefName
@@ -424,6 +426,10 @@ let assigned: Issue[] = []
 let assignedTotal = 0
 // Issues closed from the pane in this session, so c can reopen them
 let closedHere: Issue[] = []
+// PRs approved from the pane, until the search catches up: url → the PR as approved, and when (see fetchAll)
+const approvedHere = new Map<string, { pr: PR; at: number }>()
+// How long the pane keeps what it did over a search that has not caught up yet
+const SEARCH_LAG = 10 * MINUTE
 let fetchedAt = 0
 let loading = false
 let error = ''
@@ -1069,12 +1075,41 @@ function searchQuery(filter: string, kind: 'pr' | 'issue' = 'pr'): string {
   return `is:${kind} is:open archived:false ${filter}${org ? ` org:${org}` : ''}`
 }
 
-// Called during a fetch, wait for that fetch instead of starting another
+// Called during a fetch, wait for that fetch instead of starting another. After a write (again), a fetch that
+// started before it may have read the list as it was: one more follows it, shared by every write meanwhile
 let inflight: Promise<void> | null = null
+let queued: Promise<void> | null = null
 
-function refresh($: EngineInterface): Promise<void> {
+function refresh($: EngineInterface, again = false): Promise<void> {
+  if (inflight && again) {
+    queued ??= inflight.then(() => {
+      queued = null
+      return refresh($)
+    })
+    return queued
+  }
   if (!inflight) inflight = fetchAll($).finally(() => (inflight = null))
   return inflight
+}
+
+// The search behind each list lags GitHub by seconds to a minute or more, so a fetch right after a merge, a close or
+// an approval can still find the PR or issue where it was. Their own state is current: a PR or issue no longer open
+// leaves at once, and one approved from the pane stays approved, unless it was asked of you again since (a new
+// request, a new commit), until the search finds it there or SEARCH_LAG passes
+function settleApprovedHere(now: number, found: PR[]): void {
+  for (const [url, a] of approvedHere) {
+    const asked = review.find((p) => p.url === url)
+    const again =
+      asked &&
+      (asked.headRefOid !== a.pr.headRefOid ||
+        (asked.timelineItems?.nodes ?? []).some((n) => n?.createdAt && Date.parse(n.createdAt) > a.at))
+    if (again || found.some((p) => p.url === url) || now - a.at > SEARCH_LAG) {
+      approvedHere.delete(url)
+      continue
+    }
+    review = review.filter((p) => p.url !== url)
+    if (!found.some((p) => p.url === url)) found.unshift(a.pr)
+  }
 }
 
 async function fetchAll($: EngineInterface): Promise<void> {
@@ -1110,17 +1145,18 @@ async function fetchAll($: EngineInterface): Promise<void> {
       assigned?: { issueCount?: number; nodes: (Issue | null)[] }
     }
     viewer = data.viewer?.login ?? ''
-    // Search results can contain nulls for PRs we have no access to
-    review = data.review.nodes.filter((n): n is PR => Boolean(n?.url)).map(cleanPr)
-    mine = data.mine.nodes.filter((n): n is PR => Boolean(n?.url)).map(cleanPr)
+    // Search results can contain nulls for PRs we have no access to, and, lagging, PRs merged or closed a moment ago
+    const open = (nodes: (PR | null)[] | undefined) =>
+      (nodes ?? []).filter((n): n is PR => Boolean(n?.url) && (n?.state ?? 'OPEN') === 'OPEN').map(cleanPr)
+    review = open(data.review.nodes)
+    mine = open(data.mine.nodes)
+    const found = open(data.approved?.nodes)
+    settleApprovedHere(await $.clock.now(), found)
     // Asked again for a review, a PR is a review request, not an approved one
-    approved = (data.approved?.nodes ?? [])
-      .filter((n): n is PR => Boolean(n?.url))
-      .map(cleanPr)
-      .filter((p) => myApproval(p) !== undefined && !review.some((r) => r.url === p.url))
+    approved = found.filter((p) => myApproval(p) !== undefined && !review.some((r) => r.url === p.url))
     assignedTotal = Number(data.assigned?.issueCount) || 0
     assigned = (data.assigned?.nodes ?? [])
-      .filter((n): n is Issue => Boolean(n?.url))
+      .filter((n): n is Issue => Boolean(n?.url) && (n?.state ?? 'OPEN') === 'OPEN')
       .map(cleanIssue)
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
     // Reopened (here or elsewhere): listed again as assigned
@@ -1775,7 +1811,7 @@ async function postApproval($: EngineInterface, pr: PR, how: string, quiet = fal
   }
   if (head !== pr.headRefOid) {
     $.ui.toast(`Not approved: ${askLabel(pr)} has new commits since ${sha}. Review them first`, { timeoutMs: 8000 })
-    await refresh($)
+    await refresh($, true)
     return false
   }
   const r = await $.process
@@ -1822,11 +1858,12 @@ async function postApproval($: EngineInterface, pr: PR, how: string, quiet = fal
     const nextAfterApproval = rows[i + 1]?.url ?? rows[i - 1]?.url ?? ''
     review = review.filter((p) => p.url !== pr.url)
     approved = [nowApproved, ...approved.filter((p) => p.url !== pr.url)]
+    approvedHere.set(pr.url, { pr: nowApproved, at: Date.parse(at) })
     // On to the next review request: the one after it in the list (computed before it moved), else the one before
     if (selected === pr.url) selected = nextAfterApproval
     // Who decided, and how, stays in the transcript
     $.ui.log(`pr-inbox approved ${pr.repository.nameWithOwner}#${pr.number} at ${sha}: ${how}`)
-    await refresh($)
+    await refresh($, true)
   } catch (err) {
     // The list catches up on the next fetch. Why, off screen; a log that fails too must not undo the true below
     try {
@@ -4362,7 +4399,7 @@ async function setIssueState($: EngineInterface, issue: Issue, to: 'close' | 're
   if (state === (to === 'close' ? 'CLOSED' : 'OPEN')) {
     $.ui.toast(`${full} was already ${to === 'close' ? 'closed' : 'open'} on GitHub · nothing sent`)
     if (to === 'reopen') closedHere = closedHere.filter((i) => i.url !== issue.url)
-    await refresh($)
+    await refresh($, true)
     return ''
   }
   const argv =
@@ -4380,7 +4417,7 @@ async function setIssueState($: EngineInterface, issue: Issue, to: 'close' | 're
   } else closedHere = closedHere.filter((i) => i.url !== issue.url)
   $.ui.toast(to === 'close' ? `✦ closed ${full} as ${reason} · c: reopen it (under closed here)` : `✦ reopened ${full}`)
   $.ui.log(`pr-inbox ${to === 'close' ? `closed ${full} as ${reason}` : `reopened ${full}`}: you pressed y in the panel of c`)
-  await refresh($)
+  await refresh($, true)
   return ''
 }
 
@@ -4978,7 +5015,7 @@ async function sendFindings($: EngineInterface, pr: PR, chosen: Finding[], event
   const { head } = await currentHead($, pr)
   if (head && head !== pr.headRefOid) {
     $.ui.toast(`Not posted: ${askLabel(pr)} has new commits since ${sha} · v reviews the new commit`, { timeoutMs: 10000 })
-    await refresh($)
+    await refresh($, true)
     return ''
   }
   const placed = chosen.filter((f) => findingPlace(f))
@@ -5013,7 +5050,7 @@ async function sendFindings($: EngineInterface, pr: PR, chosen: Finding[], event
   const what = `1 review on ${pr.repository.nameWithOwner}#${pr.number} (${verdict.toLowerCase()}): ${where}`
   $.ui.toast(`✦ posted ${what}`, { timeoutMs: 8000 })
   $.ui.log(`pr-inbox posted ${what}, at ${sha}: you pressed y in the findings panel of s`)
-  await refresh($)
+  await refresh($, true)
   return ''
 }
 
@@ -5149,7 +5186,7 @@ async function mergePr($: EngineInterface, pr: PR): Promise<void> {
 // says the head branch was modified), the panel closes and a toast says so: the row now shows the new commits.
 // Any other refusal goes back to the panel as its reason, so y can try again once it is fixed
 async function refused($: EngineInterface, pr: PR, stderr: string, what: string): Promise<string> {
-  await refresh($)
+  await refresh($, true)
   const now = findPr(pr.url)?.headRefOid
   if ((now && now !== pr.headRefOid) || /head branch was modified/i.test(stderr)) {
     $.ui.toast(`${what}: ${askLabel(pr)} has new commits since ${pr.headRefOid.slice(0, 7)} · refreshed`, { timeoutMs: 10000 })
@@ -5167,7 +5204,7 @@ async function mergeNow($: EngineInterface, pr: PR, method: Method): Promise<str
   if (r.exitCode !== 0) return refused($, pr, r.stderr, 'Not merged')
   $.ui.toast(`✦ merged ${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number} · ${method.word}`)
   $.ui.log(`pr-inbox merged ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${method.word}): you pressed y in the merge panel of m`)
-  await refresh($)
+  await refresh($, true)
   return ''
 }
 
@@ -5183,7 +5220,7 @@ async function enableAutoMerge($: EngineInterface, pr: PR, method: Method): Prom
   $.ui.log(
     `pr-inbox turned auto-merge on for ${pr.repository.nameWithOwner}#${pr.number} at ${sha} (${method.word}): you pressed y in the merge panel of m`,
   )
-  await refresh($)
+  await refresh($, true)
   return ''
 }
 
@@ -5191,12 +5228,12 @@ async function enableAutoMerge($: EngineInterface, pr: PR, method: Method): Prom
 async function disableAutoMerge($: EngineInterface, pr: PR): Promise<string> {
   const r = await $.process.run(['gh', 'pr', 'merge', pr.url, '--disable-auto']).catch(ghMissing)
   if (r.exitCode !== 0) {
-    await refresh($)
+    await refresh($, true)
     return `still on: ${fit(clean(r.stderr) || 'GitHub refused it', 160)}`
   }
   $.ui.toast(`auto-merge off for ${askLabel(pr)}`)
   $.ui.log(`pr-inbox turned auto-merge off for ${pr.repository.nameWithOwner}#${pr.number}: you pressed y in the merge panel of m`)
-  await refresh($)
+  await refresh($, true)
   return ''
 }
 
@@ -5264,14 +5301,14 @@ async function mergeStack($: EngineInterface, pr: PR, method: Method, list: stri
     timeoutMs: 120000,
   })
   if (r.exitCode !== 0) {
-    await refresh($)
+    await refresh($, true)
     return `nothing merged: ${fit(clean(r.stderr || r.stdout) || 'gh stack failed', 160)}`
   }
   $.ui.toast(`✦ merged stack #${stack.number} up to #${pr.number} (${list}) · ${method.word}`)
   $.ui.log(
     `pr-inbox merged stack #${stack.number} of ${pr.repository.nameWithOwner} up to #${pr.number} (${list}, ${method.word}): you pressed y in the merge panel of m`,
   )
-  await refresh($)
+  await refresh($, true)
   return ''
 }
 
@@ -5296,7 +5333,7 @@ async function rerunFailed($: EngineInterface, pr: PR): Promise<string> {
       : `🔁 Re-running the failed jobs of ${plural(runs.length, 'run')} on ${askLabel(pr)}`,
     { timeoutMs: 8000 },
   )
-  await refresh($)
+  await refresh($, true)
   return ''
 }
 
@@ -5593,7 +5630,7 @@ async function sendPush($: EngineInterface, job: FixJob, head: string): Promise<
   $.ui.log(
     `pr-inbox pushed ${commits.length} commit(s) up to ${head.slice(0, 7)} to ${job.repo} ${job.branch} from ${job.dir}: you pressed y in the push panel of c`,
   )
-  await refresh($)
+  await refresh($, true)
   return ''
 }
 
