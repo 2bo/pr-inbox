@@ -1082,10 +1082,13 @@ let queued: Promise<void> | null = null
 
 function refresh($: EngineInterface, again = false): Promise<void> {
   if (inflight && again) {
-    queued ??= inflight.then(() => {
-      queued = null
-      return refresh($)
-    })
+    // Whether that fetch failed or not, the one after the write runs
+    queued ??= inflight
+      .catch(() => undefined)
+      .then(() => {
+        queued = null
+        return refresh($)
+      })
     return queued
   }
   if (!inflight) inflight = fetchAll($).finally(() => (inflight = null))
