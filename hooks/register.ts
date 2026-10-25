@@ -6022,6 +6022,7 @@ export function register(on: On, options: PluginOptions) {
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE) {
       diffView = undefined
+      issueView = undefined
       picker = undefined
       writePanel = undefined
       // Issues closed here are listed only while the pane stays open
