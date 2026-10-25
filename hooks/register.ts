@@ -1986,8 +1986,8 @@ async function toggleAsk($: EngineInterface, of: PR | Issue, kind: AskTarget['ki
   }
   $.ui.toast(
     asking
-      ? `${askLabel(pr)}'s link is in the prompt: Esc, then type after it, or ctrl+a and /skill for a skill (${asking.write ? 'Claude may change files' : 'read-only'}) · p: ${asking.write ? 'take link out' : 'allow edits'}`
-      : `Took ${askLabel(pr)}'s link out of the prompt`,
+      ? `${kind === 'issue' ? 'issue ' : ''}${askLabel(pr)}'s link is in the prompt: Esc, then type after it, or ctrl+a and /skill for a skill (${asking.write ? 'Claude may change files' : 'read-only'}) · p: ${asking.write ? 'take link out' : 'allow edits'}`
+      : `Took ${kind === 'issue' ? 'issue ' : ''}${askLabel(pr)}'s link out of the prompt`,
     { timeoutMs: 8000 },
   )
   $.ui.invalidate('ui.render')
@@ -2030,7 +2030,7 @@ const READ_TOOLS = new Set(['Read', 'Grep', 'Glob', 'AskUserQuestion', 'TodoWrit
 const READ_GH =
   /^gh (?:(?:pr (?:view|diff|checks)|issue view|run (?:view|list))(?: [^;&|`$<>(){}\\\n\r]*)?|api repos\/[\w.-]+\/[\w.-]+\/(?:pulls|issues)\/\d+\/(?:comments|reviews)(?: --paginate)?)$/
 const GUARD_DENY =
-  'pr-inbox: this turn looks into a PR or an issue, so only Read, Grep, Glob and read-only gh commands (gh pr view/diff/checks, gh issue view, gh run view/list, gh api on PR comments and reviews) can run. ' +
+  'pr-inbox: this turn looks into a PR or an issue, so only Read, Grep, Glob and read-only gh commands (gh pr view/diff/checks, gh issue view, gh run view/list, gh api on PR and issue comments and PR reviews) can run. ' +
   'Do not try another way. Tell the user what you would run, and they can ask for it in a new prompt.'
 
 function allowedWhileGuarded(tool: string, command: unknown): boolean {
@@ -6056,7 +6056,9 @@ export function register(on: On, options: PluginOptions) {
   // The hint line under the prompt says how to move between the prompt and the open pane
   on('ui.render', { component: 'PromptHint' }, async (_, e, next) => {
     // An armed p says what your next prompt goes with
-    const asked = asking ? ` · next prompt → ${askLabel(asking.pr)} (${asking.write ? 'may change files' : 'read-only'})` : ''
+    const asked = asking
+      ? ` · next prompt → ${asking.pr.kind === 'issue' ? 'issue ' : ''}${askLabel(asking.pr)} (${asking.write ? 'may change files' : 'read-only'})`
+      : ''
     // A fix waiting for your push stays in sight until it is pushed or forgotten
     const first = [...fixReady.values()][0]
     const ready = first
@@ -6509,10 +6511,19 @@ export function register(on: On, options: PluginOptions) {
     const key = (k: string, label: string, hotkey: string, onPress: () => void, dim = false) =>
       Button({ key: k, label, hotkey, plain: true, dimColor: dim, onPress })
     // Opened from the issue reader (a linked PR), q goes back to that issue
-    const close = key('diff-close', issueView ? 'back to the issue' : 'back to list', 'q', () => {
+    const fromIssue = issueView
+    const close = key('diff-close', fromIssue ? 'back to the issue' : 'back to list', 'q', () => {
       diffView = undefined
       redraw()
+      // Back where you were in the issue
+      if (fromIssue)
+        void $.ui
+          .scroll(fromIssue.block === 0 ? { to: 'start', in: PANE } : { to: { key: `block-${fromIssue.block}` }, in: PANE, block: 'start' })
+          .catch(() => undefined)
     })
+    // What comes after this PR: the next one in the list, or, opened from an issue, that issue
+    const issueOf = fromIssue ? findIssue(fromIssue.url) : undefined
+    const after = fromIssue ? 'q: back to the issue' : 'n: next PR · q: back to list'
     const { pr } = v
     const label = `${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number}`
     const prLink = safeHref(pr.url)
@@ -6536,7 +6547,7 @@ export function register(on: On, options: PluginOptions) {
     const prose = (text: string) => (plainText ? Text({ wrap: 'wrap', children: [text] }) : Markdown({ text }))
     // n: the next PR in the list, read the same way
     const nextPr = () => {
-      if (issueView) return toast('Opened from an issue · q: back to the issue')
+      if (fromIssue) return toast(`Opened from ${issueOf ? askLabel(issueOf) : 'an issue'} · q: back to the issue`)
       const rows = visibleRows(groups(fetchedAt || Date.now()))
       const i = rows.findIndex((p) => p.url === pr.url)
       const following = rows[i + 1] ?? (i < 0 ? rows[0] : undefined)
@@ -6544,7 +6555,10 @@ export function register(on: On, options: PluginOptions) {
       selected = following.url
       void openDiff($, following)
     }
-    const nextKey = key('diff-next-pr', 'next PR', 'n', nextPr, true)
+    // From an issue, n only says why not, so it is not offered
+    const nextKey = fromIssue
+      ? Box({ display: 'none', children: [key('diff-next-pr', 'next PR', 'n', nextPr, true)] })
+      : key('diff-next-pr', 'next PR', 'n', nextPr, true)
     if (v.loading || v.error) {
       const what = v.loading
         ? `${SPINNER[Math.floor(Date.now() / 100) % SPINNER.length]} fetching the PR…`
@@ -6571,7 +6585,10 @@ export function register(on: On, options: PluginOptions) {
           keyCatcher(
             kit,
             tree,
-            () => (v.error ? 'Could not read this PR · o: open on GitHub · q: back to list' : 'Still fetching · q: back to list'),
+            () =>
+              v.error
+                ? `Could not read this PR · o: open on GitHub · ${fromIssue ? 'q: back to the issue' : 'q: back to list'}`
+                : `Still fetching · ${fromIssue ? 'q: back to the issue' : 'q: back to list'}`,
             toast,
           ),
         ],
@@ -6607,7 +6624,7 @@ export function register(on: On, options: PluginOptions) {
         ? descBlocks.length
         : v.talk.length
     const scrollTo = (block: number) => {
-      const onward = at < pages - 1 ? (file ? 'l: next file' : 'l: next page') : 'n: next PR · q: back to list'
+      const onward = at < pages - 1 ? (file ? 'l: next file' : 'l: next page') : after
       if (file && isGenerated(file.path) && !v.showGenerated.has(file.path))
         return toast(`Generated or lock file, folded · g: show it · ${onward}`)
       if (blocks === 0) return toast(`Nothing to scroll here · ${onward}`)
@@ -6684,13 +6701,7 @@ export function register(on: On, options: PluginOptions) {
                   () => (at === 0 ? toast('This is the description · l: the conversation') : go(at - 1)),
                   at === 0,
                 ),
-                key(
-                  'diff-next',
-                  '▸',
-                  'l',
-                  () => (at === pages - 1 ? toast('End of this PR · n: next PR · q: back to list') : go(at + 1)),
-                  at === pages - 1,
-                ),
+                key('diff-next', '▸', 'l', () => (at === pages - 1 ? toast(`End of this PR · ${after}`) : go(at + 1)), at === pages - 1),
                 key('diff-down', '↓', 'j', () => scrollTo(v.block + 1), blocks === 0),
                 key('diff-up', '↑', 'k', () => scrollTo(v.block - 1), blocks === 0),
               ],
@@ -6768,7 +6779,8 @@ export function register(on: On, options: PluginOptions) {
         flexDirection: 'column',
         children: [...tree.slice(0, head.length), tabs, ...tree.slice(head.length), keyCatcher(kit, [...tree, tabs], why, toast)],
       })
-    const notHere = (k: string) => `${k}: no such key in the reader · h/l: page · j/k: scroll · f: file tree · q: back to list`
+    const notHere = (k: string) =>
+      `${k}: no such key in the reader · h/l: page · j/k: scroll · f: file tree · ${fromIssue ? 'q: back to the issue' : 'q: back to list'}`
 
     // f: the description, the conversation, and the files as a tree. j/k move between them, l opens, 1-9 open a file
     if (v.list) {
@@ -6950,7 +6962,7 @@ export function register(on: On, options: PluginOptions) {
       body.push(
         Text({
           color: NEON.violet,
-          children: [`── end of ${label} · ${isReview ? 'a: approve · v: AI review · ' : ''}n: next PR · q: back to list ──`],
+          children: [`── end of ${label} · ${isReview ? 'a: approve · v: AI review · ' : ''}${after} ──`],
         }),
       )
     return done([...head, keys, rule, ...sinceNote, title, ...findings, ...body], notHere)
@@ -7002,7 +7014,7 @@ export function register(on: On, options: PluginOptions) {
       const listed = findPr(x.url)
       if (listed) return void openDiff($, listed)
       const link = safeHref(x.url)
-      if (!link) return toast("This PR's link is not a plain https:// GitHub link, so it does not open")
+      if (!link) return toast(`${issueRefLabel(x, issue)}'s link is not a plain https:// GitHub link, so it does not open`)
       toast(`${issueRefLabel(x, issue)} is not in your lists: opening it on GitHub`)
       void $.process.run(['gh', 'pr', 'view', link, '--web'])
     }
@@ -7108,7 +7120,10 @@ export function register(on: On, options: PluginOptions) {
       // 1-9: read a linked PR that is in your lists here (q comes back to the issue), any other on GitHub
       if (about.prs.length > 0)
         block([
-          section('Linked PRs', '1-9: read one in your lists here, any other on GitHub'),
+          section(
+            'Linked PRs',
+            `1-${Math.min(9, about.prs.length)}: read one in your lists here, any other on GitHub${about.prs.length > 9 ? ' · past 9: click its link' : ''}`,
+          ),
           ...about.prs.map((x, i) => {
             const st = linkedPrState(x)
             const lbl = issueRefLabel(x, issue)
@@ -7198,6 +7213,7 @@ export function register(on: On, options: PluginOptions) {
       color: NEON.violet,
       children: [`── end of ${label} · c: ${closedNow ? 'reopen' : 'close'} · n: next issue · q: back to list ──`],
     })
+    const linkedCount = about?.error ? 0 : (about?.prs.length ?? 0)
     const tree = [head, keys, rule, ...blocks, end]
     return Box({
       flexDirection: 'column',
@@ -7206,7 +7222,15 @@ export function register(on: On, options: PluginOptions) {
         keyCatcher(
           kit,
           tree,
-          (k) => `${k}: no such key in the reader · j/k: scroll · c: ${closedNow ? 'reopen' : 'close'} · n: next issue · q: back to list`,
+          (k) =>
+            [
+              `${k}: no such key in the reader · j/k: scroll`,
+              ...(linkedCount > 0 ? [`1-${Math.min(9, linkedCount)}: linked PR`] : []),
+              'p: ask Claude',
+              `c: ${closedNow ? 'reopen' : 'close'}`,
+              'n: next issue',
+              'q: back to list',
+            ].join(' · '),
           toast,
         ),
       ],
@@ -8196,7 +8220,7 @@ export function register(on: On, options: PluginOptions) {
           [
             [
               'd',
-              'read it: description, sub-issues, linked PRs (1-9 read one) and every comment (the latest 100) on one page · j / k scroll (the wheel, ↑↓ and PgUp / PgDn too) · n: next issue · q: back',
+              'read it: description, sub-issues, linked PRs (1-9 read one) and every comment (the latest 100) on one page · j / k scroll (the wheel, ↑↓ and PgUp / PgDn too) · p, c, y, o as here · n: next issue · q: back',
             ],
             [
               'p',
@@ -8534,7 +8558,11 @@ export function register(on: On, options: PluginOptions) {
               )
           }
           if (about.prs.length > 0) {
-            section('Linked PRs', `${about.prs.filter((x) => x.closes).length} close it · d: read one`)
+            const closing = about.prs.filter((x) => x.closes).length
+            section(
+              'Linked PRs',
+              `${closing === 0 ? 'none closes it' : closing === 1 ? '1 closes it' : `${closing} close it`} · d, then 1-9: read one`,
+            )
             for (const x of about.prs) add(refRow(linkedPrState(x).mark, linkedPrState(x).color, x, `(${linkedPrNote(x)})`), 1)
           }
           // The latest few comments, oldest of them first; d reads them all
