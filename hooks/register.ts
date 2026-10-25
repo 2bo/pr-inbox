@@ -4279,6 +4279,16 @@ function issueRows(): Issue[] & { depth?: Map<string, number>; last?: Set<string
   return Object.assign([...ordered, ...closedHere.filter(matchesFilter)], { depth, last })
 }
 
+// The pane closes: those closed here are no longer listed, nor known to the snapshot, so one assigned to you again
+// later is a new assignment
+async function forgetClosedHere($: EngineInterface): Promise<void> {
+  const urls = new Set(closedHere.map((i) => i.url))
+  closedHere = []
+  if (urls.size === 0) return
+  const snapshot = (await $.store.get('snapshot')) as Snapshot | undefined
+  if (snapshot?.assigned) await $.store.set('snapshot', { ...snapshot, assigned: snapshot.assigned.filter((url) => !urls.has(url)) })
+}
+
 // An issue on the issues tab: assigned to you, or closed from the pane in this session
 function findIssue(url: string): Issue | undefined {
   return assigned.find((i) => i.url === url) ?? closedHere.find((i) => i.url === url)
@@ -5838,7 +5848,7 @@ export function register(on: On, options: PluginOptions) {
       picker = undefined
       writePanel = undefined
       // Issues closed here are listed only while the pane stays open
-      closedHere = []
+      await forgetClosedHere($)
       paneOpen = false
       paneFocused = false
       $.ui.invalidate('ui.render')
@@ -6887,9 +6897,9 @@ export function register(on: On, options: PluginOptions) {
             children: [
               small('tab-prev', '◂', 'h', () => switchTab(-1)),
               small('tab-next', '▸', 'l', () => switchTab(1)),
-              small('close', '✕', 'q', () => {
+              small('close', '✕', 'q', async () => {
                 // Also on ui.close, for a close the engine makes; here for q, as the pane's own close may not reach it
-                closedHere = []
+                await forgetClosedHere($)
                 void $.ui.close({ id: PANE })
               }),
             ],

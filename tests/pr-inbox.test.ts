@@ -3253,6 +3253,8 @@ test('after closing, the selection stays in place, and closing the pane forgets 
   await ui.press({ key: 'close' })
   await s.clock.settle()
   await ui.unmount()
+  // Nor is it known to the snapshot: assigned to you again later, it is a new assignment
+  expect((s.store.get('snapshot') as { assigned?: string[] }).assigned).not.toContain('https://github.com/acme/app/issues/7')
   const again = await $.ui.mount(PANE)
   await again.press({ key: 'tab-issues' })
   expect(await again.find({ type: 'Text', text: /closed here/ })).toBeUndefined()
