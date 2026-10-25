@@ -7018,6 +7018,8 @@ export function register(on: On, options: PluginOptions) {
     }
     const about = issueAbouts.get(issue.url)
     if (about?.updatedAt !== issue.updatedAt && !issueAboutLoading.has(issue.url)) void fetchIssueAbout($, issue)
+    // Read here (n moves on without the list being drawn), it is seen
+    void markIssueSeen($, issue)
     const label = `${issue.repository.nameWithOwner.split('/')[1] ?? issue.repository.nameWithOwner}#${issue.number}`
     const href = safeHref(issue.url)
     const head = Box({

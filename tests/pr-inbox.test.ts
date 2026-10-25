@@ -3348,6 +3348,19 @@ test('an issue updated since you last selected it is marked ●, until you selec
   await ui.unmount()
 })
 
+test('n in the issue reader marks the next issue as seen', async ($, on) => {
+  const s = stubs(on, { graphql: withIssues(issue(), OTHER_ISSUE), store: { seenIssues: {} } })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  await ui.press({ key: 'issue-read' })
+  await ui.press({ key: 'issue-reader-next' })
+  await ui.find({ key: 'issue-reader-keys' })
+  for (let i = 0; i < 3; i++) await s.clock.settle()
+  expect((s.store.get('seenIssues') as Record<string, string>)[OTHER_ISSUE.url]).toBe(OTHER_ISSUE.updatedAt)
+  await ui.unmount()
+})
+
 test('the first time issues are listed, every issue already assigned counts as seen', async ($, on) => {
   const s = stubs(on, { graphql: withIssues(issue(), OTHER_ISSUE) })
   await start($, s.clock)
