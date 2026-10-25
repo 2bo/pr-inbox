@@ -3413,7 +3413,7 @@ test('linked PRs show under an issue; in the reader a digit reads one in your li
   expect(panel).toContain('(merged · closes it)')
   expect(panel).toContain('(draft · mentions it)')
   expect(panel).toContain('other/app#92')
-  expect(panel).toContain('some left out · o: all on GitHub')
+  expect(panel).toContain('more close it · o: all on GitHub')
   expect(panel).not.toContain('An issue')
   expect(panel).not.toContain('\\u001b')
   await ui.press({ key: 'issue-read' })
@@ -3431,6 +3431,23 @@ test('linked PRs show under an issue; in the reader a digit reads one in your li
   await ui.press({ key: 'issue-reader-pr-2' })
   expect(s.calls).toContainEqual(['gh', 'pr', 'view', 'https://github.com/acme/app/pull/90', '--web'])
   expect(s.toasts.at(-1)).toContain('not in your lists')
+  await ui.unmount()
+})
+
+test('with no linked PR found but older references not looked at, the details still say so', async ($, on) => {
+  const s = stubs(on, {
+    graphql: withIssues(issue()),
+    gh: (argv) =>
+      argv.some((a) => a.startsWith('url=')) ? { stdout: issueDetails({ timelineItems: { totalCount: 25, nodes: [] } }) } : undefined,
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  await s.clock.advance(500)
+  await s.clock.settle()
+  const panel = JSON.stringify(await ui.find({ key: 'panel-https://github.com/acme/app/issues/7' }))
+  expect(panel).toContain('none closes it · older references not looked at · o: on GitHub')
+  expect(panel).not.toContain('1-9')
   await ui.unmount()
 })
 

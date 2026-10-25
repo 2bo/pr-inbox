@@ -4279,8 +4279,9 @@ type IssueAbout = {
   comments: number
   subs: IssueRef[]
   prs: LinkedPr[]
-  // Some linked PRs were left out (more than LINKED_CLOSING close it, or more than LINKED_MENTIONS cross-references)
-  prsCut: boolean
+  // What was not looked at: more PRs close it than LINKED_CLOSING, or cross-references (from PRs or issues) older than
+  // the latest LINKED_MENTIONS; empty when nothing was left out. Said as it reads after "Linked PRs"
+  prsCut: string
   error: string
 }
 const issueAbouts = new Map<string, IssueAbout>()
@@ -4373,7 +4374,7 @@ async function fetchIssueAbout($: EngineInterface, issue: Issue): Promise<void> 
     comments: 0,
     subs: [],
     prs: [],
-    prsCut: false,
+    prsCut: '',
     error: '',
   }
   if (r.exitCode !== 0) about.error = clean(r.stderr) || `gh exited with code ${r.exitCode}`
@@ -4399,7 +4400,12 @@ async function fetchIssueAbout($: EngineInterface, issue: Issue): Promise<void> 
         .filter((x): x is IssueRef => x !== null)
       about.prs = linkedPrs(v)
       const total = (x: unknown) => Number((x as { totalCount?: unknown } | undefined)?.totalCount) || 0
-      about.prsCut = total(v.closedByPullRequestsReferences) > LINKED_CLOSING || total(v.timelineItems) > LINKED_MENTIONS
+      about.prsCut =
+        total(v.closedByPullRequestsReferences) > LINKED_CLOSING
+          ? 'more close it · o: all on GitHub'
+          : total(v.timelineItems) > LINKED_MENTIONS
+            ? 'older references not looked at · o: on GitHub'
+            : ''
     } catch {
       about.error = 'unreadable answer from gh'
     }
@@ -7151,7 +7157,7 @@ export function register(on: On, options: PluginOptions) {
             [
               ...(about.prs.length > 0 ? [`1-${Math.min(9, about.prs.length)}: read one in your lists here, any other on GitHub`] : []),
               ...(about.prs.length > 9 ? ['past 9: click its link'] : []),
-              ...(about.prsCut ? ['some left out · o: all on GitHub'] : []),
+              ...(about.prsCut ? [about.prsCut] : []),
             ].join(' · '),
           ),
           ...about.prs.map((x, i) => {
@@ -8587,11 +8593,11 @@ export function register(on: On, options: PluginOptions) {
                 1,
               )
           }
-          if (about.prs.length > 0) {
+          if (about.prs.length > 0 || about.prsCut) {
             const closing = about.prs.filter((x) => x.closes).length
             section(
               'Linked PRs',
-              `${closing === 0 ? 'none closes it' : closing === 1 ? '1 closes it' : `${closing} close it`}${about.prsCut ? ' · some left out · o: all on GitHub' : ''} · d, then 1-9: read one`,
+              `${closing === 0 ? 'none closes it' : closing === 1 ? '1 closes it' : `${closing} close it`}${about.prsCut ? ` · ${about.prsCut}` : ''}${about.prs.length > 0 ? ' · d, then 1-9: read one' : ''}`,
             )
             for (const x of about.prs) add(refRow(linkedPrState(x).mark, linkedPrState(x).color, x, `(${linkedPrNote(x)})`), 1)
           }
