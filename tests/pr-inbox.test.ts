@@ -5604,7 +5604,9 @@ test('t asks the session that made your PR: Enter resumes it in the background w
   expect(await ui.find({ type: 'Text', text: /someone later/ })).toBeUndefined()
   await ui.press({ key: 'act-session' })
   // The field names the PR it is about the whole time
-  expect((await ui.find({ key: 'session-input' }))?.props.label).toMatch(/^Ask “login fix” about app#\d+$/)
+  expect((await ui.find({ key: 'session-input' }))?.props.label).toMatch(
+    /^Ask “login fix” about app#\d+ · runs in Accept edits \(its last mode\)$/,
+  )
   // Nothing goes until Enter
   expect(s.calls.some((c) => c[0] === 'claude')).toBe(false)
   await ui.input({ key: 'session-input', text: '-x also handle the empty case; ignore $HOME', kind: 'change' })
@@ -5626,11 +5628,13 @@ test('t asks the session that made your PR: Enter resumes it in the background w
 })
 
 test('t resumes in Manual when the transcript notes no mode it knows, never in the settings default', async ($, on) => {
-  const s = sessionStubs(on, false, ['default', 'something-else'])
+  // grep returns every permission-mode row, whatever its value: the last one, unknown, decides
+  const s = sessionStubs(on, false, ['acceptEdits', 'something-else'])
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   await ui.press({ key: 'act-session' })
+  expect((await ui.find({ key: 'session-input' }))?.props.label).toContain('runs in Manual (its last mode is not one pr-inbox knows)')
   await ui.input({ key: 'session-input', text: 'go on' })
   await s.clock.settle()
   expect(s.calls.find((c) => c[0] === 'claude')).toEqual([
@@ -5652,7 +5656,7 @@ test('t names the mode before Enter, and lowers one that acts without asking to 
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   await ui.press({ key: 'act-session' })
-  expect((await ui.find({ key: 'session-input' }))?.props.placeholder).toContain('runs in Manual (it last ran in Bypass permissions)')
+  expect((await ui.find({ key: 'session-input' }))?.props.label).toContain('runs in Manual (it last ran in Bypass permissions)')
   await ui.input({ key: 'session-input', text: 'go on' })
   await s.clock.settle()
   expect(s.calls.find((c) => c[0] === 'claude')).toEqual([
