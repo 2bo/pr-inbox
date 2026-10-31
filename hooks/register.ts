@@ -2050,11 +2050,9 @@ function askNote(kind: AskTarget['kind'] = 'PR'): string {
 // Claude Code notes in a session's transcript (~/.claude/projects/<project>/<id>.jsonl) each PR the session made or
 // worked on, as a pr-link row (what `claude --from-pr` reads); a push to a PR made elsewhere notes it too. A session
 // whose first note of one of your PRs comes within CREATED_WITHIN of the PR's creation made it; with none, the last
-// session to note it only worked on it. Its title is drawn on the PR, and t hands it a request of yours, resumed in
-// the background. Only
-// those rows, the title rows and the folder the session started in are read (by grep), and only drawn: none of it
-// reaches a model, and the request is what you typed, as you typed it
-// made: it made the PR; otherwise it is the last session that worked on it
+// session to note it only worked on it (made false). Its title is drawn on the PR, and t hands it a request of yours,
+// resumed in the background. Only those rows, the title rows and the folder the session started in are read (by grep),
+// and only drawn: none of it reaches a model, and the request is what you typed, as you typed it
 type PrSession = { id: string; title: string; cwd: string; made: boolean }
 // Your PRs only, by URL
 let prSessions = new Map<string, PrSession>()
@@ -2067,7 +2065,8 @@ let sessionsReadAt = 0
 let thisSession = ''
 let sessionsLoading: Promise<void> | undefined
 const SESSIONS_EVERY = MINUTE
-const CREATED_WITHIN = 10 * MINUTE
+// The session that runs gh pr create notes the PR a second or two later; the rest allows for clock skew
+const CREATED_WITHIN = 2 * MINUTE
 const CLAUDE_SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // A whole pr-link row, or the start of a title row up to the title's closing quote. Inside a message (a tool's
 // output that shows a transcript, say) the quotes are escaped, so these match only Claude Code's own rows
@@ -2113,8 +2112,9 @@ async function readSessions($: EngineInterface): Promise<void> {
   if (!rows || rows.exitCode > 2) return
   const titles = new Map<string, { custom?: string; ai?: string }>()
   const files = new Map<string, string>()
-  // Each session's first and last note of each PR
-  const notes = new Map<string, Map<string, { first: number; last: number }>>()
+  // Per PR: the earliest note near its creation (by the session that made it), and the latest note
+  type Note = { id: string; at: number }
+  const notes = new Map<string, { maker?: Note; last: Note }>()
   for (const { path, id, match } of grepHits(rows.stdout)) {
     if (!CLAUDE_SESSION.test(id) || !path.startsWith(`${root}/`)) continue
     files.set(id, path)
@@ -2131,22 +2131,15 @@ async function readSessions($: EngineInterface): Promise<void> {
     if (row.type !== 'pr-link' || row.sessionId !== id || typeof row.prUrl !== 'string') continue
     const url = safeHref(row.prUrl)
     const at = Date.parse(String(row.timestamp))
-    if (!url || !own.has(url) || !Number.isFinite(at)) continue
-    const byId = notes.get(url) ?? new Map<string, { first: number; last: number }>()
-    notes.set(url, byId)
-    const n = byId.get(id)
-    byId.set(id, n ? { first: Math.min(n.first, at), last: Math.max(n.last, at) } : { first: at, last: at })
+    const created = url ? own.get(url) : undefined
+    if (!url || created === undefined || !Number.isFinite(at)) continue
+    const n = notes.get(url) ?? { last: { id, at } }
+    notes.set(url, n)
+    if (at > n.last.at) n.last = { id, at }
+    if (Math.abs(at - created) <= CREATED_WITHIN && (!n.maker || at < n.maker.at)) n.maker = { id, at }
   }
   // The session that made it, or else the one that worked on it last
-  const chosen = new Map<string, { id: string; made: boolean }>()
-  for (const [url, byId] of notes) {
-    const created = own.get(url) ?? Number.NaN
-    const sessions = [...byId].map(([id, n]) => ({ id, ...n }))
-    const maker = sessions.filter((x) => Math.abs(x.first - created) <= CREATED_WITHIN).sort((a, b) => a.first - b.first)[0]
-    const latest = sessions.sort((a, b) => b.last - a.last)[0]
-    if (maker) chosen.set(url, { id: maker.id, made: true })
-    else if (latest) chosen.set(url, { id: latest.id, made: false })
-  }
+  const chosen = new Map([...notes].map(([url, n]) => [url, { id: (n.maker ?? n.last).id, made: n.maker !== undefined }]))
   // Where those sessions started (claude --resume finds a session under the folder it started in), for the new ones
   const unread = [...new Set([...chosen.values()].map((f) => f.id))].filter((id) => !sessionCwds.has(id))
   if (unread.length > 0) {

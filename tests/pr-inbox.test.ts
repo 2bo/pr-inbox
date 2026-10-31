@@ -5578,7 +5578,7 @@ function sessionStubs(on: TestOn, open: boolean, made = true) {
       if (argv[0] === 'grep' && argv.includes('-m1'))
         return {
           stdout: argv
-            .slice(5)
+            .filter((a) => a.endsWith('.jsonl'))
             .map((f) => `${f}\0"cwd":"/work/app"`)
             .join('\n'),
         }
