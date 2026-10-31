@@ -41,9 +41,9 @@ One line per PR. From left to right:
 | Column | Marks |
 | :- | :- |
 | Marks | `▸` selected · `●` updated since you last selected it · `⚙` a bot · `┌ ├ └` a stack, bottom (the next to merge into the base branch) to top: one made with gh stack, or PRs opened on each other's branches |
-| RISK (To review) | `▲ HIGH` · `◆ MED` · `○ LOW` from the analysis · `…` analyzing · `·` not analyzed |
-| STATE (My PRs) | `✗ FIX` needs you · `✓ RDY` ready to merge · `… REVW` in review · `⇢ AUTO` auto-merge on: GitHub merges it when ready · `○ ASK` waits on a review, but nobody is asked (`w`) · `◇ OLD` no update for `stale_days` · `⏸ SNZ` snoozed · `⟳ WIP` Claude is fixing its CI · `⇡ PUSH` a fix waits for your push |
-| Approved by you | `↻ RE` changed since you approved (re-review) · `… REVW` waits on other reviews · `◌ CI` running · `✗ CI` / `✗ CONF` / `✗ CHG` what blocks it · `✓ RDY` ready to merge |
+| RISK (To review) | `▲ HIGH` · `◆ MED` · `○ LOW` from the analysis · `…` analyzing · `·` not analyzed · `✎ DRFT` a draft (its risk is in the details under the list) |
+| STATE (My PRs) | `✗ FIX` needs you · `✓ RDY` ready to merge · `… REVW` in review · `⇢ AUTO` auto-merge on: GitHub merges it when ready · `○ ASK` waits on a review, but nobody is asked (`w`) · `✎ DRFT` a draft · `◇ OLD` no update for `stale_days` · `⏸ SNZ` snoozed · `⟳ WIP` Claude is fixing its CI · `⇡ PUSH` a fix waits for your push |
+| Approved by you | `↻ RE` changed since you approved (re-review) · `✎ DRFT` a draft · `… REVW` waits on other reviews · `◌ CI` running · `✗ CI` / `✗ CONF` / `✗ CHG` what blocks it · `✓ RDY` ready to merge |
 | PR, TITLE | Links to GitHub (Cmd+click in a terminal that supports hyperlinks) |
 | AGE | `▰▱▱` how long it has waited: one cell at 4 hours, two at a day, three at three days |
 | CI | `✓` passed · `✗` failed · `◌` running · `·` none. Judged from the latest run of each check, so a job that failed and then passed on a re-run counts as passed |

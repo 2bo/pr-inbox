@@ -4422,6 +4422,22 @@ test('approved PRs carry why they are still open as their badge', async ($, on) 
   await ui.unmount()
 })
 
+test('a draft says so in the badge, not in its title', async ($, on) => {
+  const asked = pr({ number: 11, url: 'https://github.com/acme/app/pull/11', title: 'Asked early', isDraft: true })
+  const own = pr({ number: 21, url: 'https://github.com/acme/app/pull/21', title: 'Still going', isDraft: true })
+  const s = stubs(on, {
+    graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [asked] }, mine: { nodes: [own] } } }),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  expect(await lineOf(ui, 11)).toContain('✎ DRFT')
+  expect(await lineOf(ui, 11)).not.toContain('[draft]')
+  await ui.press({ key: 'tab-mine' })
+  expect(await lineOf(ui, 21)).toContain('✎ DRFT')
+  expect(await lineOf(ui, 21)).not.toContain('[draft]')
+  await ui.unmount()
+})
+
 test('b sits on the bots heading and counts the bot PRs not reviewed yet', async ($, on) => {
   const s = stubs(on)
   await start($, s.clock)

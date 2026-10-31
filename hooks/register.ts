@@ -900,6 +900,7 @@ function notReadyWhy(pr: PR, now: number): string {
 // Why a PR you approved is still open, as its badge: changed since (re-review), then what blocks it, or ready
 function approvedBadge(pr: PR): Cell {
   if (approvalOutdated(pr)) return { text: '↻ RE  ', color: NEON.yellow, bold: true }
+  if (pr.isDraft) return DRAFT_BADGE
   const reasons = classify(pr, fetchedAt || Date.now()).reasons
   if (reasons.includes('changes requested')) return { text: '✗ CHG ', color: NEON.red }
   if (reasons.includes('CI failed')) return { text: '✗ CI  ', color: NEON.red }
@@ -4730,6 +4731,7 @@ const ASCII: Record<string, string> = {
   '⠏': '\\',
   '?': '?',
   '⚠': '!',
+  '✎': '/',
   '☑': 'v',
   '⠿': '@',
   '⧉': '#',
@@ -4783,10 +4785,14 @@ function sweep(n: number): string[] {
   })
 }
 
-// Risk for a review request (from the analysis), state for one of my PRs; always six columns wide
+const DRAFT_BADGE: Cell = { text: '✎ DRFT' }
+
+// Risk for a review request (from the analysis), state for one of my PRs; always six columns wide. A draft says so in
+// place of either: it is not ready for review or merge yet (the risk stays in the details under the list)
 function badgeOf(pr: PR): Cell {
   if (isApproved(pr)) return approvedBadge(pr)
   if (tab === 'review') {
+    if (pr.isDraft) return DRAFT_BADGE
     if (cfg.analysis === 'off') return { text: '      ' }
     const a = analysisOf(pr)
     if (!a || 'failed' in a) return { text: pending.has(pr.url) ? '  …   ' : '  ·   ' }
@@ -4799,6 +4805,7 @@ function badgeOf(pr: PR): Cell {
   if (isSnoozed(pr)) return { text: '⏸ SNZ ' }
   if (fixJob?.pr.url === pr.url) return { text: '⟳ WIP ', color: NEON.cyan, bold: true }
   if (fixReady.has(pr.url)) return { text: '⇡ PUSH', color: NEON.cyan, bold: true }
+  if (pr.isDraft) return DRAFT_BADGE
   const group = classify(pr, fetchedAt || Date.now()).group
   // Waiting on reviews with nobody asked: ask someone (w)
   if (needsReviewer(pr, fetchedAt || Date.now())) return { text: '○ ASK ', color: NEON.yellow, bold: true }
@@ -7844,7 +7851,7 @@ export function register(on: On, options: PluginOptions) {
       const repo = p.repository.nameWithOwner.split('/')[1] ?? p.repository.nameWithOwner
       const label = shortLabel(`${repo}#${p.number}`, Math.max(8, Math.floor(columns / 3)))
       const prLink = safeHref(p.url)
-      const title = ` ${p.isDraft ? '[draft] ' : ''}${p.title}`
+      const title = ` ${p.title}`
       const children: El[] = [
         Box({
           flexDirection: 'row',
@@ -7874,8 +7881,8 @@ export function register(on: On, options: PluginOptions) {
               Text({
                 wrap: 'wrap',
                 dimColor: a.dim,
-                // The risk is on the row already: the summary alone
-                children: [riskLabel && a.text.startsWith(riskLabel) ? a.text.slice(riskLabel.length).trimStart() : a.text],
+                // The risk is on the row already (a draft's row says draft instead): the summary alone
+                children: [!p.isDraft && riskLabel && a.text.startsWith(riskLabel) ? a.text.slice(riskLabel.length).trimStart() : a.text],
               }),
             ],
           }),
@@ -8073,7 +8080,7 @@ export function register(on: On, options: PluginOptions) {
       const botMark = isBot(p) && !(tab === 'review' && review.some((r) => r.url === p.url))
       const lead = `${isSelected ? '▸' : ' '}${isUnread(p) ? '●' : ' '}${botMark ? '⚙' : ' '}`
       const titleWidth = Math.max(8, columns - textWidth(lead) - 1 - textWidth(b.text) - 1 - prWidth - 1 - textWidth(right))
-      const title = `${p.isDraft ? '[draft] ' : ''}${p.title}`
+      const title = p.title
       const padTo = (text: string, width: number) => text + ' '.repeat(Math.max(0, width - textWidth(text)))
       return Box({
         key: `line-${p.url}`,
