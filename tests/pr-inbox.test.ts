@@ -140,6 +140,8 @@ type StubOptions = {
   git?: (argv: readonly string[]) => { stdout?: string; exitCode?: number } | undefined
   // The same for particular gh calls
   gh?: (argv: readonly string[]) => { stdout?: string; exitCode?: number } | undefined
+  // The same for any other command (grep, ps, claude)
+  run?: (argv: readonly string[]) => { stdout?: string; exitCode?: number } | undefined
   // Commands (argv[0]) that exit with an error
   fail?: string[]
   // stderr of a failing command
@@ -169,6 +171,8 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
   const queue: string[] = []
   // The environment each command got, beside its argv
   const envs: (Record<string, string> | undefined)[] = []
+  // And the folder it ran in
+  const cwds: (string | undefined)[] = []
   const prompts: string[] = []
   const systems: string[] = []
   const submitted: string[] = []
@@ -202,6 +206,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
     calls.push([...e.argv])
     stdins.push(e.init?.stdin)
     envs.push(e.init?.env)
+    cwds.push(e.init?.cwd)
     let stdout = ''
     if (e.argv[1] === 'api' && e.argv[2] === 'graphql') stdout = opts.graphql ?? GRAPHQL
     if (e.argv[2] === 'view' && e.argv.includes('headRefOid')) stdout = JSON.stringify({ headRefOid: opts.head ?? HEAD })
@@ -223,7 +228,8 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
       })
     const content = e.argv.find((a) => a.includes('/contents/'))?.match(/\/contents\/([^?]+)/)?.[1]
     if (content !== undefined) stdout = opts.files?.[decodeURIComponent(content)] ?? ''
-    const answered = e.argv[0] === 'git' || e.argv[0] === 'ghq' ? opts.git?.(e.argv) : e.argv[0] === 'gh' ? opts.gh?.(e.argv) : undefined
+    const answered =
+      e.argv[0] === 'git' || e.argv[0] === 'ghq' ? opts.git?.(e.argv) : e.argv[0] === 'gh' ? opts.gh?.(e.argv) : opts.run?.(e.argv)
     if (answered?.stdout !== undefined) stdout = answered.stdout
     const exitCode =
       answered?.exitCode ?? (opts.fail?.includes(e.argv[0] ?? '') || opts.fail?.includes(e.argv.slice(0, 2).join(' ')) ? 1 : 0)
@@ -336,6 +342,7 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
     contexts,
     calls,
     envs,
+    cwds,
     prompts,
     systems,
     submitted,
@@ -5513,5 +5520,140 @@ test('on your own PR the findings panel offers comment only: r says why', async 
   await settleReview(s)
   const i = s.calls.findIndex((c) => c.includes('--input'))
   expect((JSON.parse(s.stdins[i] ?? '{}') as { event?: string }).event).toBe('COMMENT')
+  await ui.unmount()
+})
+
+// ---- t: the session that made your PR ----
+
+const SESSION = '0f0e0d0c-1111-4222-8333-444455556666'
+const OTHER_SESSION = '9a9b9c9d-1111-4222-8333-444455556666'
+const PROJECTS = '/home/me/.claude/projects/-work-app'
+// What grep finds in the transcripts: Claude Code's pr-link and title rows, by file. The other session noted the
+// PRs later (it only worked on them); a row inside a message, with its quotes escaped, is not one
+const prLink = (id: string, p: { number: number; url: string }, day: string) =>
+  `${PROJECTS}/${id}.jsonl\0{"type":"pr-link","sessionId":"${id}","prNumber":${p.number},"prUrl":"${p.url}","prRepository":"acme/app","timestamp":"2026-10-${day}T00:00:00.000Z"}`
+const sessionRows = () =>
+  [
+    // The other session comes first in grep's output, but noted the PRs a day later
+    ...[CHANGES, READY, WAITING, STALE].flatMap((p) => [prLink(OTHER_SESSION, p, '02'), prLink(SESSION, p, '01')]),
+    `${PROJECTS}/${SESSION}.jsonl\0{"type":"ai-title","aiTitle":"an older title"`,
+    `${PROJECTS}/${SESSION}.jsonl\0{"type":"custom-title","customTitle":"login fix\\u001b[2J"`,
+    `${PROJECTS}/${OTHER_SESSION}.jsonl\0{"type":"custom-title","customTitle":"someone later"`,
+  ].join('\n')
+
+function sessionStubs(on: TestOn, open: boolean) {
+  on('fs.list', () => ({ value: [{ name: '4242.json', kind: 'file', size: 1, mtimeMs: 0, isLink: false }] }) as never)
+  on('fs.read', () => ({ value: JSON.stringify({ pid: 4242, sessionId: open ? SESSION : OTHER_SESSION, name: 'app-3' }) }) as never)
+  on('fs.exists', () => ({ value: true }) as never)
+  on('session.id', () => ({ value: 'this-session' }) as never)
+  return stubs(on, {
+    locale: { HOME: '/home/me' },
+    run: (argv) => {
+      if (argv[0] === 'grep' && argv.includes('-rHoE')) return { stdout: sessionRows() }
+      if (argv[0] === 'grep' && argv.includes('-m1')) return { stdout: `${PROJECTS}/${SESSION}.jsonl\0"cwd":"/work/app"` }
+      if (argv[0] === 'ps') return { stdout: ' 4242\n' }
+      if (argv[0] === 'claude') return { stdout: 'bg-1a2b\n' }
+      return undefined
+    },
+  })
+}
+
+test('t asks the session that made your PR: Enter resumes it in the background with what you typed, as typed', async ($, on) => {
+  const s = sessionStubs(on, false)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  // Not on review requests: only your own PRs have a session drawn or a t key
+  expect(await ui.find({ key: 'act-session' })).toBeUndefined()
+  await ui.press({ key: 'tab-mine' })
+  // The first session to note the PR made it; its title is cleaned
+  expect(await ui.find({ type: 'Text', text: /session “login fix”/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /someone later/ })).toBeUndefined()
+  await ui.press({ key: 'act-session' })
+  // The field names the PR it is about the whole time
+  expect((await ui.find({ key: 'session-input' }))?.props.label).toMatch(/^Ask “login fix” about app#\d+$/)
+  // Nothing goes until Enter
+  expect(s.calls.some((c) => c[0] === 'claude')).toBe(false)
+  await ui.input({ key: 'session-input', text: '-x also handle the empty case; ignore $HOME', kind: 'change' })
+  // Enter twice in a row sends it once
+  await Promise.all([
+    ui.input({ key: 'session-input', text: '-x also handle the empty case; ignore $HOME' }),
+    ui.input({ key: 'session-input', text: '-x also handle the empty case; ignore $HOME' }),
+  ])
+  await s.clock.settle()
+  expect(s.calls.filter((c) => c[0] === 'claude')).toEqual([
+    ['claude', '--bg', '--resume', SESSION, '--', '-x also handle the empty case; ignore $HOME'],
+  ])
+  expect(s.cwds[s.calls.findIndex((c) => c[0] === 'claude')]).toBe('/work/app')
+  expect(s.toasts.at(-1)).toMatch(/Asked “login fix” about app#\d+: it goes on in the background \(bg-1a2b\)/)
+  expect(await ui.find({ key: 'session-input' })).toBeUndefined()
+  // No model saw any of it
+  expect(s.prompts.join('\n')).not.toContain('login fix')
+  await ui.unmount()
+})
+
+test('t leaves a session that is open now to you', async ($, on) => {
+  const s = sessionStubs(on, true)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /session “login fix” \(open: write to it there\)/ })).toBeDefined()
+  expect((await ui.find({ key: 'act-session' }))?.props.label).toBe('session open')
+  await ui.press({ key: 'act-session' })
+  expect(s.toasts.at(-1)).toContain('“login fix” is open as app-3: write to it there')
+  expect(await ui.find({ key: 'session-input' })).toBeUndefined()
+  expect(s.calls.some((c) => c[0] === 'claude')).toBe(false)
+  await ui.unmount()
+})
+
+test('t with an empty request sends nothing', async ($, on) => {
+  const s = sessionStubs(on, false)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-session' })
+  await ui.input({ key: 'session-input', text: '   ' })
+  await s.clock.settle()
+  expect(s.calls.some((c) => c[0] === 'claude')).toBe(false)
+  expect(await ui.find({ key: 'session-input' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('t keeps a request that could not go in the field, for Enter to try again; moving to another PR closes it', async ($, on) => {
+  let fails = true
+  on('fs.list', () => ({ value: [] }) as never)
+  on('fs.exists', () => ({ value: true }) as never)
+  on('session.id', () => ({ value: 'this-session' }) as never)
+  const s = stubs(on, {
+    locale: { HOME: '/home/me' },
+    stderr: 'No conversation found',
+    run: (argv) => {
+      if (argv[0] === 'grep' && argv.includes('-rHoE')) return { stdout: sessionRows() }
+      if (argv[0] === 'grep' && argv.includes('-m1')) return { stdout: `${PROJECTS}/${SESSION}.jsonl\0"cwd":"/work/app"` }
+      if (argv[0] === 'claude') return fails ? { exitCode: 1 } : { stdout: 'bg-1a2b\n' }
+      return undefined
+    },
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-session' })
+  await ui.input({ key: 'session-input', text: 'rebase it', kind: 'change' })
+  await ui.input({ key: 'session-input', text: 'rebase it' })
+  await s.clock.settle()
+  expect(s.toasts.at(-1)).toContain('your request stays in the field: Enter tries again')
+  const field = await ui.find({ key: 'session-input' })
+  expect(field?.props.value).toBe('rebase it')
+  expect(field?.props.label).toContain('not sent: No conversation found')
+  fails = false
+  await ui.input({ key: 'session-input', text: 'rebase it' })
+  await s.clock.settle()
+  expect(s.calls.filter((c) => c[0] === 'claude')).toHaveLength(2)
+  expect(await ui.find({ key: 'session-input' })).toBeUndefined()
+
+  // Opened on one PR, the field goes when another is selected
+  await ui.press({ key: 'act-session' })
+  expect(await ui.find({ key: 'session-input' })).toBeDefined()
+  await ui.press({ key: 'nav-down' })
+  expect(await ui.find({ key: 'session-input' })).toBeUndefined()
   await ui.unmount()
 })
