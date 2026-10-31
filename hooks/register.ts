@@ -2265,8 +2265,7 @@ async function tellSession($: EngineInterface, pr: PR): Promise<void> {
 }
 
 // Enter in the field: the session goes on in the background with your request as its next prompt, as
-// `claude --bg --resume <id>` does from a terminal. It runs in the permission mode the session last ran in (manual when
-// none is noted), never in permissions.defaultMode. The field closes once it has gone; a request that could not go stays in it
+// `claude --bg --resume <id>` does from a terminal, in the session's own permission mode (sessionMode). The field closes once it has gone; a request that could not go stays in it
 async function sendToSession($: EngineInterface, text: string): Promise<void> {
   const t = telling
   // A second Enter while the first is sent would resume the session twice with the same request
@@ -2291,12 +2290,12 @@ async function sendToSession($: EngineInterface, text: string): Promise<void> {
 // more); manual when its transcript notes none Claude Code takes
 async function sessionMode($: EngineInterface, file: string): Promise<string> {
   const r = file ? await $.process.run(['grep', '-oE', SESSION_MODE, file], { timeoutMs: 20000 }).catch(() => undefined) : undefined
-  const mode = r?.stdout
-    .trim()
-    .split('\n')
-    .at(-1)
-    ?.match(/"permissionMode":"([A-Za-z]+)"/)?.[1]
-  return mode && RESUME_MODES.has(mode) ? mode : 'manual'
+  const last = r?.stdout.trim().split('\n').at(-1)
+  let mode: unknown
+  try {
+    mode = last ? (JSON.parse(`${last}}`) as { permissionMode?: unknown }).permissionMode : undefined
+  } catch {}
+  return typeof mode === 'string' && RESUME_MODES.has(mode) ? mode : 'manual'
 }
 
 async function sendRequest($: EngineInterface, t: NonNullable<typeof telling>, text: string): Promise<void> {
