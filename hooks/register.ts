@@ -1984,7 +1984,7 @@ async function toggleAsk($: EngineInterface, of: PR | Issue, kind: AskTarget['ki
   }
   $.ui.toast(
     asking
-      ? `${kind === 'issue' ? 'issue ' : ''}${askLabel(pr)}'s link is in the prompt: Esc, then type after it, or ctrl+a and /skill for a skill · p: take link out`
+      ? `${kind === 'issue' ? 'issue ' : ''}${askLabel(pr)}'s link is in the prompt: Esc, then type after it, or ctrl+a and /skill for a skill · runs as any prompt of yours${kind === 'PR' ? ' (e is read-only)' : ''} · p: take link out`
       : `Took ${kind === 'issue' ? 'issue ' : ''}${askLabel(pr)}'s link out of the prompt`,
     { timeoutMs: 8000 },
   )
@@ -6066,7 +6066,7 @@ export function register(on: On, options: PluginOptions) {
   // The hint line under the prompt says how to move between the prompt and the open pane
   on('ui.render', { component: 'PromptHint' }, async (_, e, next) => {
     // An armed p says what your next prompt goes with
-    const asked = asking ? ` · next prompt → ${asking.pr.kind === 'issue' ? 'issue ' : ''}${askLabel(asking.pr)}` : ''
+    const asked = asking ? ` · next prompt → ${asking.pr.kind === 'issue' ? 'issue ' : ''}${askLabel(asking.pr)} (your permissions)` : ''
     // A fix waiting for your push stays in sight until it is pushed or forgotten
     const first = [...fixReady.values()][0]
     const ready = first
@@ -8192,7 +8192,10 @@ export function register(on: On, options: PluginOptions) {
             ['a', 'approve: a panel naming the commit, then y · on ↻ RE: approve again'],
             ['v', 'AI review; on your own PR it never approves · v again cancels'],
             ['e', 'Claude explains it (read-only), or diagnoses what blocks your own'],
-            ['p', 'its link goes in the prompt: Esc, then type around it (a /skill too) · p again takes the link out'],
+            [
+              'p',
+              'its link goes in the prompt: Esc, then type around it (a /skill too) · runs as any prompt of yours (e is read-only) · p again takes the link out',
+            ],
             ['o', 'open on GitHub'],
             ['i', "the AI review's findings, linked to their lines"],
             ['s', 'send findings to GitHub as one review: check them (x), r or c, then y'],
@@ -8233,7 +8236,10 @@ export function register(on: On, options: PluginOptions) {
               'd',
               'read it: description, sub-issues, linked PRs (1-9 read one) and every comment (the latest 100) on one page · j / k scroll (the wheel, ↑↓ and PgUp / PgDn too) · p, c, y, o as here · n: next issue · q: back',
             ],
-            ['p', 'its link goes in the prompt, to ask Claude about it or have it worked on, as on a PR · p again takes the link out'],
+            [
+              'p',
+              'its link goes in the prompt, to ask Claude about it or have it worked on, as on a PR (runs as any prompt of yours) · p again takes the link out',
+            ],
             ['o', 'open on GitHub'],
             [
               'c',

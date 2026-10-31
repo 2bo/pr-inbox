@@ -5126,7 +5126,7 @@ test('p says in its toast what the next p does, in the words of its key', async 
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'act-ask' })
-  expect(s.toasts.at(-1)).toContain('· p: take link out')
+  expect(s.toasts.at(-1)).toContain('runs as any prompt of yours (e is read-only) · p: take link out')
   await ui.press({ key: 'act-ask' })
   expect(s.toasts.at(-1)).toContain('link out of the prompt')
   await ui.unmount()
