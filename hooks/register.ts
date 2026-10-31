@@ -2112,9 +2112,9 @@ async function readSessions($: EngineInterface): Promise<void> {
   if (!rows || rows.exitCode > 2) return
   const titles = new Map<string, { custom?: string; ai?: string }>()
   const files = new Map<string, string>()
-  // Per PR: the earliest note near its creation (by the session that made it), and the latest note
+  // Per PR: its creation, the earliest note (by the session that made it, if it comes near the creation) and the latest
   type Note = { id: string; at: number }
-  const notes = new Map<string, { maker?: Note; last: Note }>()
+  const notes = new Map<string, { created: number; first: Note; last: Note }>()
   for (const { path, id, match } of grepHits(rows.stdout)) {
     if (!CLAUDE_SESSION.test(id) || !path.startsWith(`${root}/`)) continue
     files.set(id, path)
@@ -2133,13 +2133,18 @@ async function readSessions($: EngineInterface): Promise<void> {
     const at = Date.parse(String(row.timestamp))
     const created = url ? own.get(url) : undefined
     if (!url || created === undefined || !Number.isFinite(at)) continue
-    const n = notes.get(url) ?? { last: { id, at } }
+    const n = notes.get(url) ?? { created, first: { id, at }, last: { id, at } }
     notes.set(url, n)
+    if (at < n.first.at) n.first = { id, at }
     if (at > n.last.at) n.last = { id, at }
-    if (Math.abs(at - created) <= CREATED_WITHIN && (!n.maker || at < n.maker.at)) n.maker = { id, at }
   }
   // The session that made it, or else the one that worked on it last
-  const chosen = new Map([...notes].map(([url, n]) => [url, { id: (n.maker ?? n.last).id, made: n.maker !== undefined }]))
+  const chosen = new Map(
+    [...notes].map(([url, n]) => {
+      const made = Math.abs(n.first.at - n.created) <= CREATED_WITHIN
+      return [url, { id: (made ? n.first : n.last).id, made }]
+    }),
+  )
   // Where those sessions started (claude --resume finds a session under the folder it started in), for the new ones
   const unread = [...new Set([...chosen.values()].map((f) => f.id))].filter((id) => !sessionCwds.has(id))
   if (unread.length > 0) {

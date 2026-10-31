@@ -5643,6 +5643,28 @@ test('t on a PR this session only pushed to says so: last worked on, not made', 
   await ui.unmount()
 })
 
+test('only the first note of a PR can make it: a later one near the creation, after an earlier one, only worked on it', async ($, on) => {
+  on('fs.list', () => ({ value: [] }) as never)
+  on('fs.exists', () => ({ value: true }) as never)
+  on('session.id', () => ({ value: 'this-session' }) as never)
+  // A clock three minutes behind: SESSION's note comes before the PR's creation, OTHER_SESSION's a minute before it
+  const rows = [CHANGES, READY, WAITING, STALE]
+    .flatMap((p) => [prLink(SESSION, p, '2026-09-29T23:57:00.000Z'), prLink(OTHER_SESSION, p, '2026-09-29T23:59:00.000Z')])
+    .join('\n')
+  const s = stubs(on, {
+    locale: { HOME: '/home/me' },
+    run: (argv) => {
+      if (argv[0] === 'grep' && argv.includes('-rHoE')) return { stdout: rows }
+      return undefined
+    },
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /\(last worked on it\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('t leaves a session that is open now to you', async ($, on) => {
   const s = sessionStubs(on, true)
   await start($, s.clock)
