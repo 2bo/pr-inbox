@@ -440,6 +440,8 @@ let created: Issue[] = []
 // How many the search found, and how many it returned (before those assigned to you were taken out)
 let createdTotal = 0
 let createdReturned = 0
+// Whether the store already says the issues created by you were seeded as seen (see loadInboxState)
+let createdSeeded = false
 // Issues closed from the pane in this session, so c can reopen them
 let closedHere: Issue[] = []
 // PRs approved from the pane, until the search catches up: url → the PR as approved, and when (see fetchAll)
@@ -1206,7 +1208,8 @@ async function fetchAll($: EngineInterface): Promise<void> {
     const assignedUrls = new Set(assigned.map((i) => i.url))
     created = yours.filter((i) => !assignedUrls.has(i.url))
     // Reopened (here or elsewhere): listed again
-    closedHere = closedHere.filter((i) => !assignedUrls.has(i.url) && !created.some((c) => c.url === i.url))
+    const listedUrls = new Set([...assignedUrls, ...created.map((i) => i.url)])
+    closedHere = closedHere.filter((i) => !listedUrls.has(i.url))
     // A description that could not be fetched is tried again after each fetch of the list
     for (const [url, a] of abouts) if (a.error) abouts.delete(url)
     for (const [url, a] of issueAbouts) if (a.error) issueAbouts.delete(url)
@@ -1252,10 +1255,14 @@ async function loadInboxState($: EngineInterface): Promise<void> {
   const storedIssues = await $.store.get('seenIssues')
   const listed = new Map([...assigned, ...created].map((i) => [i.url, i]))
   seenIssues = storedIssues === undefined ? Object.fromEntries([...listed.values()].map((i) => [i.url, i.updatedAt])) : asMap(storedIssues)
-  // Issues created by you were not listed before: the first time they are, those already open count as seen too
-  if ((await $.store.get('seenCreatedIssues')) === undefined) {
-    seenIssues = { ...Object.fromEntries(created.map((i) => [i.url, i.updatedAt])), ...seenIssues }
-    await $.store.set('seenCreatedIssues', true)
+  // Issues created by you were not listed before: the first time they are, those already open count as seen too.
+  // A migration from before 2.1.0, read once per session
+  if (!createdSeeded) {
+    if ((await $.store.get('seenCreatedIssues')) === undefined) {
+      seenIssues = { ...Object.fromEntries(created.map((i) => [i.url, i.updatedAt])), ...seenIssues }
+      await $.store.set('seenCreatedIssues', true)
+    }
+    createdSeeded = true
   }
   // Over a search's 50, an issue left out of this fetch may still be open: its record stays until both lists fit
   if (!assignedCut() && !createdCut()) seenIssues = Object.fromEntries(Object.entries(seenIssues).filter(([url]) => listed.has(url)))
@@ -4429,24 +4436,24 @@ async function fetchIssueAbout($: EngineInterface, issue: Issue): Promise<void> 
 // The groups of the issues tab, in screen order
 type IssueGroup = 'assigned' | 'created' | 'closed'
 
-function issueGroup(issue: Issue): IssueGroup {
-  if (issue.state === 'CLOSED') return 'closed'
-  return created.some((i) => i.url === issue.url) ? 'created' : 'assigned'
-}
-
 // The issues tab in screen order (what j/k move through): those assigned to you, then those created by you, then those
 // closed here. In each of the first two, a sub-issue goes right under its parent when the parent is in the same group,
-// in the parent's place. depth and last draw the rail
-function issueRows(): Issue[] & { depth?: Map<string, number>; last?: Set<string> } {
+// in the parent's place. depth and last draw the rail, group says which heading a row is under
+function issueRows(): Issue[] & { depth?: Map<string, number>; last?: Set<string>; group?: Map<string, IssueGroup> } {
   const depth = new Map<string, number>()
   const last = new Set<string>()
+  const group = new Map<string, IssueGroup>()
   const ordered: Issue[] = []
-  for (const group of [assigned, created]) {
-    const listed = group.filter(matchesFilter)
+  for (const [key, list] of [
+    ['assigned', assigned],
+    ['created', created],
+  ] as const) {
+    const listed = list.filter(matchesFilter)
     const listedUrls = new Set(listed.map((i) => i.url))
     const place = (i: Issue, d: number) => {
       if (depth.has(i.url)) return
       depth.set(i.url, d)
+      group.set(i.url, key)
       ordered.push(i)
       const kids = listed.filter((c) => c.parent?.url === i.url && !depth.has(c.url))
       const end = kids.at(-1)
@@ -4457,7 +4464,9 @@ function issueRows(): Issue[] & { depth?: Map<string, number>; last?: Set<string
     // Parents that loop (GitHub does not allow it) are still listed, each once
     for (const i of listed) place(i, 0)
   }
-  return Object.assign([...ordered, ...closedHere.filter(matchesFilter)], { depth, last })
+  const closed = closedHere.filter(matchesFilter)
+  for (const i of closed) group.set(i.url, 'closed')
+  return Object.assign([...ordered, ...closed], { depth, last, group })
 }
 
 // The pane closes: those closed here are no longer listed, nor known to the snapshot, so one assigned to you again
@@ -8183,7 +8192,7 @@ export function register(on: On, options: PluginOptions) {
     const selectedPr = rows.find((p) => p.url === selected)
     // Each group after the first opens with a heading row: bots, approved by you, stale, snoozed
     // With a filter, a heading counts what matches out of all: "bots 1/3"
-    const count = (list: PR[]) => (filterText ? `${list.filter(matchesFilter).length}/${list.length}` : `${list.length}`)
+    const count = (list: (PR | Issue)[]) => (filterText ? `${list.filter(matchesFilter).length}/${list.length}` : `${list.length}`)
     const sectionOf = (q: PR): string => {
       // A stacked PR goes under its stack's heading
       const p = findPr(stackLead.get(q.url) ?? q.url) ?? q
@@ -8501,15 +8510,13 @@ export function register(on: On, options: PluginOptions) {
         })
       }
       // Each group opens with a heading row. With a filter, it counts what matches out of all: "created by you 1/3"
-      const groupCount = (list: Issue[], cut: boolean) =>
-        `${filterText ? `${list.filter(matchesFilter).length}/` : ''}${list.length}${cut ? '+' : ''}`
+      const headings: Record<IssueGroup, [string, string]> = {
+        assigned: [`assigned to you ${count(assigned)}${assignedCut() ? '+' : ''}`, ''],
+        created: [`created by you ${count(created)}${createdCut() ? '+' : ''}`, ''],
+        closed: [`✓ closed here ${closed.length}`, 'c: reopen'],
+      }
       const groupHeading = (group: IssueGroup) => {
-        const [name, note] =
-          group === 'closed'
-            ? [`✓ closed here ${closed.length}`, 'c: reopen']
-            : group === 'created'
-              ? [`created by you ${groupCount(created, createdCut())}`, '']
-              : [`assigned to you ${groupCount(assigned, assignedCut())}`, '']
+        const [name, note] = headings[group]
         const label = `── ${name} ${note ? `· ${note} ` : ''}`
         return Box({
           key: `issue-group-${group}`,
@@ -8677,7 +8684,8 @@ export function register(on: On, options: PluginOptions) {
           : issue
             ? 1
             : 0
-      const headingLines = new Set(issues.map(issueGroup)).size
+      const groupOf = (i: Issue): IssueGroup => issues.group?.get(i.url) ?? 'closed'
+      const headingLines = new Set(issues.map(groupOf)).size
       const capLines = assignedCut() || createdCut() ? 1 : 0
       const issueChrome = topLines + 2 + 1 + (issue ? 1 : 0) + headingLines + capLines + issueFooterLines
       const listMin = Math.min(issues.length, 3) + (issues.length > 3 ? 1 : 0)
@@ -8713,8 +8721,8 @@ export function register(on: On, options: PluginOptions) {
               : '  No open issues are assigned to you or created by you'
       const issueList: El[] = []
       for (const [k, i] of shownIssues.entries()) {
-        const group = issueGroup(i)
-        if (k === 0 || issueGroup(shownIssues[k - 1] as Issue) !== group) issueList.push(groupHeading(group))
+        const group = groupOf(i)
+        if (k === 0 || groupOf(shownIssues[k - 1] as Issue) !== group) issueList.push(groupHeading(group))
         issueList.push(issueRow(i))
       }
       if (issues.length === 0) issueList.push(Text({ dimColor: true, children: [empty] }))
