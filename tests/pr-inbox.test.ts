@@ -5618,14 +5618,14 @@ test('t asks the session that made your PR: Enter resumes it in the background w
     ['claude', '--bg', '--resume', SESSION, '--permission-mode', 'acceptEdits', '--', '-x also handle the empty case; ignore $HOME'],
   ])
   expect(s.cwds[s.calls.findIndex((c) => c[0] === 'claude')]).toBe('/work/app')
-  expect(s.toasts.at(-1)).toMatch(/Asked “login fix” about app#\d+: it goes on in the background \(bg-1a2b\)/)
+  expect(s.toasts.at(-1)).toMatch(/Asked “login fix” about app#\d+ in Accept edits: it goes on in the background \(bg-1a2b\)/)
   expect(await ui.find({ key: 'session-input' })).toBeUndefined()
   // No model saw any of it
   expect(s.prompts.join('\n')).not.toContain('login fix')
   await ui.unmount()
 })
 
-test('t resumes in manual when the transcript notes no mode Claude Code takes, never in the settings default', async ($, on) => {
+test('t resumes in Manual when the transcript notes no mode it knows, never in the settings default', async ($, on) => {
   const s = sessionStubs(on, false, ['default', 'something-else'])
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
@@ -5643,6 +5643,30 @@ test('t resumes in manual when the transcript notes no mode Claude Code takes, n
     '--',
     'go on',
   ])
+  await ui.unmount()
+})
+
+test('t names the mode before Enter, and lowers one that acts without asking to Manual', async ($, on) => {
+  const s = sessionStubs(on, false, ['acceptEdits', 'bypassPermissions'])
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-session' })
+  expect((await ui.find({ key: 'session-input' }))?.props.placeholder).toContain('runs in Manual (it last ran in Bypass permissions)')
+  await ui.input({ key: 'session-input', text: 'go on' })
+  await s.clock.settle()
+  expect(s.calls.find((c) => c[0] === 'claude')).toEqual([
+    'claude',
+    '--bg',
+    '--resume',
+    SESSION,
+    '--permission-mode',
+    'manual',
+    '--',
+    'go on',
+  ])
+  expect(s.toasts.at(-1)).toContain('in Manual: it goes on in the background')
+  expect(s.toasts.at(-1)).toContain('it asks before acting: claude attach opens it to answer')
   await ui.unmount()
 })
 

@@ -2073,7 +2073,19 @@ const SESSION_ROWS = String.raw`\{"type":"pr-link",[^{}]*\}|\{"type":"(custom-ti
 const SESSION_CWD = String.raw`"cwd":"([^"\\]|\\.)*"`
 // The permission mode the session ran in, a row each time it was set
 const SESSION_MODE = String.raw`\{"type":"permission-mode","permissionMode":"[A-Za-z]+"`
-const RESUME_MODES = new Set(['manual', 'acceptEdits', 'auto', 'plan', 'dontAsk', 'bypassPermissions'])
+// What t resumes it in, by the mode its transcript notes: the CLI's name and the words drawn. Modes that act without
+// asking are lowered to Manual: a request about a PR must not run with no one to approve what it does
+type ResumeMode = { mode: string; label: string; lowered?: string }
+const RESUME_MODES: Record<string, ResumeMode> = {
+  manual: { mode: 'manual', label: 'Manual' },
+  default: { mode: 'manual', label: 'Manual' },
+  acceptEdits: { mode: 'acceptEdits', label: 'Accept edits' },
+  auto: { mode: 'auto', label: 'Auto' },
+  plan: { mode: 'plan', label: 'Plan' },
+  dontAsk: { mode: 'manual', label: 'Manual', lowered: "Don't ask" },
+  bypassPermissions: { mode: 'manual', label: 'Manual', lowered: 'Bypass permissions' },
+}
+const MANUAL: ResumeMode = { mode: 'manual', label: 'Manual' }
 
 async function homeDir($: EngineInterface): Promise<string> {
   const home = (await $.env.get('HOME')) || ''
@@ -2216,7 +2228,7 @@ function noSessionWhy(pr: PR): string {
 
 // The request being typed for a PR's session (t), drawn as a field above the list; failed: why the last Enter did
 // not send it (the text stays, for Enter to try again)
-let telling: { pr: PR; session: PrSession; text: string; failed?: string } | undefined
+let telling: { pr: PR; session: PrSession; mode: ResumeMode; text: string; failed?: string } | undefined
 // Sessions a request is being sent to now, by id: until it has gone, no other Enter sends to them, from this field or
 // from one opened again
 const sendingTo = new Set<string>()
@@ -2260,12 +2272,13 @@ async function tellSession($: EngineInterface, pr: PR): Promise<void> {
   }
   // One field above the list at a time
   filtering = false
-  telling = { pr, session: s, text: '' }
+  // Read when the field opens, so the field names the mode Enter sends
+  telling = { pr, session: s, mode: await sessionMode($, s.file), text: '' }
   $.ui.invalidate('ui.render')
 }
 
 // Enter in the field: the session goes on in the background with your request as its next prompt, as
-// `claude --bg --resume <id>` does from a terminal, in the session's own permission mode (sessionMode). The field closes once it has gone; a request that could not go stays in it
+// `claude --bg --resume <id>` does from a terminal, in the mode the field names (sessionMode). The field closes once it has gone; a request that could not go stays in it
 async function sendToSession($: EngineInterface, text: string): Promise<void> {
   const t = telling
   // A second Enter while the first is sent would resume the session twice with the same request
@@ -2287,15 +2300,15 @@ async function sendToSession($: EngineInterface, text: string): Promise<void> {
 }
 
 // The mode the session last ran in, so a resume runs as it did and not in permissions.defaultMode (which may allow
-// more); manual when its transcript notes none Claude Code takes
-async function sessionMode($: EngineInterface, file: string): Promise<string> {
+// more), lowered by RESUME_MODES when it acts without asking; Manual when its transcript notes none we know
+async function sessionMode($: EngineInterface, file: string): Promise<ResumeMode> {
   const r = file ? await $.process.run(['grep', '-oE', SESSION_MODE, file], { timeoutMs: 20000 }).catch(() => undefined) : undefined
   const last = r?.stdout.trim().split('\n').at(-1)
   let mode: unknown
   try {
     mode = last ? (JSON.parse(`${last}}`) as { permissionMode?: unknown }).permissionMode : undefined
   } catch {}
-  return typeof mode === 'string' && RESUME_MODES.has(mode) ? mode : 'manual'
+  return (typeof mode === 'string' && Object.hasOwn(RESUME_MODES, mode) && RESUME_MODES[mode]) || MANUAL
 }
 
 async function sendRequest($: EngineInterface, t: NonNullable<typeof telling>, text: string): Promise<void> {
@@ -2312,7 +2325,7 @@ async function sendRequest($: EngineInterface, t: NonNullable<typeof telling>, t
   $.ui.toast(`Asking ${name} about ${askLabel(pr)}…`, { timeoutMs: 60000 })
   // `--` ends the options: a request that starts with - is still the prompt
   const r = await $.process
-    .run(['claude', '--bg', '--resume', s.id, '--permission-mode', await sessionMode($, s.file), '--', text], {
+    .run(['claude', '--bg', '--resume', s.id, '--permission-mode', t.mode.mode, '--', text], {
       cwd: s.cwd,
       timeoutMs: 60000,
     })
@@ -2331,7 +2344,7 @@ async function sendRequest($: EngineInterface, t: NonNullable<typeof telling>, t
   // What claude --bg prints: the id that claude attach, logs and stop take
   const said = fit(clean(r.stdout.split('\n').find((l) => l.trim()) ?? ''), 60)
   $.ui.toast(
-    `Asked ${name} about ${askLabel(pr)}: it goes on in the background${said ? ` (${said})` : ''} · claude agents lists it, claude attach opens it, claude stop stops it`,
+    `Asked ${name} about ${askLabel(pr)} in ${t.mode.label}: it goes on in the background${said ? ` (${said})` : ''}${['manual', 'plan'].includes(t.mode.mode) ? ' · it asks before acting: claude attach opens it to answer' : ' · claude agents lists it, claude attach opens it'}, claude stop stops it`,
     { timeoutMs: 10000 },
   )
 }
@@ -7850,7 +7863,7 @@ export function register(on: On, options: PluginOptions) {
         Input({
           key: 'session-input',
           label: `Ask ${sessionName(t.session)} about ${askLabel(t.pr)}${sendingTo.has(t.session.id) ? ' (sending…)' : t.failed ? ` (not sent: ${fit(t.failed, 40)} · Enter: try again)` : ''}`,
-          placeholder: 'its next prompt · runs in its own permission mode · empty Enter: cancel',
+          placeholder: `its next prompt · runs in ${t.mode.label}${t.mode.lowered ? ` (it last ran in ${t.mode.lowered})` : ' (its last mode)'} · empty Enter: cancel`,
           value: t.text,
           submitLabel: 'send',
           autoFocus: true,
@@ -8615,7 +8628,7 @@ export function register(on: On, options: PluginOptions) {
             ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · y in it sends'],
             [
               't',
-              'ask the Claude Code session that made it (“session …” on the row): type a request, Enter resumes that session in the background with it (claude --bg --resume), in the permission mode it last ran in · a request that could not go stays in the field · one open now: write to it there',
+              'ask the Claude Code session that made it (“session …” on the row): type a request, Enter resumes that session in the background with it (claude --bg --resume), in the permission mode it last ran in (Manual if none, or if that mode acts without asking) · a request that could not go stays in the field · one open now: write to it there',
             ],
           ],
         ],
