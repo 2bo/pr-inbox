@@ -5310,12 +5310,12 @@ const OTHER_SESSION = '9a9b9c9d-1111-4222-8333-444455556666'
 const PROJECTS = '/home/me/.claude/projects/-work-app'
 // What grep finds in the transcripts: Claude Code's pr-link and title rows, by file. The other session noted the
 // PRs later (it only worked on them); a row inside a message, with its quotes escaped, is not one
+const prLink = (id: string, p: { number: number; url: string }, day: string) =>
+  `${PROJECTS}/${id}.jsonl\0{"type":"pr-link","sessionId":"${id}","prNumber":${p.number},"prUrl":"${p.url}","prRepository":"acme/app","timestamp":"2026-10-${day}T00:00:00.000Z"}`
 const sessionRows = () =>
   [
-    ...[CHANGES, READY, WAITING, STALE].flatMap((p) => [
-      `${PROJECTS}/${SESSION}.jsonl\0{"type":"pr-link","sessionId":"${SESSION}","prNumber":${p.number},"prUrl":"${p.url}","prRepository":"acme/app","timestamp":"2026-10-01T00:00:00.000Z"}`,
-      `${PROJECTS}/${OTHER_SESSION}.jsonl\0{"type":"pr-link","sessionId":"${OTHER_SESSION}","prNumber":${p.number},"prUrl":"${p.url}","prRepository":"acme/app","timestamp":"2026-10-02T00:00:00.000Z"}`,
-    ]),
+    // The other session comes first in grep's output, but noted the PRs a day later
+    ...[CHANGES, READY, WAITING, STALE].flatMap((p) => [prLink(OTHER_SESSION, p, '02'), prLink(SESSION, p, '01')]),
     `${PROJECTS}/${SESSION}.jsonl\0{"type":"ai-title","aiTitle":"an older title"`,
     `${PROJECTS}/${SESSION}.jsonl\0{"type":"custom-title","customTitle":"login fix\\u001b[2J"`,
     `${PROJECTS}/${OTHER_SESSION}.jsonl\0{"type":"custom-title","customTitle":"someone later"`,
@@ -5326,7 +5326,7 @@ function sessionStubs(on: TestOn, open: boolean) {
   on('fs.read', () => ({ value: JSON.stringify({ pid: 4242, sessionId: open ? SESSION : OTHER_SESSION, name: 'app-3' }) }) as never)
   on('fs.exists', () => ({ value: true }) as never)
   on('session.id', () => ({ value: 'this-session' }) as never)
-  const s = stubs(on, {
+  return stubs(on, {
     locale: { HOME: '/home/me' },
     run: (argv) => {
       if (argv[0] === 'grep' && argv.includes('-rHoE')) return { stdout: sessionRows() }
@@ -5336,7 +5336,6 @@ function sessionStubs(on: TestOn, open: boolean) {
       return undefined
     },
   })
-  return s
 }
 
 test('t asks the session that made your PR: Enter resumes it in the background with what you typed, as typed', async ($, on) => {
