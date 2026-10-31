@@ -3296,6 +3296,17 @@ test('once issues created by you are listed, a new one is unread like any update
   await ui.unmount()
 })
 
+test('an issue you just filed and assigned to yourself, with nothing on it since, is not unread', async ($, on) => {
+  const filed = { ...MY_ISSUE, createdAt: MY_ISSUE.updatedAt }
+  const theirs = { ...issue(), createdAt: issue().updatedAt }
+  const s = stubs(on, { graphql: withBoth([filed, theirs], [filed]), store: { seenIssues: {}, seenCreatedIssues: true } })
+  await start($, s.clock)
+  const seen = s.store.get('seenIssues') as Record<string, string>
+  expect(seen[filed.url]).toBe(filed.updatedAt)
+  // Someone else's issue assigned to you is still news
+  expect(seen[theirs.url]).toBeUndefined()
+})
+
 test('an issue you just filed, with nothing on it since, is not unread', async ($, on) => {
   const filed = { ...MY_ISSUE, createdAt: MY_ISSUE.updatedAt }
   const s = stubs(on, {
@@ -5561,7 +5572,7 @@ const sessionRows = () =>
     `${PROJECTS}/${OTHER_SESSION}.jsonl\0{"type":"custom-title","customTitle":"someone later"`,
   ].join('\n')
 
-function sessionStubs(on: TestOn, open: boolean) {
+function sessionStubs(on: TestOn, open: boolean, modes = ['auto', 'acceptEdits']) {
   on('fs.list', () => ({ value: [{ name: '4242.json', kind: 'file', size: 1, mtimeMs: 0, isLink: false }] }) as never)
   on('fs.read', () => ({ value: JSON.stringify({ pid: 4242, sessionId: open ? SESSION : OTHER_SESSION, name: 'app-3' }) }) as never)
   on('fs.exists', () => ({ value: true }) as never)
@@ -5571,6 +5582,9 @@ function sessionStubs(on: TestOn, open: boolean) {
     run: (argv) => {
       if (argv[0] === 'grep' && argv.includes('-rHoE')) return { stdout: sessionRows() }
       if (argv[0] === 'grep' && argv.includes('-m1')) return { stdout: `${PROJECTS}/${SESSION}.jsonl\0"cwd":"/work/app"` }
+      // The session started in auto, then was switched to accept edits: the last one counts
+      if (argv[0] === 'grep' && argv.includes('-oE') && argv.at(-1) === `${PROJECTS}/${SESSION}.jsonl`)
+        return { stdout: modes.map((m) => `{"type":"permission-mode","permissionMode":"${m}"`).join('\n') }
       if (argv[0] === 'ps') return { stdout: ' 4242\n' }
       if (argv[0] === 'claude') return { stdout: 'bg-1a2b\n' }
       return undefined
@@ -5601,13 +5615,34 @@ test('t asks the session that made your PR: Enter resumes it in the background w
   ])
   await s.clock.settle()
   expect(s.calls.filter((c) => c[0] === 'claude')).toEqual([
-    ['claude', '--bg', '--resume', SESSION, '--', '-x also handle the empty case; ignore $HOME'],
+    ['claude', '--bg', '--resume', SESSION, '--permission-mode', 'acceptEdits', '--', '-x also handle the empty case; ignore $HOME'],
   ])
   expect(s.cwds[s.calls.findIndex((c) => c[0] === 'claude')]).toBe('/work/app')
   expect(s.toasts.at(-1)).toMatch(/Asked “login fix” about app#\d+: it goes on in the background \(bg-1a2b\)/)
   expect(await ui.find({ key: 'session-input' })).toBeUndefined()
   // No model saw any of it
   expect(s.prompts.join('\n')).not.toContain('login fix')
+  await ui.unmount()
+})
+
+test('t resumes in manual when the transcript notes no mode Claude Code takes, never in the settings default', async ($, on) => {
+  const s = sessionStubs(on, false, ['default', 'something-else'])
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-session' })
+  await ui.input({ key: 'session-input', text: 'go on' })
+  await s.clock.settle()
+  expect(s.calls.find((c) => c[0] === 'claude')).toEqual([
+    'claude',
+    '--bg',
+    '--resume',
+    SESSION,
+    '--permission-mode',
+    'manual',
+    '--',
+    'go on',
+  ])
   await ui.unmount()
 })
 
