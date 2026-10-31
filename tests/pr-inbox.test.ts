@@ -3565,6 +3565,22 @@ test('n in the issue reader marks the next issue as seen', async ($, on) => {
   await ui.unmount()
 })
 
+test('n in the issue reader goes on from the last issue assigned to you to the first one created by you', async ($, on) => {
+  const s = stubs(on, { graphql: withBoth([issue()], [MY_ISSUE]), store: { seenIssues: {}, seenCreatedIssues: true } })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  await ui.press({ key: 'issue-read' })
+  await ui.press({ key: 'issue-reader-next' })
+  await ui.find({ key: 'issue-reader-keys' })
+  for (let i = 0; i < 3; i++) await s.clock.settle()
+  expect(s.toasts.at(-1) ?? '').not.toContain('last issue in the list')
+  expect((s.store.get('seenIssues') as Record<string, string>)[MY_ISSUE.url]).toBe(MY_ISSUE.updatedAt)
+  await ui.press({ key: 'issue-close-reader' })
+  expect(await isSelectedUrl(ui, MY_ISSUE.url)).toBe(true)
+  await ui.unmount()
+})
+
 test('while the issues are over the search cap, the seen record of one left out of this fetch is kept', async ($, on) => {
   const gone = 'https://github.com/acme/app/issues/99'
   const s = stubs(on, {
