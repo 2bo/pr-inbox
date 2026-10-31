@@ -30,7 +30,7 @@ Or from the shell: `claude plugin marketplace add 2bo/pr-inbox && claude plugin 
 ## First run
 
 1. **Before anything else**: by default each review request is analyzed as soon as Claude Code starts, which sends its title, description and diff to the model you use (see [What is sent](#security)). For work code, set `analysis` to `when opened` or `off`, or narrow it with `org_filter`, first (`/config`)
-2. The status line appears under the prompt: `to review 3 ⚙2 · ▲1 high │ my PRs ✗1 fix · ✓1 ready · …2 in review │ issues 4` (issues, assigned to you and created by you, only when there are some)
+2. The status line appears under the prompt: `to review 3 ⚙2 · ▲1 high │ my PRs ✗1 fix · ✓1 ready · …2 in review │ issues 4` (issues assigned to you, only when there are some; the Issues tab adds those you created: `issues 4 · 12 yours`)
 3. `/pr-inbox` opens the pane. Keys reach it while it has the focus: `ctrl+x tab` moves between the prompt and the pane, `Esc` goes back to the prompt
 4. The bottom line lists the keys for the selected PR, each labeled with what it does, the most used first (`d` read, `a` approve, `v` AI review, `e` explain). `u` shows every key and what each mark means, and a key that does nothing for the selected PR says why
 
@@ -48,7 +48,7 @@ One line per PR. From left to right:
 | AGE | `▰▱▱` how long it has waited: one cell at 4 hours, two at a day, three at three days |
 | CI | `✓` passed · `✗` failed · `◌` running · `·` none. Judged from the latest run of each check, so a job that failed and then passed on a re-run counts as passed |
 | AI | `✓` passed or approved · `✗` blocked · `?` passed, waits for you · `·` no AI review |
-| Issues | `●` updated since you last selected it (a newly assigned or newly created issue too) · `✓` closed here (`c` reopens) · `├` `└` a sub-issue under its parent in the same group · `↑#12` its parent, not there · SUB sub-issues closed / all (green when all are closed) · TALK comments · UPD time since the last update |
+| Issues | `●` updated since you last selected it (a newly assigned issue too; one you just filed only once something happens on it) · `✓` closed here (`c` reopens) · `├` `└` a sub-issue under its parent in the same group · `↑#12` its parent, in the other group or not listed · SUB sub-issues closed / all (green when all are closed) · TALK comments · UPD time since the last update |
 
 Under the list, the selected PR's details: the summary, why that risk, the release impact, one line of facts (the branches it merges into and from, `develop ← feature/login`, and its place in a stack; for your PRs, then where the PR stands: what needs you, ready to merge, or what it waits on, and whether auto-merge is on), the AI review and, for your PRs, the failed checks. Last come the description and the latest three comments and reviews, drawn as markdown as GitHub would (`y` shows them as written); they are fetched once the selection rests on the PR. Each fact is said once, and hints name the key that acts on them (`a: approve`, `m: merge now`). When the details do not fit, `n` pages through them, and the mouse wheel and PgUp / PgDn scroll them both ways; the description never takes the list's half of the pane. Nothing is folded: bots, the PRs you approved and old PRs each have a heading; only snoozed PRs wait behind `z`.
 

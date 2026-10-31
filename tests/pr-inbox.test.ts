@@ -3146,7 +3146,7 @@ test('more assigned issues than the search returns are counted as 50+ and the li
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-issues' })
   expect((await ui.find({ key: 'tab-issues' }))?.props.label).toBe('◉ issues 50+')
-  expect(await ui.find({ type: 'Text', text: /50 of 73 shown/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /50 of 73 assigned, latest first/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -3179,9 +3179,10 @@ test('issues created by you are listed under their own heading, after those assi
   const s = stubs(on, { graphql: withBoth([issue(), OTHER_ISSUE], [MY_ISSUE, issue()]) })
   await start($, s.clock)
   expect(s.calls.find((c) => c.includes('graphql'))).toContainEqual('created=is:issue is:open archived:false author:@me sort:updated-desc')
-  expect(s.statuses.at(-1)).toMatch(/│ issues 3$/)
+  // The status line counts only those assigned to you; the tab adds yours apart
+  expect(s.statuses.at(-1)).toMatch(/│ issues 2$/)
   const ui = await $.ui.mount(PANE)
-  expect((await ui.find({ key: 'tab-issues' }))?.props.label).toBe('issues 3')
+  expect((await ui.find({ key: 'tab-issues' }))?.props.label).toBe('issues 2 · 1 yours')
   await ui.press({ key: 'tab-issues' })
   expect(await issueLayout(ui)).toEqual([
     'issue-group-assigned',
@@ -3208,11 +3209,12 @@ test('issues created by you are listed under their own heading, after those assi
   await ui.unmount()
 })
 
-test('with only issues created by you, the tab lists them and the status line counts them', async ($, on) => {
+test('with only issues created by you, the tab lists them and the status line leaves them out', async ($, on) => {
   const s = stubs(on, { graphql: withBoth([], [MY_ISSUE]) })
   await start($, s.clock)
-  expect(s.statuses.at(-1)).toMatch(/│ issues 1$/)
+  expect(s.statuses.at(-1)).not.toContain('issues')
   const ui = await $.ui.mount(PANE)
+  expect((await ui.find({ key: 'tab-issues' }))?.props.label).toBe('issues 0 · 1 yours')
   await ui.press({ key: 'tab-issues' })
   expect(await issueLayout(ui)).toEqual(['issue-group-created', `line-${MY_ISSUE.url}`])
   expect(await isSelectedUrl(ui, MY_ISSUE.url)).toBe(true)
@@ -3256,12 +3258,11 @@ test('more issues created by you than the search returns are counted as 50+ and 
   const many = Array.from({ length: 50 }, (_, i) => issue({ number: 200 + i, url: `https://github.com/acme/app/issues/${200 + i}` }))
   const s = stubs(on, { graphql: withBoth([], many, 61) })
   await start($, s.clock)
-  expect(s.statuses.at(-1)).toMatch(/│ issues 50\+$/)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-issues' })
-  expect((await ui.find({ key: 'tab-issues' }))?.props.label).toBe('◉ issues 50+')
+  expect((await ui.find({ key: 'tab-issues' }))?.props.label).toBe('◉ issues 0 · 50+ yours')
   expect(JSON.stringify(await ui.find({ key: 'issue-group-created' }))).toContain('created by you 50+')
-  expect(await ui.find({ type: 'Text', text: /created by you: 50 of 61 shown/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /50 of 61 created, latest first/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -3285,6 +3286,20 @@ test('once issues created by you are listed, a new one is unread like any update
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-issues' })
   expect(JSON.stringify(await ui.find({ key: `line-${MY_ISSUE.url}` }))).toContain('●')
+  await ui.unmount()
+})
+
+test('an issue you just filed, with nothing on it since, is not unread', async ($, on) => {
+  const filed = { ...MY_ISSUE, createdAt: MY_ISSUE.updatedAt }
+  const s = stubs(on, {
+    graphql: withBoth([issue()], [filed]),
+    store: { seenIssues: { [issue().url]: issue().updatedAt }, seenCreatedIssues: true },
+  })
+  await start($, s.clock)
+  expect((s.store.get('seenIssues') as Record<string, string>)[filed.url]).toBe(filed.updatedAt)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-issues' })
+  expect(JSON.stringify(await ui.find({ key: `line-${filed.url}` }))).not.toContain('●')
   await ui.unmount()
 })
 

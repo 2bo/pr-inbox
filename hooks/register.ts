@@ -953,7 +953,7 @@ function summary(g: Record<Group, PR[]>): string {
     ...part(g.ready.length, `✓${g.ready.length} ready`),
     ...part(g.waiting.length, `…${g.waiting.length} in review`),
   ]
-  return `${left.join(' · ')} │ my PRs ${right.length ? right.join(' · ') : mine.length}${assigned.length + created.length ? ` │ issues ${issuesCount()}` : ''}`
+  return `${left.join(' · ')} │ my PRs ${right.length ? right.join(' · ') : mine.length}${assigned.length ? ` │ issues ${issuesCount()}` : ''}`
 }
 
 // Time since the request
@@ -1061,9 +1061,11 @@ function visibleRows(g: Record<Group, PR[]>): PR[] {
 const assignedCut = () => assignedTotal > assigned.length
 const createdCut = () => createdTotal > createdReturned
 
-// Issues assigned to you and created by you, each once: "50+" when a search found more than it returned
-function issuesCount(): string {
-  return `${assigned.length + created.length}${assignedCut() || createdCut() ? '+' : ''}`
+// Issues assigned to you, "50+" when the search found more than it returned, and on the tab those created by you
+// apart ("3 · 12 yours"): the ones you filed are not work handed to you, so the status line leaves them out
+function issuesCount(withCreated = false): string {
+  const yours = withCreated && created.length ? ` · ${created.length}${createdCut() ? '+' : ''} yours` : ''
+  return `${assigned.length}${assignedCut() ? '+' : ''}${yours}`
 }
 
 // Every word of the filter must appear in the PR's (or issue's) repository, number, title or author, or an issue's labels
@@ -1264,6 +1266,8 @@ async function loadInboxState($: EngineInterface): Promise<void> {
     }
     createdSeeded = true
   }
+  // One you just filed is not news to you: it is unread only once something happens on it
+  for (const i of created) if (!(i.url in seenIssues) && i.updatedAt === i.createdAt) seenIssues[i.url] = i.updatedAt
   // Over a search's 50, an issue left out of this fetch may still be open: its record stays until both lists fit
   if (!assignedCut() && !createdCut()) seenIssues = Object.fromEntries(Object.entries(seenIssues).filter(([url]) => listed.has(url)))
   await $.store.set('seenIssues', seenIssues)
@@ -4489,6 +4493,12 @@ function listedNote(url: string): string {
   return assigned.some((a) => a.url === url) ? '(assigned to you)' : created.some((c) => c.url === url) ? '(created by you)' : ''
 }
 
+// Beside a parent: "(parent · assigned to you)" when it is on the issues tab too
+function parentNote(url: string): string {
+  const listed = listedNote(url)
+  return listed ? `(parent · ${listed.slice(1, -1)})` : '(parent)'
+}
+
 // Sub-issues, open ones first, as they are what is left
 function openFirst(subs: IssueRef[]): IssueRef[] {
   return [...subs].sort((a, b) => Number(a.state === 'CLOSED') - Number(b.state === 'CLOSED'))
@@ -7145,7 +7155,7 @@ export function register(on: On, options: PluginOptions) {
           }),
         ],
       }),
-      ...(issue.parent ? [refLine(issue.parent, '↑', NEON.violet, '(parent)')] : []),
+      ...(issue.parent ? [refLine(issue.parent, '↑', NEON.violet, parentNote(issue.parent.url))] : []),
     ])
     const view = plainText ? 'y: markdown' : 'y: plain text'
     if (!about || about.error) {
@@ -7410,7 +7420,7 @@ export function register(on: On, options: PluginOptions) {
     const helpLabel = showHelp ? 'close help' : '?'
     const reviewTabLabel = `${tab === 'review' ? '◉ ' : ''}to review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`
     const mineTabLabel = `${tab === 'mine' ? '◉ ' : ''}my PRs ${mine.length}`
-    const issuesTabLabel = `${tab === 'issues' ? '◉ ' : ''}issues ${issuesCount()}`
+    const issuesTabLabel = `${tab === 'issues' ? '◉ ' : ''}issues ${issuesCount(true)}`
     const tabButton = (name: typeof tab, label: string, hotkey: string) =>
       Button({
         key: `tab-${name}`,
@@ -8296,7 +8306,7 @@ export function register(on: On, options: PluginOptions) {
             ['y', 'its description and comments as markdown, or as plain text'],
             ['n', 'next page of its details, when they do not fit · the wheel and PgUp / PgDn scroll them both ways'],
             ['●', 'updated since you last selected it'],
-            ['SUB', 'sub-issues closed / all · ├ └ under a listed parent · ↑#12 the parent, not listed'],
+            ['SUB', 'sub-issues closed / all · ├ └ under its parent in the same group · ↑#12 its parent, in the other group or not listed'],
             ['TALK / UPD', 'comments · time since the last update'],
           ],
         ],
@@ -8575,7 +8585,7 @@ export function register(on: On, options: PluginOptions) {
             ],
           })
         }
-        if (i.parent) add(refRow('↑', NEON.violet, i.parent, '(parent)'), 1)
+        if (i.parent) add(refRow('↑', NEON.violet, i.parent, parentNote(i.parent.url)), 1)
         const section = (name: string, note: string) =>
           add(
             Box({
@@ -8686,7 +8696,17 @@ export function register(on: On, options: PluginOptions) {
             : 0
       const groupOf = (i: Issue): IssueGroup => issues.group?.get(i.url) ?? 'closed'
       const headingLines = new Set(issues.map(groupOf)).size
-      const capLines = assignedCut() || createdCut() ? 1 : 0
+      // Over a search's 50: say how many are left out, and where to see them
+      const cuts = [
+        ...(assignedCut() ? [`${assigned.length} of ${assignedTotal} assigned`] : []),
+        ...(createdCut()
+          ? [
+              `${createdReturned} of ${createdTotal} created${createdReturned > created.length ? ` (${createdReturned - created.length} under assigned)` : ''}`,
+            ]
+          : []),
+      ]
+      const cutText = cuts.length > 0 ? `  ${cuts.join(' · ')}, latest first · org_filter or github.com for the rest` : ''
+      const capLines = cutText ? wrappedLines(cutText, columns) : 0
       const issueChrome = topLines + 2 + 1 + (issue ? 1 : 0) + headingLines + capLines + issueFooterLines
       const listMin = Math.min(issues.length, 3) + (issues.length > 3 ? 1 : 0)
       const listShare = Math.max(listMin, Math.min(issues.length, Math.ceil((paneLimit - issueChrome) / 2)))
@@ -8726,18 +8746,7 @@ export function register(on: On, options: PluginOptions) {
         issueList.push(issueRow(i))
       }
       if (issues.length === 0) issueList.push(Text({ dimColor: true, children: [empty] }))
-      // Over a search's 50: say how many are left out, and where to see them
-      const cuts = [
-        ...(assignedCut() ? [`assigned to you: ${assigned.length} of ${assignedTotal} shown`] : []),
-        ...(createdCut() ? [`created by you: ${createdReturned} of ${createdTotal} shown`] : []),
-      ]
-      if (cuts.length > 0)
-        issueMore.push(
-          Text({
-            dimColor: true,
-            children: [`  ${cuts.join(' · ')}, most recently updated first · org_filter or github.com for the rest`],
-          }),
-        )
+      if (cutText) issueMore.push(Text({ dimColor: true, children: [cutText] }))
       const issueHead = Text({
         color: NEON.muted,
         children: [`   ${'ISSUE'.padEnd(issueWidth)} TITLE`.padEnd(Math.max(0, columns - 1 - RIGHT)) + `   SUB TALK  UPD`],
