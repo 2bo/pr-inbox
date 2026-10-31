@@ -887,6 +887,7 @@ function approvedWhy(pr: PR, now: number): string {
   if (approvalOutdated(pr)) return `re-review: ${sinceText(pr)}`
   const reasons = classify(pr, now).reasons
   if (reasons.length > 0) return reasons.join(', ')
+  if (pr.isDraft) return 'it is a draft'
   const ci = ciState(pr)
   if (ci === 'PENDING' || ci === 'EXPECTED') return 'CI running'
   if (pr.reviewDecision === 'REVIEW_REQUIRED') return 'waiting for other reviews'
@@ -906,13 +907,14 @@ function notReadyWhy(pr: PR, now: number): string {
   return who ? `waiting for ${who}` : 'waiting for reviews'
 }
 
-// Why a PR you approved is still open, as its badge: changed since (re-review), then what blocks it, or ready
+// Why a PR you approved is still open, as its badge: changed since (re-review), then what blocks it, a draft, or ready
 function approvedBadge(pr: PR): Cell {
   if (approvalOutdated(pr)) return { text: '↻ RE  ', color: NEON.yellow, bold: true }
   const reasons = classify(pr, fetchedAt || Date.now()).reasons
   if (reasons.includes('changes requested')) return { text: '✗ CHG ', color: NEON.red }
   if (reasons.includes('CI failed')) return { text: '✗ CI  ', color: NEON.red }
   if (reasons.includes('conflict')) return { text: '✗ CONF', color: NEON.red }
+  if (pr.isDraft) return DRAFT_BADGE
   const ci = ciState(pr)
   if (ci === 'PENDING' || ci === 'EXPECTED') return { text: '◌ CI  ', color: NEON.yellow }
   if (pr.reviewDecision === 'REVIEW_REQUIRED') return { text: '… REVW', color: NEON.yellow }
@@ -5065,6 +5067,7 @@ const ASCII: Record<string, string> = {
   '⠏': '\\',
   '?': '?',
   '⚠': '!',
+  '✎': 'd',
   '☑': 'v',
   '⠿': '@',
   '⧉': '#',
@@ -5120,10 +5123,14 @@ function sweep(n: number): string[] {
   })
 }
 
-// Risk for a review request (from the analysis), state for one of my PRs; always six columns wide
+const DRAFT_BADGE: Cell = { text: '✎ DRFT' }
+
+// Risk for a review request (from the analysis), state for one of my PRs; always six columns wide. A draft says so in
+// place of either: it is not ready for review or merge yet (the risk stays in the details under the list)
 function badgeOf(pr: PR): Cell {
   if (isApproved(pr)) return approvedBadge(pr)
   if (tab === 'review') {
+    if (pr.isDraft) return DRAFT_BADGE
     if (cfg.analysis === 'off') return { text: '      ' }
     const a = analysisOf(pr)
     if (!a || 'failed' in a) return { text: pending.has(pr.url) ? '  …   ' : '  ·   ' }
@@ -5140,6 +5147,8 @@ function badgeOf(pr: PR): Cell {
   // Waiting on reviews with nobody asked: ask someone (w)
   if (needsReviewer(pr, fetchedAt || Date.now())) return { text: '○ ASK ', color: NEON.yellow, bold: true }
   if (group === 'action') return { text: '✗ FIX ', color: NEON.red, bold: true }
+  // A draft is not up for review or merge yet; what needs you (above) still comes first
+  if (pr.isDraft) return DRAFT_BADGE
   // Auto-merge is on: GitHub merges it once it is ready, nothing to do but wait
   if (pr.autoMergeRequest && group !== 'ready') return { text: '⇢ AUTO', color: NEON.cyan }
   return group === 'ready'
@@ -8076,7 +8085,8 @@ export function register(on: On, options: PluginOptions) {
         const why = approvedWhy(p, now)
         return [author, when, why, /\bCI\b/.test(why) ? '' : ciWord(p), size, mergeHint(p)]
       }
-      if (tab === 'review') return [author, `requested ${elapsed(requestedAt(p), now)} ago`, ciWord(p), size, mergeHint(p)]
+      if (tab === 'review')
+        return [author, p.isDraft ? 'draft' : '', `requested ${elapsed(requestedAt(p), now)} ago`, ciWord(p), size, mergeHint(p)]
       // Where it stands first: what needs you, ready, or what it waits on
       const { group, reasons } = classify(p, now)
       const again = askAgain(p)
@@ -8089,7 +8099,7 @@ export function register(on: On, options: PluginOptions) {
           : ''
       const state =
         (group === 'action'
-          ? `needs you: ${reasons.join(', ')}${again.length > 0 ? ` · w: re-request ${again.map(atName).join(', ')}` : ''}`
+          ? `needs you: ${reasons.join(', ')}${p.isDraft ? ' · a draft' : ''}${again.length > 0 ? ` · w: re-request ${again.map(atName).join(', ')}` : ''}`
           : group === 'ready'
             ? 'ready to merge · m: merge now'
             : group === 'stale'
@@ -8216,7 +8226,7 @@ export function register(on: On, options: PluginOptions) {
       const repo = p.repository.nameWithOwner.split('/')[1] ?? p.repository.nameWithOwner
       const label = shortLabel(`${repo}#${p.number}`, Math.max(8, Math.floor(columns / 3)))
       const prLink = safeHref(p.url)
-      const title = ` ${p.isDraft ? '[draft] ' : ''}${p.title}`
+      const title = ` ${p.title}`
       const children: El[] = [
         Box({
           flexDirection: 'row',
@@ -8238,7 +8248,7 @@ export function register(on: On, options: PluginOptions) {
         // Only the label carries the color; the sentence stays plain, so it reads calmly
         const a = analysisLine(p)
         const an = analysisOf(p)
-        const riskLabel = an && 'risk' in an ? L.risk[an.risk] : ''
+        const riskLabel = !p.isDraft && an && 'risk' in an ? L.risk[an.risk] : ''
         add(
           Box({
             paddingLeft: INDENT,
@@ -8246,7 +8256,7 @@ export function register(on: On, options: PluginOptions) {
               Text({
                 wrap: 'wrap',
                 dimColor: a.dim,
-                // The risk is on the row already: the summary alone
+                // The risk is on the row already (a draft's row says draft instead): the summary alone
                 children: [riskLabel && a.text.startsWith(riskLabel) ? a.text.slice(riskLabel.length).trimStart() : a.text],
               }),
             ],
@@ -8445,7 +8455,6 @@ export function register(on: On, options: PluginOptions) {
       const botMark = isBot(p) && !(tab === 'review' && review.some((r) => r.url === p.url))
       const lead = `${isSelected ? '▸' : ' '}${isUnread(p) ? '●' : ' '}${botMark ? '⚙' : ' '}`
       const titleWidth = Math.max(8, columns - textWidth(lead) - 1 - textWidth(b.text) - 1 - prWidth - 1 - textWidth(right))
-      const title = `${p.isDraft ? '[draft] ' : ''}${p.title}`
       const padTo = (text: string, width: number) => text + ' '.repeat(Math.max(0, width - textWidth(text)))
       return Box({
         key: `line-${p.url}`,
@@ -8465,7 +8474,7 @@ export function register(on: On, options: PluginOptions) {
             ...(isSelected && !focused ? { underline: true } : {}),
             dimColor: !focused,
             wrap: 'truncate-end',
-            children: [padTo(fit(title, titleWidth), titleWidth)],
+            children: [padTo(fit(p.title, titleWidth), titleWidth)],
           }),
           Text({ children: [' '] }),
           ...h.cells.map((color) => Text({ color, children: ['▰'] })),
@@ -8676,16 +8685,20 @@ export function register(on: On, options: PluginOptions) {
           "selected · updated since you last selected it · a bot · a stack (gh stack, or a PR on another PR's branch), bottom (the next to merge) to top",
           NEON.pink,
         ],
-        ['RISK', '▲ HIGH · ◆ MED · ○ LOW from the analysis · … analyzing · · not analyzed', NEON.yellow],
+        [
+          'RISK',
+          '▲ HIGH · ◆ MED · ○ LOW from the analysis · … analyzing · · not analyzed · ✎ DRFT a draft (risk in the details)',
+          NEON.yellow,
+        ],
         [
           'STATE',
-          '✗ FIX needs you · ✓ RDY ready to merge · … REVW in review · ⇢ AUTO auto-merge on, merges when ready · ○ ASK nobody is asked to review it · ◇ OLD no update for a while · ⏸ SNZ snoozed',
+          '✗ FIX needs you · ✓ RDY ready to merge · … REVW in review · ⇢ AUTO auto-merge on, merges when ready · ○ ASK nobody is asked to review it · ✎ DRFT a draft · ◇ OLD no update for a while · ⏸ SNZ snoozed',
           NEON.green,
         ],
         ['', '⟳ WIP Claude is fixing its CI · ⇡ PUSH a fix waits for your push', NEON.cyan],
         [
           'approved',
-          '↻ RE changed since you approved (re-review) · … REVW waits on other reviews · ◌ CI running · ✗ CI / CONF / CHG blocks it · ✓ RDY ready',
+          '↻ RE changed since you approved (re-review) · ✎ DRFT a draft · … REVW waits on other reviews · ◌ CI running · ✗ CI / CONF / CHG blocks it · ✓ RDY ready',
           NEON.green,
         ],
         ['AGE', '▰▱▱ how long it has waited: one cell at 4 hours, two at a day, three at three days', NEON.red],

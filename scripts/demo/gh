@@ -58,7 +58,7 @@ const REVIEW = [
     deletions: 12,
     ...reqd(27),
   }),
-  pr('docs', 77, 'Fix broken links in the onboarding guide', 'rkumar', { additions: 9, deletions: 9, ...reqd(6) }),
+  pr('docs', 77, 'Fix broken links in the onboarding guide', 'rkumar', { isDraft: true, additions: 9, deletions: 9, ...reqd(6) }),
   pr('storefront', 488, 'fix(deps): update dependency @acme-oss/http-client to v3', 'renovate[bot]', {
     headRefName: 'renovate/acme-oss-http-client-3.x',
     additions: 4,

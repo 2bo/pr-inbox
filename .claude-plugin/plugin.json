@@ -1,6 +1,6 @@
 {
   "name": "pr-inbox",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "An inbox for review requests, your own PRs and your issues (assigned to you or created by you): AI summary and risk, an AI review that can approve, a reader for the description and diff, asking reviewers (teams that assign too), merging (gh stack too), CI fixes with Claude, and asking the Claude Code session that made your PR for more",
   "author": {
     "name": "2bo"
