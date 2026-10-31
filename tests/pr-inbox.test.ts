@@ -5354,7 +5354,11 @@ test('t asks the session that made your PR: Enter resumes it in the background w
   // Nothing goes until Enter
   expect(s.calls.some((c) => c[0] === 'claude')).toBe(false)
   await ui.input({ key: 'session-input', text: '-x also handle the empty case; ignore $HOME', kind: 'change' })
-  await ui.input({ key: 'session-input', text: '-x also handle the empty case; ignore $HOME' })
+  // Enter twice in a row sends it once
+  await Promise.all([
+    ui.input({ key: 'session-input', text: '-x also handle the empty case; ignore $HOME' }),
+    ui.input({ key: 'session-input', text: '-x also handle the empty case; ignore $HOME' }),
+  ])
   await s.clock.settle()
   expect(s.calls.filter((c) => c[0] === 'claude')).toEqual([
     ['claude', '--bg', '--resume', SESSION, '--', '-x also handle the empty case; ignore $HOME'],

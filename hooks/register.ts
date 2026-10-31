@@ -2168,8 +2168,8 @@ function noSessionWhy(pr: PR): string {
 }
 
 // The request being typed for a PR's session (t), drawn as a field above the list; failed: why the last Enter did
-// not send it (the text stays, for Enter to try again)
-let telling: { pr: PR; session: PrSession; text: string; failed?: string } | undefined
+// not send it (the text stays, for Enter to try again); sending: an Enter is being sent, and another one is ignored
+let telling: { pr: PR; session: PrSession; text: string; failed?: string; sending?: boolean } | undefined
 
 // t: type a request for the session that made your PR. One open now is left to you (writing to it there keeps it
 // one conversation), and so is this one
@@ -2215,11 +2215,24 @@ async function tellSession($: EngineInterface, pr: PR): Promise<void> {
 // field closes once it has gone; a request that could not go stays in it
 async function sendToSession($: EngineInterface, text: string): Promise<void> {
   const t = telling
+  // A second Enter while the first is sent would resume the session twice with the same request
+  if (t?.sending) return
   if (!t || !text.trim()) {
     telling = undefined
     $.ui.invalidate('ui.render')
     return
   }
+  t.sending = true
+  $.ui.invalidate('ui.render')
+  try {
+    await sendRequest($, t, text)
+  } finally {
+    t.sending = false
+    $.ui.invalidate('ui.render')
+  }
+}
+
+async function sendRequest($: EngineInterface, t: NonNullable<typeof telling>, text: string): Promise<void> {
   const { session: s, pr } = t
   const name = sessionName(s)
   t.text = text
@@ -7741,7 +7754,7 @@ export function register(on: On, options: PluginOptions) {
       top.push(
         Input({
           key: 'session-input',
-          label: `Ask ${sessionName(t.session)} about ${askLabel(t.pr)}${t.failed ? ` (not sent: ${fit(t.failed, 40)} · Enter: try again)` : ''}`,
+          label: `Ask ${sessionName(t.session)} about ${askLabel(t.pr)}${t.sending ? ' (sending…)' : t.failed ? ` (not sent: ${fit(t.failed, 40)} · Enter: try again)` : ''}`,
           placeholder: 'its next prompt · runs with its own permissions · empty Enter: cancel',
           value: t.text,
           submitLabel: 'send',
