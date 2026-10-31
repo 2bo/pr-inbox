@@ -2019,6 +2019,8 @@ let openSessions = new Map<string, string>()
 // Where each session started, by id: it never changes, so each transcript is read for it once
 const sessionCwds = new Map<string, string>()
 let sessionsReadAt = 0
+// This session's own id, which t leaves to you
+let thisSession = ''
 let sessionsLoading: Promise<void> | undefined
 const SESSIONS_EVERY = MINUTE
 const CLAUDE_SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -2051,6 +2053,7 @@ async function readSessions($: EngineInterface): Promise<void> {
   const now = await $.clock.now()
   if (!interactive || now - sessionsReadAt < SESSIONS_EVERY) return
   sessionsReadAt = now
+  thisSession = await $.session.id().catch(() => '')
   const home = await homeDir($)
   const own = new Set(mine.map((p) => p.url))
   if (!home || own.size === 0) {
@@ -2140,18 +2143,33 @@ async function refreshOpenSessions($: EngineInterface): Promise<void> {
   if (home) openSessions = await readOpenSessions($, home)
 }
 
-// Your PR's session, as the list draws it: its title, and whether it is open now
+// A session's title, the same width everywhere it is named
+function sessionName(s: PrSession): string {
+  return `“${fit(s.title, 32)}”`
+}
+
+// Why t would only refuse on this PR's session, in a few words (open now, or this session); '' when t can ask it
+function sessionBusy(s: PrSession): string {
+  if (s.id === thisSession) return 'this session'
+  return openSessions.has(s.id) ? 'open: write to it there' : ''
+}
+
+// Your PR's session, as the list draws it: its title, and why t leaves it to you, if it does
 function sessionNote(pr: PR): string {
   const s = prSessions.get(pr.url)
-  return s ? `session “${fit(s.title, 32)}”${openSessions.has(s.id) ? ' (open)' : ''}` : ''
+  if (!s) return ''
+  const busy = sessionBusy(s)
+  return `session ${sessionName(s)}${busy ? ` (${busy})` : ''}`
 }
 
 function noSessionWhy(pr: PR): string {
-  return `No Claude Code session on this computer notes making ${askLabel(pr)} · p: put its link in the prompt here`
+  if (sessionsLoading || sessionsReadAt === 0) return `t: still looking for the session that made ${askLabel(pr)}…`
+  return `No Claude Code session on this computer made ${askLabel(pr)} · p: put its link in the prompt here`
 }
 
-// The request being typed for a PR's session (t), drawn as a field above the list
-let telling: { pr: PR; session: PrSession; text: string } | undefined
+// The request being typed for a PR's session (t), drawn as a field above the list; failed: why the last Enter did
+// not send it (the text stays, for Enter to try again)
+let telling: { pr: PR; session: PrSession; text: string; failed?: string } | undefined
 
 // t: type a request for the session that made your PR. One open now is left to you (writing to it there keeps it
 // one conversation), and so is this one
@@ -2166,8 +2184,8 @@ async function tellSession($: EngineInterface, pr: PR): Promise<void> {
     $.ui.toast(noSessionWhy(pr), { timeoutMs: 6000 })
     return
   }
-  const name = `“${fit(s.title, 40)}”`
-  if (s.id === (await $.session.id())) {
+  const name = sessionName(s)
+  if (s.id === thisSession) {
     $.ui.toast(`This session made ${askLabel(pr)} · p: put its link in the prompt`, { timeoutMs: 6000 })
     return
   }
@@ -2177,10 +2195,13 @@ async function tellSession($: EngineInterface, pr: PR): Promise<void> {
     $.ui.toast(`${name} is open${open ? ` as ${open}` : ''}: write to it there · claude agents lists the background ones`, {
       timeoutMs: 8000,
     })
+    $.ui.invalidate('ui.render')
     return
   }
   if (!s.cwd || !(await $.fs.exists(s.cwd).catch(() => false))) {
-    $.ui.toast(`Cannot tell where ${name} ran${s.cwd ? ` (${s.cwd} is gone)` : ''}, so it cannot be resumed`, { timeoutMs: 6000 })
+    $.ui.toast(`Cannot tell where ${name} ran${s.cwd ? ` (${s.cwd} is gone)` : ''}, so it cannot be resumed · p: ask here with its link`, {
+      timeoutMs: 6000,
+    })
     return
   }
   // One field above the list at a time
@@ -2190,31 +2211,45 @@ async function tellSession($: EngineInterface, pr: PR): Promise<void> {
 }
 
 // Enter in the field: the session goes on in the background with your request as its next prompt, as
-// `claude --bg --resume <id>` does from a terminal. It runs as that session would, with its own permissions
+// `claude --bg --resume <id>` does from a terminal. It runs as that session would, with its own permissions. The
+// field closes once it has gone; a request that could not go stays in it
 async function sendToSession($: EngineInterface, text: string): Promise<void> {
   const t = telling
-  telling = undefined
-  $.ui.invalidate('ui.render')
-  if (!t || !text.trim()) return
-  const { session: s, pr } = t
-  const name = `“${fit(s.title, 40)}”`
-  await refreshOpenSessions($)
-  if (openSessions.has(s.id)) {
-    $.ui.toast(`${name} opened meanwhile: write to it there`, { timeoutMs: 6000 })
+  if (!t || !text.trim()) {
+    telling = undefined
+    $.ui.invalidate('ui.render')
     return
   }
+  const { session: s, pr } = t
+  const name = sessionName(s)
+  t.text = text
+  await refreshOpenSessions($)
+  if (openSessions.has(s.id)) {
+    telling = undefined
+    $.ui.toast(`${name} opened meanwhile: write to it there · your request: ${fit(clean(text), 80)}`, { timeoutMs: 15000 })
+    $.ui.invalidate('ui.render')
+    return
+  }
+  $.ui.toast(`Asking ${name} about ${askLabel(pr)}…`, { timeoutMs: 60000 })
   // `--` ends the options: a request that starts with - is still the prompt
   const r = await $.process
     .run(['claude', '--bg', '--resume', s.id, '--', text], { cwd: s.cwd, timeoutMs: 60000 })
     .catch((err: unknown) => ({ exitCode: 1, stdout: '', stderr: messageOf(err) }))
   if (r.exitCode !== 0) {
-    $.ui.toast(`Could not resume ${name}: ${fit(clean(r.stderr) || `claude exited with code ${r.exitCode}`, 80)}`, { timeoutMs: 8000 })
+    const why = fit(clean(r.stderr) || `claude exited with code ${r.exitCode}`, 80)
+    if (telling === t) t.failed = why
+    $.ui.toast(`Could not resume ${name}: ${why} · your request stays in the field: Enter tries again`, { timeoutMs: 10000 })
+    $.ui.invalidate('ui.render')
     return
   }
-  // What claude --bg prints: the id that claude attach takes
+  if (telling === t) telling = undefined
+  // The row says (open) at once: the session runs now
+  await refreshOpenSessions($)
+  $.ui.invalidate('ui.render')
+  // What claude --bg prints: the id that claude attach, logs and stop take
   const said = fit(clean(r.stdout.split('\n').find((l) => l.trim()) ?? ''), 60)
   $.ui.toast(
-    `Asked ${name} about ${askLabel(pr)}: it goes on in the background${said ? ` (${said})` : ''} · claude agents lists it, claude attach opens it`,
+    `Asked ${name} about ${askLabel(pr)}: it goes on in the background${said ? ` (${said})` : ''} · claude agents lists it, claude attach opens it, claude stop stops it`,
     { timeoutMs: 10000 },
   )
 }
@@ -4951,6 +4986,8 @@ const ASCII: Record<string, string> = {
   '⧉': '#',
   '│': '|',
   '¤': '.',
+  '“': '"',
+  '”': '"',
 }
 const ASCII_PATTERN = new RegExp(
   `[${Object.keys(ASCII)
@@ -7697,13 +7734,15 @@ export function register(on: On, options: PluginOptions) {
       topLines += 1
     }
     // The request for a PR's session (t): Enter sends it, an empty one sends nothing
+    // A request is for the PR it was opened on: moving to another PR closes the field
+    if (telling && telling.pr.url !== selected) telling = undefined
     if (telling && Input) {
       const t = telling
       top.push(
         Input({
           key: 'session-input',
-          label: `Ask “${fit(t.session.title, 24)}”`,
-          placeholder: `what to do next on ${askLabel(t.pr)} · empty: cancel`,
+          label: `Ask ${sessionName(t.session)} about ${askLabel(t.pr)}${t.failed ? ` (not sent: ${fit(t.failed, 40)} · Enter: try again)` : ''}`,
+          placeholder: 'its next prompt · runs with its own permissions · empty Enter: cancel',
           value: t.text,
           submitLabel: 'send',
           autoFocus: true,
@@ -7759,8 +7798,20 @@ export function register(on: On, options: PluginOptions) {
           actions.push(act('act-ci', fixing ? 'push early / stop watching' : ready ? 'push fix' : 'fix CI', 'c', () => ciMenu($, pr)))
         actions.push(act('act-reviewers', reviewersKeyLabel(pr, now), 'w', () => openPicker($, pr)))
         if (merge && merge !== 'merge') actions.push(act('act-merge', MERGE_LABELS[merge], 'm', () => mergePr($, pr)))
-        if (prSessions.has(pr.url) && Input)
-          actions.push(act('act-session', telling?.pr.url === pr.url ? 'stop asking' : 'ask its session', 't', () => tellSession($, pr)))
+        const session = prSessions.get(pr.url)
+        if (session && Input) {
+          // A session t would only point you to is named so, dimmed
+          const busy = sessionBusy(session)
+          const label =
+            telling?.pr.url === pr.url
+              ? 'stop asking'
+              : busy
+                ? busy === 'this session'
+                  ? 'this session'
+                  : 'session open'
+                : 'ask its session'
+          actions.push(act('act-session', label, 't', () => tellSession($, pr), Boolean(busy)))
+        }
       }
       // An AI review of your own PR is one to fix before others read it; it never approves
       if (isReview || isMine) actions.push(act('act-ai-review', reviewLabel, 'v', () => aiReview($, pr)))
@@ -8456,7 +8507,7 @@ export function register(on: On, options: PluginOptions) {
             ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · y in it sends'],
             [
               't',
-              'ask the Claude Code session that made it (“session …” on the row): type a request, Enter resumes that session in the background with it (claude --bg --resume) · one open now: write to it there',
+              'ask the Claude Code session that made it (“session …” on the row): type a request, Enter resumes that session in the background with it (claude --bg --resume), with its own permissions · a request that could not go stays in the field · one open now: write to it there',
             ],
           ],
         ],

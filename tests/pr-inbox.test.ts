@@ -5349,7 +5349,8 @@ test('t asks the session that made your PR: Enter resumes it in the background w
   expect(await ui.find({ type: 'Text', text: /session “login fix”/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /someone later/ })).toBeUndefined()
   await ui.press({ key: 'act-session' })
-  expect(await ui.find({ key: 'session-input' })).toBeDefined()
+  // The field names the PR it is about the whole time
+  expect((await ui.find({ key: 'session-input' }))?.props.label).toMatch(/^Ask “login fix” about app#\d+$/)
   // Nothing goes until Enter
   expect(s.calls.some((c) => c[0] === 'claude')).toBe(false)
   await ui.input({ key: 'session-input', text: '-x also handle the empty case; ignore $HOME', kind: 'change' })
@@ -5371,7 +5372,8 @@ test('t leaves a session that is open now to you', async ($, on) => {
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  expect(await ui.find({ type: 'Text', text: /session “login fix” \(open\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /session “login fix” \(open: write to it there\)/ })).toBeDefined()
+  expect((await ui.find({ key: 'act-session' }))?.props.label).toBe('session open')
   await ui.press({ key: 'act-session' })
   expect(s.toasts.at(-1)).toContain('“login fix” is open as app-3: write to it there')
   expect(await ui.find({ key: 'session-input' })).toBeUndefined()
@@ -5388,6 +5390,46 @@ test('t with an empty request sends nothing', async ($, on) => {
   await ui.input({ key: 'session-input', text: '   ' })
   await s.clock.settle()
   expect(s.calls.some((c) => c[0] === 'claude')).toBe(false)
+  expect(await ui.find({ key: 'session-input' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('t keeps a request that could not go in the field, for Enter to try again; moving to another PR closes it', async ($, on) => {
+  let fails = true
+  on('fs.list', () => ({ value: [] }) as never)
+  on('fs.exists', () => ({ value: true }) as never)
+  on('session.id', () => ({ value: 'this-session' }) as never)
+  const s = stubs(on, {
+    locale: { HOME: '/home/me' },
+    stderr: 'No conversation found',
+    run: (argv) => {
+      if (argv[0] === 'grep' && argv.includes('-rHoE')) return { stdout: sessionRows() }
+      if (argv[0] === 'grep' && argv.includes('-m1')) return { stdout: `${PROJECTS}/${SESSION}.jsonl\0"cwd":"/work/app"` }
+      if (argv[0] === 'claude') return fails ? { exitCode: 1 } : { stdout: 'bg-1a2b\n' }
+      return undefined
+    },
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-session' })
+  await ui.input({ key: 'session-input', text: 'rebase it', kind: 'change' })
+  await ui.input({ key: 'session-input', text: 'rebase it' })
+  await s.clock.settle()
+  expect(s.toasts.at(-1)).toContain('your request stays in the field: Enter tries again')
+  const field = await ui.find({ key: 'session-input' })
+  expect(field?.props.value).toBe('rebase it')
+  expect(field?.props.label).toContain('not sent: No conversation found')
+  fails = false
+  await ui.input({ key: 'session-input', text: 'rebase it' })
+  await s.clock.settle()
+  expect(s.calls.filter((c) => c[0] === 'claude')).toHaveLength(2)
+  expect(await ui.find({ key: 'session-input' })).toBeUndefined()
+
+  // Opened on one PR, the field goes when another is selected
+  await ui.press({ key: 'act-session' })
+  expect(await ui.find({ key: 'session-input' })).toBeDefined()
+  await ui.press({ key: 'nav-down' })
   expect(await ui.find({ key: 'session-input' })).toBeUndefined()
   await ui.unmount()
 })
