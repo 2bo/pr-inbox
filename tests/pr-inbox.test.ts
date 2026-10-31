@@ -5665,6 +5665,20 @@ test('only the first note of a PR can make it: a later one near the creation, af
   await ui.unmount()
 })
 
+test('on a PR made elsewhere, t resumes the session that last worked on it', async ($, on) => {
+  // The session that noted it first is open; the last one, which t asks, is not
+  const s = sessionStubs(on, true, false)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /session “someone later” \(last worked on it\)/ })).toBeDefined()
+  await ui.press({ key: 'act-session' })
+  await ui.input({ key: 'session-input', text: 'ping' })
+  await s.clock.settle()
+  expect(s.calls.filter((c) => c[0] === 'claude')).toEqual([['claude', '--bg', '--resume', OTHER_SESSION, '--', 'ping']])
+  await ui.unmount()
+})
+
 test('t leaves a session that is open now to you', async ($, on) => {
   const s = sessionStubs(on, true)
   await start($, s.clock)
