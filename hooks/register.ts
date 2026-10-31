@@ -2168,8 +2168,11 @@ function noSessionWhy(pr: PR): string {
 }
 
 // The request being typed for a PR's session (t), drawn as a field above the list; failed: why the last Enter did
-// not send it (the text stays, for Enter to try again); sending: an Enter is being sent, and another one is ignored
-let telling: { pr: PR; session: PrSession; text: string; failed?: string; sending?: boolean } | undefined
+// not send it (the text stays, for Enter to try again)
+let telling: { pr: PR; session: PrSession; text: string; failed?: string } | undefined
+// Sessions a request is being sent to now, by id: until it has gone, no other Enter sends to them, from this field or
+// from one opened again
+const sendingTo = new Set<string>()
 
 // t: type a request for the session that made your PR. One open now is left to you (writing to it there keeps it
 // one conversation), and so is this one
@@ -2185,6 +2188,10 @@ async function tellSession($: EngineInterface, pr: PR): Promise<void> {
     return
   }
   const name = sessionName(s)
+  if (sendingTo.has(s.id)) {
+    $.ui.toast(`Still sending your request to ${name}…`, { timeoutMs: 6000 })
+    return
+  }
   if (s.id === thisSession) {
     $.ui.toast(`This session made ${askLabel(pr)} · p: put its link in the prompt`, { timeoutMs: 6000 })
     return
@@ -2216,18 +2223,19 @@ async function tellSession($: EngineInterface, pr: PR): Promise<void> {
 async function sendToSession($: EngineInterface, text: string): Promise<void> {
   const t = telling
   // A second Enter while the first is sent would resume the session twice with the same request
-  if (t?.sending) return
+  if (t && sendingTo.has(t.session.id)) return
   if (!t || !text.trim()) {
     telling = undefined
     $.ui.invalidate('ui.render')
     return
   }
-  t.sending = true
+  const id = t.session.id
+  sendingTo.add(id)
   $.ui.invalidate('ui.render')
   try {
     await sendRequest($, t, text)
   } finally {
-    t.sending = false
+    sendingTo.delete(id)
     $.ui.invalidate('ui.render')
   }
 }
@@ -7754,7 +7762,7 @@ export function register(on: On, options: PluginOptions) {
       top.push(
         Input({
           key: 'session-input',
-          label: `Ask ${sessionName(t.session)} about ${askLabel(t.pr)}${t.sending ? ' (sending…)' : t.failed ? ` (not sent: ${fit(t.failed, 40)} · Enter: try again)` : ''}`,
+          label: `Ask ${sessionName(t.session)} about ${askLabel(t.pr)}${sendingTo.has(t.session.id) ? ' (sending…)' : t.failed ? ` (not sent: ${fit(t.failed, 40)} · Enter: try again)` : ''}`,
           placeholder: 'its next prompt · runs with its own permissions · empty Enter: cancel',
           value: t.text,
           submitLabel: 'send',
