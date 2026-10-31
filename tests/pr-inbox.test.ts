@@ -5550,18 +5550,23 @@ const OTHER_SESSION = '9a9b9c9d-1111-4222-8333-444455556666'
 const PROJECTS = '/home/me/.claude/projects/-work-app'
 // What grep finds in the transcripts: Claude Code's pr-link and title rows, by file. The other session noted the
 // PRs later (it only worked on them); a row inside a message, with its quotes escaped, is not one
-const prLink = (id: string, p: { number: number; url: string }, day: string) =>
-  `${PROJECTS}/${id}.jsonl\0{"type":"pr-link","sessionId":"${id}","prNumber":${p.number},"prUrl":"${p.url}","prRepository":"acme/app","timestamp":"2026-10-${day}T00:00:00.000Z"}`
-const sessionRows = () =>
+const prLink = (id: string, p: { number: number; url: string }, at: string) =>
+  `${PROJECTS}/${id}.jsonl\0{"type":"pr-link","sessionId":"${id}","prNumber":${p.number},"prUrl":"${p.url}","prRepository":"acme/app","timestamp":"${at}"}`
+// The PRs were created 2026-09-30T00:00Z. made: SESSION noted them two minutes later (it made them), the other session
+// a day after (it pushed); otherwise both only pushed, and the other session last
+const sessionRows = (made = true) =>
   [
-    // The other session comes first in grep's output, but noted the PRs a day later
-    ...[CHANGES, READY, WAITING, STALE].flatMap((p) => [prLink(OTHER_SESSION, p, '02'), prLink(SESSION, p, '01')]),
+    // The other session comes first in grep's output
+    ...[CHANGES, READY, WAITING, STALE].flatMap((p) => [
+      prLink(OTHER_SESSION, p, '2026-10-01T00:00:00.000Z'),
+      prLink(SESSION, p, made ? '2026-09-30T00:02:00.000Z' : '2026-09-30T12:00:00.000Z'),
+    ]),
     `${PROJECTS}/${SESSION}.jsonl\0{"type":"ai-title","aiTitle":"an older title"`,
     `${PROJECTS}/${SESSION}.jsonl\0{"type":"custom-title","customTitle":"login fix\\u001b[2J"`,
     `${PROJECTS}/${OTHER_SESSION}.jsonl\0{"type":"custom-title","customTitle":"someone later"`,
   ].join('\n')
 
-function sessionStubs(on: TestOn, open: boolean) {
+function sessionStubs(on: TestOn, open: boolean, made = true) {
   on('fs.list', () => ({ value: [{ name: '4242.json', kind: 'file', size: 1, mtimeMs: 0, isLink: false }] }) as never)
   on('fs.read', () => ({ value: JSON.stringify({ pid: 4242, sessionId: open ? SESSION : OTHER_SESSION, name: 'app-3' }) }) as never)
   on('fs.exists', () => ({ value: true }) as never)
@@ -5569,8 +5574,14 @@ function sessionStubs(on: TestOn, open: boolean) {
   return stubs(on, {
     locale: { HOME: '/home/me' },
     run: (argv) => {
-      if (argv[0] === 'grep' && argv.includes('-rHoE')) return { stdout: sessionRows() }
-      if (argv[0] === 'grep' && argv.includes('-m1')) return { stdout: `${PROJECTS}/${SESSION}.jsonl\0"cwd":"/work/app"` }
+      if (argv[0] === 'grep' && argv.includes('-rHoE')) return { stdout: sessionRows(made) }
+      if (argv[0] === 'grep' && argv.includes('-m1'))
+        return {
+          stdout: argv
+            .slice(5)
+            .map((f) => `${f}\0"cwd":"/work/app"`)
+            .join('\n'),
+        }
       if (argv[0] === 'ps') return { stdout: ' 4242\n' }
       if (argv[0] === 'claude') return { stdout: 'bg-1a2b\n' }
       return undefined
@@ -5608,6 +5619,17 @@ test('t asks the session that made your PR: Enter resumes it in the background w
   expect(await ui.find({ key: 'session-input' })).toBeUndefined()
   // No model saw any of it
   expect(s.prompts.join('\n')).not.toContain('login fix')
+  await ui.unmount()
+})
+
+test('a session that only pushed to your PR is drawn as having worked on it; the last one is the one t asks', async ($, on) => {
+  // Neither session noted the PR when it was created: it was made elsewhere. The other session pushed last, and is open
+  const s = sessionStubs(on, false, false)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /session “someone later” \(worked on it · open: write to it there\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /login fix/ })).toBeUndefined()
   await ui.unmount()
 })
 
