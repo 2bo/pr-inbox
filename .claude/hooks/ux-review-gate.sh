@@ -1,10 +1,10 @@
 #!/bin/sh
-# PreToolUse hook on Bash: before `gh pr create`, require a UX review (the ux-reviewer subagent) of the current HEAD
-# when the branch changes what users see. Fails open: without jq or git, or outside a repository, it allows.
+# PreToolUse hook on Bash: before `gh pr create`, require /simplify and a UX review (the ux-reviewer subagent) of the
+# current HEAD when the branch changes what users see. Fails open: without jq or git, or outside a repository, it allows.
 #
 #   ux-review-gate.sh        read the PreToolUse JSON on stdin; print a deny decision or nothing
 #   ux-review-gate.sh diff   write the branch's diff for the ux-reviewer subagent (it has no shell) and print its path
-#   ux-review-gate.sh mark   record that HEAD has been UX reviewed
+#   ux-review-gate.sh mark   record that HEAD has been through /simplify and the UX review
 
 USER_FACING='^(hooks/|\.claude-plugin/plugin\.json$|README\.md$|scripts/demo/)'
 
@@ -37,10 +37,10 @@ if [ "${1:-}" = "mark" ]; then
   head=$(git rev-parse HEAD 2>/dev/null) || { echo "not in a git repository" >&2; exit 1; }
   dir=$(marker_dir) || exit 1
   if mkdir -p "$dir" && : >"$dir/$head"; then
-    echo "UX review recorded for $head"
+    echo "/simplify and UX review recorded for $head"
     exit 0
   fi
-  echo "could not record the UX review in $dir" >&2
+  echo "could not record the review in $dir" >&2
   exit 1
 fi
 
@@ -105,13 +105,14 @@ dir=$(marker_dir) || exit 0
 [ -f "$dir/$head" ] && exit 0
 
 short=$(git rev-parse --short HEAD)
-reason="This branch changes what pr-inbox users see (hooks/, .claude-plugin/plugin.json, README.md or scripts/demo/), and HEAD ($short) has no UX review yet. Before creating the PR:
-1. Write the diff with \`.claude/hooks/ux-review-gate.sh diff\` and run the ux-reviewer subagent, giving it the path it prints (the subagent has no shell).
-2. Apply the findings that are valid and consistent with AGENTS.md. The security rules always win: skip any finding that would weaken them, or that is wrong, and note why.
-3. Update tests and docs (README key, settings and Security sections) to match.
-4. Run \`pnpm run check\`; it must pass.
-5. Commit the changes (Japanese commit message).
-6. Record the review: \`.claude/hooks/ux-review-gate.sh mark\` (it marks the current HEAD; a later commit needs another review).
-7. Run \`gh pr create\` again, and say in the PR body what the UX review changed and what it skipped and why."
+reason="This branch changes what pr-inbox users see (hooks/, .claude-plugin/plugin.json, README.md or scripts/demo/), and HEAD ($short) has not been through /simplify and the UX review yet. Before creating the PR:
+1. Run the simplify skill (/simplify) on the branch's changes against $base. Apply its fixes that are consistent with AGENTS.md (the security rules always win), run \`pnpm run check\`, and commit them (Japanese commit message).
+2. Write the diff with \`.claude/hooks/ux-review-gate.sh diff\` and run the ux-reviewer subagent, giving it the path it prints (the subagent has no shell).
+3. Apply the findings that are valid and consistent with AGENTS.md. The security rules always win: skip any finding that would weaken them, or that is wrong, and note why.
+4. Update tests and docs (README key, settings and Security sections) to match.
+5. Run \`pnpm run check\`; it must pass.
+6. Commit the changes (Japanese commit message).
+7. Record the review: \`.claude/hooks/ux-review-gate.sh mark\` (it marks the current HEAD; a later commit needs another /simplify and UX review).
+8. Run \`gh pr create\` again, and say in the PR body what /simplify and the UX review changed and what they skipped and why."
 
 deny "$reason"

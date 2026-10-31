@@ -16,11 +16,11 @@ claude -p "/pr-inbox refresh" --plugin-dir .   # smoke test against real GitHub 
 
 Run `pnpm run check` before every commit; all of it must pass. `claude plugin validate` does not catch everything the loader refuses (for example a function given `$` that shares a name with another binding): also load the mod for real, `claude -p "/pr-inbox refresh" --plugin-dir .` must print the counts.
 
-## UX review
+## Simplify and UX review
 
-Before creating a PR that changes what users see (`hooks/`, `.claude-plugin/plugin.json`, `README.md`, `scripts/demo/`), the `ux-reviewer` subagent (`.claude/agents/ux-reviewer.md`, read-only, no shell) reviews the diff that `.claude/hooks/ux-review-gate.sh diff` writes (against `origin/main`; give it the printed path), and the session applies its findings that are valid and consistent with this file (the security rules below always win; say in the PR body what was changed or skipped and why), then runs `pnpm run check` and commits.
+Before creating a PR that changes what users see (`hooks/`, `.claude-plugin/plugin.json`, `README.md`, `scripts/demo/`), the session first runs the `simplify` skill (`/simplify`) on the branch's changes against `origin/main`, applies its fixes that are consistent with this file (the security rules below always win), runs `pnpm run check` and commits. Then the `ux-reviewer` subagent (`.claude/agents/ux-reviewer.md`, read-only, no shell) reviews the diff that `.claude/hooks/ux-review-gate.sh diff` writes (against `origin/main`; give it the printed path), and the session applies its findings that are valid and consistent with this file (the security rules below always win; say in the PR body what was changed or skipped and why), then runs `pnpm run check` and commits.
 
-The project's `PreToolUse` hook (`.claude/settings.json` → `.claude/hooks/ux-review-gate.sh`) enforces it: `gh pr create` is denied until the current HEAD is marked as reviewed. Mark it with `.claude/hooks/ux-review-gate.sh mark` after the review's changes are committed; the marker lives under `.git` (`git rev-parse --git-path ux-review`), so any later commit needs another review.
+The project's `PreToolUse` hook (`.claude/settings.json` → `.claude/hooks/ux-review-gate.sh`) enforces it: `gh pr create` is denied until the current HEAD is marked as reviewed. Mark it with `.claude/hooks/ux-review-gate.sh mark` after both `/simplify`'s and the UX review's changes are committed; the marker lives under `.git` (`git rev-parse --git-path ux-review`), so any later commit needs another review.
 
 ## Layout
 
