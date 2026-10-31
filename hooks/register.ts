@@ -7873,7 +7873,7 @@ export function register(on: On, options: PluginOptions) {
         // Only the label carries the color; the sentence stays plain, so it reads calmly
         const a = analysisLine(p)
         const an = analysisOf(p)
-        const riskLabel = an && 'risk' in an ? L.risk[an.risk] : ''
+        const riskLabel = !p.isDraft && an && 'risk' in an ? L.risk[an.risk] : ''
         add(
           Box({
             paddingLeft: INDENT,
@@ -7882,7 +7882,7 @@ export function register(on: On, options: PluginOptions) {
                 wrap: 'wrap',
                 dimColor: a.dim,
                 // The risk is on the row already (a draft's row says draft instead): the summary alone
-                children: [!p.isDraft && riskLabel && a.text.startsWith(riskLabel) ? a.text.slice(riskLabel.length).trimStart() : a.text],
+                children: [riskLabel && a.text.startsWith(riskLabel) ? a.text.slice(riskLabel.length).trimStart() : a.text],
               }),
             ],
           }),
@@ -8080,7 +8080,6 @@ export function register(on: On, options: PluginOptions) {
       const botMark = isBot(p) && !(tab === 'review' && review.some((r) => r.url === p.url))
       const lead = `${isSelected ? '▸' : ' '}${isUnread(p) ? '●' : ' '}${botMark ? '⚙' : ' '}`
       const titleWidth = Math.max(8, columns - textWidth(lead) - 1 - textWidth(b.text) - 1 - prWidth - 1 - textWidth(right))
-      const title = p.title
       const padTo = (text: string, width: number) => text + ' '.repeat(Math.max(0, width - textWidth(text)))
       return Box({
         key: `line-${p.url}`,
@@ -8100,7 +8099,7 @@ export function register(on: On, options: PluginOptions) {
             ...(isSelected && !focused ? { underline: true } : {}),
             dimColor: !focused,
             wrap: 'truncate-end',
-            children: [padTo(fit(title, titleWidth), titleWidth)],
+            children: [padTo(fit(p.title, titleWidth), titleWidth)],
           }),
           Text({ children: [' '] }),
           ...h.cells.map((color) => Text({ color, children: ['▰'] })),
