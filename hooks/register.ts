@@ -67,7 +67,7 @@ type PR = {
   requestEvents?: { nodes: (RequestEvent | null)[] }
 }
 
-// An open issue assigned to you. Drawn only, never sent to a model; the pane writes to it only to close or reopen it,
+// An open issue assigned to you or created by you. Drawn only, never sent to a model; the pane writes to it only to close or reopen it,
 // after y in its write panel (c)
 type Issue = {
   number: number
@@ -244,12 +244,13 @@ const ASKED_FRAGMENT = `fragment asked on PullRequest {
 }
 fragment who on RequestedReviewer { __typename ... on User { login } ... on Team { combinedSlug } }`
 
-const QUERY = `query($review: String!, $mine: String!, $approved: String!, $assigned: String!) {
+const QUERY = `query($review: String!, $mine: String!, $approved: String!, $assigned: String!, $created: String!) {
   viewer { login }
   review: search(query: $review, type: ISSUE, first: 50) { nodes { ...pr ...checks ...requested } }
   mine: search(query: $mine, type: ISSUE, first: 50) { nodes { ...pr ...checks ...reviewed ...asked } }
   approved: search(query: $approved, type: ISSUE, first: 50) { nodes { ...pr ...checks ...reviewed } }
   assigned: search(query: $assigned, type: ISSUE, first: 50) { issueCount nodes { ...issue } }
+  created: search(query: $created, type: ISSUE, first: 50) { issueCount nodes { ...issue } }
 }
 fragment issue on Issue {
   number title url createdAt updatedAt state
@@ -419,7 +420,8 @@ let showSnoozed = false
 // Snoozed PRs, hidden until they are updated, and the update each PR was last seen at (url → updatedAt), kept in $.store
 let snoozed: Record<string, string> = {}
 let seen: Record<string, string> | undefined
-// The same for assigned issues, kept apart so the issues already assigned when this came in count as seen
+// The same for issues (assigned to you or created by you), kept apart so the issues already listed when this came in
+// count as seen
 let seenIssues: Record<string, string> | undefined
 let selected = ''
 
@@ -433,6 +435,13 @@ let mine: PR[] = []
 let assigned: Issue[] = []
 // How many the search found: more than it returns when over its 50
 let assignedTotal = 0
+// Open issues created by you and not assigned to you (those are under assigned), most recently updated first
+let created: Issue[] = []
+// How many the search found, and how many it returned (before those assigned to you were taken out)
+let createdTotal = 0
+let createdReturned = 0
+// Whether the store already says the issues created by you were seeded as seen (see loadInboxState)
+let createdSeeded = false
 // Issues closed from the pane in this session, so c can reopen them
 let closedHere: Issue[] = []
 // PRs approved from the pane, until the search catches up: url → the PR as approved, and when (see fetchAll)
@@ -1048,9 +1057,15 @@ function visibleRows(g: Record<Group, PR[]>): PR[] {
   return groupStacks(rows.filter(matchesFilter))
 }
 
-// "50+" when the search found more issues than it returned
-function issuesCount(): string {
-  return `${assigned.length}${assignedTotal > assigned.length ? '+' : ''}`
+// Whether a search found more issues than it returned
+const assignedCut = () => assignedTotal > assigned.length
+const createdCut = () => createdTotal > createdReturned
+
+// Issues assigned to you, "50+" when the search found more than it returned, and on the tab those created by you
+// apart ("3 · 12 yours"): the ones you filed are not work handed to you, so the status line leaves them out
+function issuesCount(withCreated = false): string {
+  const yours = withCreated && created.length ? ` · ${created.length}${createdCut() ? '+' : ''} yours` : ''
+  return `${assigned.length}${assignedCut() ? '+' : ''}${yours}`
 }
 
 // Every word of the filter must appear in the PR's (or issue's) repository, number, title or author, or an issue's labels
@@ -1144,6 +1159,7 @@ async function fetchAll($: EngineInterface): Promise<void> {
     const approvedQuery = searchQuery('reviewed-by:@me -author:@me')
     // Newest updates first, so the 50 the search returns are the 50 most recently updated
     const assignedQuery = searchQuery('assignee:@me sort:updated-desc', 'issue')
+    const createdQuery = searchQuery('author:@me sort:updated-desc', 'issue')
     const r = await $.process.run([
       'gh',
       'api',
@@ -1158,6 +1174,8 @@ async function fetchAll($: EngineInterface): Promise<void> {
       `approved=${approvedQuery}`,
       '-f',
       `assigned=${assignedQuery}`,
+      '-f',
+      `created=${createdQuery}`,
     ])
     if (r.exitCode !== 0) throw new Error(r.stderr.trim() || `gh exited with code ${r.exitCode}`)
     const data = JSON.parse(r.stdout).data as {
@@ -1166,6 +1184,7 @@ async function fetchAll($: EngineInterface): Promise<void> {
       mine: { nodes: (PR | null)[] }
       approved?: { nodes: (PR | null)[] }
       assigned?: { issueCount?: number; nodes: (Issue | null)[] }
+      created?: { issueCount?: number; nodes: (Issue | null)[] }
     }
     viewer = data.viewer?.login ?? ''
     // Search results can contain nulls for PRs we have no access to, and, lagging, PRs merged or closed a moment ago
@@ -1177,13 +1196,22 @@ async function fetchAll($: EngineInterface): Promise<void> {
     settleApprovedHere(await $.clock.now(), found)
     // Asked again for a review, a PR is a review request, not an approved one
     approved = found.filter((p) => myApproval(p) !== undefined && !review.some((r) => r.url === p.url))
+    const openIssues = (nodes: (Issue | null)[] | undefined) =>
+      (nodes ?? [])
+        .filter((n): n is Issue => Boolean(n?.url) && (n?.state ?? 'OPEN') === 'OPEN')
+        .map(cleanIssue)
+        .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
     assignedTotal = Number(data.assigned?.issueCount) || 0
-    assigned = (data.assigned?.nodes ?? [])
-      .filter((n): n is Issue => Boolean(n?.url) && (n?.state ?? 'OPEN') === 'OPEN')
-      .map(cleanIssue)
-      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
-    // Reopened (here or elsewhere): listed again as assigned
-    closedHere = closedHere.filter((i) => !assigned.some((a) => a.url === i.url))
+    assigned = openIssues(data.assigned?.nodes)
+    const yours = openIssues(data.created?.nodes)
+    createdTotal = Number(data.created?.issueCount) || 0
+    createdReturned = yours.length
+    // One both assigned to you and created by you is listed once, as assigned
+    const assignedUrls = new Set(assigned.map((i) => i.url))
+    created = yours.filter((i) => !assignedUrls.has(i.url))
+    // Reopened (here or elsewhere): listed again
+    const listedUrls = new Set([...assignedUrls, ...created.map((i) => i.url)])
+    closedHere = closedHere.filter((i) => !listedUrls.has(i.url))
     // A description that could not be fetched is tried again after each fetch of the list
     for (const [url, a] of abouts) if (a.error) abouts.delete(url)
     for (const [url, a] of issueAbouts) if (a.error) issueAbouts.delete(url)
@@ -1228,10 +1256,21 @@ async function loadInboxState($: EngineInterface): Promise<void> {
   await $.store.delete('approved')
   await $.store.set('seen', seen)
   const storedIssues = await $.store.get('seenIssues')
-  const listed = new Map(assigned.map((i) => [i.url, i]))
+  const listed = new Map([...assigned, ...created].map((i) => [i.url, i]))
   seenIssues = storedIssues === undefined ? Object.fromEntries([...listed.values()].map((i) => [i.url, i.updatedAt])) : asMap(storedIssues)
-  // Over the search's 50, an issue left out of this fetch may still be open: its record stays until the list fits
-  if (assignedTotal <= assigned.length) seenIssues = Object.fromEntries(Object.entries(seenIssues).filter(([url]) => listed.has(url)))
+  // Issues created by you were not listed before: the first time they are, those already open count as seen too.
+  // A migration from before 2.1.0, read once per session
+  if (!createdSeeded) {
+    if ((await $.store.get('seenCreatedIssues')) === undefined) {
+      seenIssues = { ...Object.fromEntries(created.map((i) => [i.url, i.updatedAt])), ...seenIssues }
+      await $.store.set('seenCreatedIssues', true)
+    }
+    createdSeeded = true
+  }
+  // One you just filed is not news to you: it is unread only once something happens on it
+  for (const i of created) if (!(i.url in seenIssues) && i.updatedAt === i.createdAt) seenIssues[i.url] = i.updatedAt
+  // Over a search's 50, an issue left out of this fetch may still be open: its record stays until both lists fit
+  if (!assignedCut() && !createdCut()) seenIssues = Object.fromEntries(Object.entries(seenIssues).filter(([url]) => listed.has(url)))
   await $.store.set('seenIssues', seenIssues)
   for (const key of await $.store.keys()) {
     if (!key.startsWith('review:')) continue
@@ -4670,27 +4709,40 @@ async function fetchIssueAbout($: EngineInterface, issue: Issue): Promise<void> 
   $.ui.invalidate('ui.render')
 }
 
-// The issues tab in screen order (what j/k move through): a sub-issue right under its parent when the parent is listed
-// too, in the parent's place; then those closed here. depth and last draw the rail
-function issueRows(): Issue[] & { depth?: Map<string, number>; last?: Set<string> } {
-  const listed = assigned.filter(matchesFilter)
-  const listedUrls = new Set(listed.map((i) => i.url))
+// The groups of the issues tab, in screen order
+type IssueGroup = 'assigned' | 'created' | 'closed'
+
+// The issues tab in screen order (what j/k move through): those assigned to you, then those created by you, then those
+// closed here. In each of the first two, a sub-issue goes right under its parent when the parent is in the same group,
+// in the parent's place. depth and last draw the rail, group says which heading a row is under
+function issueRows(): Issue[] & { depth?: Map<string, number>; last?: Set<string>; group?: Map<string, IssueGroup> } {
   const depth = new Map<string, number>()
   const last = new Set<string>()
+  const group = new Map<string, IssueGroup>()
   const ordered: Issue[] = []
-  const place = (i: Issue, d: number) => {
-    if (depth.has(i.url)) return
-    depth.set(i.url, d)
-    ordered.push(i)
-    const kids = listed.filter((c) => c.parent?.url === i.url && !depth.has(c.url))
-    const end = kids.at(-1)
-    if (end) last.add(end.url)
-    for (const c of kids) place(c, d + 1)
+  for (const [key, list] of [
+    ['assigned', assigned],
+    ['created', created],
+  ] as const) {
+    const listed = list.filter(matchesFilter)
+    const listedUrls = new Set(listed.map((i) => i.url))
+    const place = (i: Issue, d: number) => {
+      if (depth.has(i.url)) return
+      depth.set(i.url, d)
+      group.set(i.url, key)
+      ordered.push(i)
+      const kids = listed.filter((c) => c.parent?.url === i.url && !depth.has(c.url))
+      const end = kids.at(-1)
+      if (end) last.add(end.url)
+      for (const c of kids) place(c, d + 1)
+    }
+    for (const i of listed) if (!(i.parent && listedUrls.has(i.parent.url))) place(i, 0)
+    // Parents that loop (GitHub does not allow it) are still listed, each once
+    for (const i of listed) place(i, 0)
   }
-  for (const i of listed) if (!(i.parent && listedUrls.has(i.parent.url))) place(i, 0)
-  // Parents that loop (GitHub does not allow it) are still listed, each once
-  for (const i of listed) place(i, 0)
-  return Object.assign([...ordered, ...closedHere.filter(matchesFilter)], { depth, last })
+  const closed = closedHere.filter(matchesFilter)
+  for (const i of closed) group.set(i.url, 'closed')
+  return Object.assign([...ordered, ...closed], { depth, last, group })
 }
 
 // The pane closes: those closed here are no longer listed, nor known to the snapshot, so one assigned to you again
@@ -4703,9 +4755,20 @@ async function forgetClosedHere($: EngineInterface): Promise<void> {
   if (snapshot?.assigned) await $.store.set('snapshot', { ...snapshot, assigned: snapshot.assigned.filter((url) => !urls.has(url)) })
 }
 
-// An issue on the issues tab: assigned to you, or closed from the pane in this session
+// An issue on the issues tab: assigned to you, created by you, or closed from the pane in this session
 function findIssue(url: string): Issue | undefined {
-  return assigned.find((i) => i.url === url) ?? closedHere.find((i) => i.url === url)
+  return assigned.find((i) => i.url === url) ?? created.find((i) => i.url === url) ?? closedHere.find((i) => i.url === url)
+}
+
+// Beside a sub-issue: whether it is also on the issues tab
+function listedNote(url: string): string {
+  return assigned.some((a) => a.url === url) ? '(assigned to you)' : created.some((c) => c.url === url) ? '(created by you)' : ''
+}
+
+// Beside a parent: "(parent · assigned to you)" when it is on the issues tab too
+function parentNote(url: string): string {
+  const listed = listedNote(url)
+  return listed ? `(parent · ${listed.slice(1, -1)})` : '(parent)'
 }
 
 // Sub-issues, open ones first, as they are what is left
@@ -7366,7 +7429,7 @@ export function register(on: On, options: PluginOptions) {
           }),
         ],
       }),
-      ...(issue.parent ? [refLine(issue.parent, '↑', NEON.violet, '(parent)')] : []),
+      ...(issue.parent ? [refLine(issue.parent, '↑', NEON.violet, parentNote(issue.parent.url))] : []),
     ])
     const view = plainText ? 'y: markdown' : 'y: plain text'
     if (!about || about.error) {
@@ -7392,12 +7455,7 @@ export function register(on: On, options: PluginOptions) {
             `${done} of ${about.subs.length} closed${total > about.subs.length ? ` · first ${about.subs.length} of ${total}` : ''}`,
           ),
           ...openFirst(about.subs).map((x) =>
-            refLine(
-              x,
-              x.state === 'CLOSED' ? '✓' : '○',
-              x.state === 'CLOSED' ? NEON.green : NEON.muted,
-              assigned.some((a) => a.url === x.url) ? '(assigned to you)' : '',
-            ),
+            refLine(x, x.state === 'CLOSED' ? '✓' : '○', x.state === 'CLOSED' ? NEON.green : NEON.muted, listedNote(x.url)),
           ),
         ])
       }
@@ -7636,7 +7694,7 @@ export function register(on: On, options: PluginOptions) {
     const helpLabel = showHelp ? 'close help' : '?'
     const reviewTabLabel = `${tab === 'review' ? '◉ ' : ''}to review ${g.humans.length}${g.bots.length ? ` ⚙${g.bots.length}` : ''}`
     const mineTabLabel = `${tab === 'mine' ? '◉ ' : ''}my PRs ${mine.length}`
-    const issuesTabLabel = `${tab === 'issues' ? '◉ ' : ''}issues ${issuesCount()}`
+    const issuesTabLabel = `${tab === 'issues' ? '◉ ' : ''}issues ${issuesCount(true)}`
     const tabButton = (name: typeof tab, label: string, hotkey: string) =>
       Button({
         key: `tab-${name}`,
@@ -7906,7 +7964,7 @@ export function register(on: On, options: PluginOptions) {
           ? 'still fetching your issues'
           : filterText
             ? 'no issue matches the filter · f: change it'
-            : 'no issues assigned to you'
+            : 'no open issues assigned to you or created by you'
         if (k === 'o')
           return selected && findIssue(selected)
             ? "o: this issue's link is not a plain https:// GitHub link, so it does not open"
@@ -8458,7 +8516,7 @@ export function register(on: On, options: PluginOptions) {
     const selectedPr = rows.find((p) => p.url === selected)
     // Each group after the first opens with a heading row: bots, approved by you, stale, snoozed
     // With a filter, a heading counts what matches out of all: "bots 1/3"
-    const count = (list: PR[]) => (filterText ? `${list.filter(matchesFilter).length}/${list.length}` : `${list.length}`)
+    const count = (list: (PR | Issue)[]) => (filterText ? `${list.filter(matchesFilter).length}/${list.length}` : `${list.length}`)
     const sectionOf = (q: PR): string => {
       // A stacked PR goes under its stack's heading
       const p = findPr(stackLead.get(q.url) ?? q.url) ?? q
@@ -8536,7 +8594,7 @@ export function register(on: On, options: PluginOptions) {
           'the list',
           [
             ['j / k', 'next / previous row'],
-            ['1 / 2 / 3', 'To review / My PRs / Issues (assigned to you) · h / l: the tab to the left / right'],
+            ['1 / 2 / 3', 'To review / My PRs / Issues (assigned to you, then created by you) · h / l: the tab to the left / right'],
             ['b', 'AI review every bot PR not reviewed yet, then approve those that passed in one panel (y) · b again stops'],
             ['z', 'show or hide snoozed PRs'],
             ['f', 'filter by repository, number, title or @author (and label on issues) · empty clears it'],
@@ -8566,7 +8624,7 @@ export function register(on: On, options: PluginOptions) {
             ['y', 'its description and comments as markdown, or as plain text'],
             ['n', 'next page of its details, when they do not fit · the wheel and PgUp / PgDn scroll them both ways'],
             ['●', 'updated since you last selected it'],
-            ['SUB', 'sub-issues closed / all · ├ └ under a listed parent · ↑#12 the parent, not listed'],
+            ['SUB', 'sub-issues closed / all · ├ └ under its parent in the same group · ↑#12 its parent, in the other group or not listed'],
             ['TALK / UPD', 'comments · time since the last update'],
           ],
         ],
@@ -8779,16 +8837,26 @@ export function register(on: On, options: PluginOptions) {
           ],
         })
       }
-      const closedHeading = (n: number) =>
-        Box({
+      // Each group opens with a heading row. With a filter, it counts what matches out of all: "created by you 1/3"
+      const headings: Record<IssueGroup, [string, string]> = {
+        assigned: [`assigned to you ${count(assigned)}${assignedCut() ? '+' : ''}`, ''],
+        created: [`created by you ${count(created)}${createdCut() ? '+' : ''}`, ''],
+        closed: [`✓ closed here ${closed.length}`, 'c: reopen'],
+      }
+      const groupHeading = (group: IssueGroup) => {
+        const [name, note] = headings[group]
+        const label = `── ${name} ${note ? `· ${note} ` : ''}`
+        return Box({
+          key: `issue-group-${group}`,
           flexDirection: 'row',
           children: [
             Text({ color: NEON.rule, children: ['── '] }),
-            Text({ color: NEON.violet, bold: true, children: [`✓ closed here ${n} `] }),
-            Text({ color: NEON.muted, children: ['· c: reopen '] }),
-            Text({ color: NEON.rule, children: ['─'.repeat(Math.max(0, columns - textWidth(`── ✓ closed here ${n} · c: reopen `)))] }),
+            Text({ color: NEON.violet, bold: true, children: [`${name} `] }),
+            ...(note ? [Text({ color: NEON.muted, children: [`· ${note} `] })] : []),
+            Text({ color: NEON.rule, children: ['─'.repeat(Math.max(0, columns - textWidth(label)))] }),
           ],
         })
+      }
 
       // The details of the selected issue: what it is, its parent, its description and sub-issues, then the latest
       // comments, as markdown (y: as written). Paged with n, the wheel and the page keys when they do not fit
@@ -8835,7 +8903,7 @@ export function register(on: On, options: PluginOptions) {
             ],
           })
         }
-        if (i.parent) add(refRow('↑', NEON.violet, i.parent, '(parent)'), 1)
+        if (i.parent) add(refRow('↑', NEON.violet, i.parent, parentNote(i.parent.url)), 1)
         const section = (name: string, note: string) =>
           add(
             Box({
@@ -8879,15 +8947,7 @@ export function register(on: On, options: PluginOptions) {
             const more = subs.total > about.subs.length ? ` · first ${about.subs.length} of ${subs.total}` : ''
             section('Sub-issues', `${about.subs.length - open} of ${about.subs.length} closed${more}`)
             for (const x of openFirst(about.subs))
-              add(
-                refRow(
-                  x.state === 'CLOSED' ? '✓' : '○',
-                  x.state === 'CLOSED' ? NEON.green : NEON.muted,
-                  x,
-                  assigned.some((a) => a.url === x.url) ? '(assigned to you)' : '',
-                ),
-                1,
-              )
+              add(refRow(x.state === 'CLOSED' ? '✓' : '○', x.state === 'CLOSED' ? NEON.green : NEON.muted, x, listedNote(x.url)), 1)
           }
           if (about.prs.length > 0 || about.prsCut) {
             const closing = about.prs.filter((x) => x.closes).length
@@ -8952,8 +9012,19 @@ export function register(on: On, options: PluginOptions) {
           : issue
             ? 1
             : 0
-      const headingLines = closed.length > 0 ? 1 : 0
-      const capLines = assignedTotal > assigned.length ? 1 : 0
+      const groupOf = (i: Issue): IssueGroup => issues.group?.get(i.url) ?? 'closed'
+      const headingLines = new Set(issues.map(groupOf)).size
+      // Over a search's 50: say how many are left out, and where to see them
+      const cuts = [
+        ...(assignedCut() ? [`${assigned.length} of ${assignedTotal} assigned`] : []),
+        ...(createdCut()
+          ? [
+              `${createdReturned} of ${createdTotal} created${createdReturned > created.length ? ` (${createdReturned - created.length} under assigned)` : ''}`,
+            ]
+          : []),
+      ]
+      const cutText = cuts.length > 0 ? `  ${cuts.join(' · ')}, latest first · org_filter or github.com for the rest` : ''
+      const capLines = cutText ? wrappedLines(cutText, columns) : 0
       const issueChrome = topLines + 2 + 1 + (issue ? 1 : 0) + headingLines + capLines + issueFooterLines
       const listMin = Math.min(issues.length, 3) + (issues.length > 3 ? 1 : 0)
       const listShare = Math.max(listMin, Math.min(issues.length, Math.ceil((paneLimit - issueChrome) / 2)))
@@ -8984,25 +9055,16 @@ export function register(on: On, options: PluginOptions) {
           : error
             ? '  Nothing to show until GitHub answers · r: retry'
             : org
-              ? `  No open issues assigned to you in ${org} · org_filter in /config`
-              : '  No open issues are assigned to you'
+              ? `  No open issues assigned to you or created by you in ${org} · org_filter in /config`
+              : '  No open issues are assigned to you or created by you'
       const issueList: El[] = []
-      for (const i of shownIssues) {
-        if (isClosed(i) && (issueList.length === 0 || !isClosed(shownIssues[shownIssues.indexOf(i) - 1] as Issue)))
-          issueList.push(closedHeading(closed.length))
+      for (const [k, i] of shownIssues.entries()) {
+        const group = groupOf(i)
+        if (k === 0 || groupOf(shownIssues[k - 1] as Issue) !== group) issueList.push(groupHeading(group))
         issueList.push(issueRow(i))
       }
       if (issues.length === 0) issueList.push(Text({ dimColor: true, children: [empty] }))
-      // Over the search's 50: say how many are left out, and where to see them
-      if (assignedTotal > assigned.length)
-        issueMore.push(
-          Text({
-            dimColor: true,
-            children: [
-              `  ${assigned.length} of ${assignedTotal} shown, most recently updated first · org_filter or github.com for the rest`,
-            ],
-          }),
-        )
+      if (cutText) issueMore.push(Text({ dimColor: true, children: [cutText] }))
       const issueHead = Text({
         color: NEON.muted,
         children: [`   ${'ISSUE'.padEnd(issueWidth)} TITLE`.padEnd(Math.max(0, columns - 1 - RIGHT)) + `   SUB TALK  UPD`],
