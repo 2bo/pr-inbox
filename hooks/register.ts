@@ -2209,8 +2209,8 @@ function sessionBusy(s: PrSession): string {
 function sessionNote(pr: PR): string {
   const s = prSessions.get(pr.url)
   if (!s) return ''
-  const notes = [s.made ? '' : 'worked on it', sessionBusy(s)].filter(Boolean)
-  return `session ${sessionName(s)}${notes.length > 0 ? ` (${notes.join(' · ')})` : ''}`
+  const notes = [s.made ? '' : 'last worked on it', sessionBusy(s)].filter(Boolean)
+  return `session ${sessionName(s)}${notes.length > 0 ? ` (${notes.join(', ')})` : ''}`
 }
 
 function noSessionWhy(pr: PR): string {
@@ -2225,7 +2225,7 @@ let telling: { pr: PR; session: PrSession; text: string; failed?: string } | und
 // from one opened again
 const sendingTo = new Set<string>()
 
-// t: type a request for the session that made your PR. One open now is left to you (writing to it there keeps it
+// t: type a request for the session that made your PR, or last worked on it. One open now is left to you (writing to it there keeps it
 // one conversation), and so is this one
 async function tellSession($: EngineInterface, pr: PR): Promise<void> {
   if (telling?.pr.url === pr.url) {
@@ -2244,7 +2244,7 @@ async function tellSession($: EngineInterface, pr: PR): Promise<void> {
     return
   }
   if (s.id === thisSession) {
-    $.ui.toast(`This session made ${askLabel(pr)} · p: put its link in the prompt`, { timeoutMs: 6000 })
+    $.ui.toast(`This session ${s.made ? 'made' : 'last worked on'} ${askLabel(pr)} · p: put its link in the prompt`, { timeoutMs: 6000 })
     return
   }
   await refreshOpenSessions($)
@@ -8607,7 +8607,7 @@ export function register(on: On, options: PluginOptions) {
             ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · y in it sends'],
             [
               't',
-              'ask the Claude Code session that made it, or last worked on it (“session …” on the row, “worked on it” when it did not make it): type a request, Enter resumes that session in the background with it (claude --bg --resume), with its own permissions · a request that could not go stays in the field · one open now: write to it there',
+              'ask the Claude Code session that made it, or last worked on it (“session …” on the row, “last worked on it” when it did not make it): type a request, Enter resumes that session in the background with it (claude --bg --resume), with its own permissions · a request that could not go stays in the field · one open now: write to it there',
             ],
           ],
         ],

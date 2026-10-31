@@ -5566,11 +5566,11 @@ const sessionRows = (made = true) =>
     `${PROJECTS}/${OTHER_SESSION}.jsonl\0{"type":"custom-title","customTitle":"someone later"`,
   ].join('\n')
 
-function sessionStubs(on: TestOn, open: boolean, made = true) {
+function sessionStubs(on: TestOn, open: boolean, made = true, self = 'this-session') {
   on('fs.list', () => ({ value: [{ name: '4242.json', kind: 'file', size: 1, mtimeMs: 0, isLink: false }] }) as never)
   on('fs.read', () => ({ value: JSON.stringify({ pid: 4242, sessionId: open ? SESSION : OTHER_SESSION, name: 'app-3' }) }) as never)
   on('fs.exists', () => ({ value: true }) as never)
-  on('session.id', () => ({ value: 'this-session' }) as never)
+  on('session.id', () => ({ value: self }) as never)
   return stubs(on, {
     locale: { HOME: '/home/me' },
     run: (argv) => {
@@ -5628,8 +5628,18 @@ test('a session that only pushed to your PR is drawn as having worked on it; the
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  expect(await ui.find({ type: 'Text', text: /session “someone later” \(worked on it · open: write to it there\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /session “someone later” \(last worked on it, open: write to it there\)/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /login fix/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('t on a PR this session only pushed to says so: last worked on, not made', async ($, on) => {
+  const s = sessionStubs(on, true, false, OTHER_SESSION)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-session' })
+  expect(s.toasts.at(-1)).toMatch(/^This session last worked on app#\d+ · p: put its link in the prompt$/)
   await ui.unmount()
 })
 
