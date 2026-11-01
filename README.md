@@ -236,6 +236,10 @@ pnpm run check          # validate (--strict) → tsc → Biome → claude plugi
 
 Tests live in `tests/*.test.ts`. GitHub, the model, the store and the environment are all stubbed, so tests make no network calls.
 
+## Disclaimer
+
+pr-inbox is provided as is, without warranty of any kind. You use it at your own risk: the authors are not responsible for anything that results from using it, including approvals, merges, pushes, comments and other writes it makes on your behalf, what it sends to a model, and decisions taken on the strength of its analysis or AI review. Check what each panel says it will send before you press `y`, and know what runs without one: with `ai_approve` on `auto`, a passed AI review approves PRs from members and collaborators of the repository and from Dependabot or Renovate on its own (anyone else and forks are left to `a`), and the turns started by `p` and `c` run with your session's permissions (see [Security](#security)). See [LICENSE](LICENSE) for the full terms.
+
 ## License
 
 MIT
