@@ -180,7 +180,7 @@ Change them with `/config` or `/plugin configure`.
 | `desktop_notify` | review requests | OS notifications for `review requests`, `all` (also approvals, changes requested and CI failures on your PRs, and issues newly assigned to you) or `off`. Uses `osascript` on macOS and `notify-send` on Linux. On macOS, allow notifications for Script Editor in System Settings if none appear |
 | `analysis` | auto | When review requests are analyzed: `auto` (from startup), `when opened` (once you open `/pr-inbox` in the session) or `off` |
 | `ai_approve` | confirm | When the AI review passes: `confirm` (the row says so, and `a` approves) or `auto` |
-| `approve_comment` | (empty) | The comment of an approval you make with `a` or `b`, such as `LGTM`, shown in the approve panel before `y` and posted as written on each approval (an @mention in it notifies). Empty sends none. Approvals by `ai_approve` `auto` keep their own comment |
+| `approve_comment` | (empty) | The comment of an approval you make with `a` or `b`, such as `LGTM`, shown in the approve panel before `y` and posted on each approval on one line, with control and invisible characters removed, exactly as the panel shows it (an @mention in it notifies). Empty sends none. Approvals by `ai_approve` `auto` keep their own comment |
 | `fix_push` | auto | A fix of your PR (`c`): `auto` pushes its commits to the PR's branch when the fix turn ends on its own (never forced), `ask` waits for `y` in the push panel |
 | `auto_review` | off | Run the AI review on its own when a review request arrives or gets new commits: `bots` (bot PRs only), `review requests` (all) or `off` |
 | `theme` | dark | `dark` (neon) or `light` (deeper colors for a light terminal) |

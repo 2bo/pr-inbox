@@ -470,6 +470,20 @@ test(
   },
 )
 
+for (const [what, options] of [
+  ['{choice} in it', { approve_comment: 'LGTM {choice} ✓' }],
+  ['glyphs ascii', { approve_comment: 'LGTM {choice} ✓', glyphs: 'ascii' }],
+] as const)
+  test(`approve_comment is drawn as it is sent with ${what}`, { options }, async ($, on) => {
+    const s = stubs(on, { approve: true })
+    await start($, s.clock)
+    const ui = await $.ui.mount(PANE)
+    await pressApprove(ui, s)
+    expect(s.panels.at(-1)).toContain('with the comment "LGTM {choice} ✓"')
+    expect(approvedAt(s)).toEqual([[...APPROVE_11, '-f', 'body=LGTM {choice} ✓']])
+    await ui.unmount()
+  })
+
 test(
   'approve_comment is cleaned once: the panel shows exactly what y sends',
   { options: { approve_comment: 'LGTM\nThanks\u001b[31m\u202e' } },

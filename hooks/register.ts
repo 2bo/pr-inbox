@@ -1730,7 +1730,8 @@ function sendsText(p: WritePanel): string {
     return `1 review on ${at} as ${chosenWord(p)}: ${placed} on their lines, ${chosen.length - placed} in the body`
   }
   const own = p.choices.find((c) => c.key === p.chosen)?.sends
-  return own ?? p.sends.replace('{choice}', chosenWord(p))
+  // Only a panel with choices has a {choice} to fill: elsewhere the text is sent as it is (an approve_comment)
+  return own ?? (p.choices.length ? p.sends.replace('{choice}', chosenWord(p)) : p.sends)
 }
 
 // The word of the choice picked ('' before one is)
@@ -6779,7 +6780,8 @@ export function register(on: On, options: PluginOptions) {
           flexDirection: 'row',
           children: [
             Text({ color: NEON.muted, children: [p.sendsLead] }),
-            Text({ color: NEON.cyan, bold: true, wrap: 'wrap', children: [sendsText(p)] }),
+            // The approve_comment as it goes to GitHub, never through glyphs ascii
+            (p.write.kind === 'approve' ? kit.Text : Text)({ color: NEON.cyan, bold: true, wrap: 'wrap', children: [sendsText(p)] }),
           ],
         })
     // The choices, each on its number key: the one picked marked, one not offered here dim (its key says why)

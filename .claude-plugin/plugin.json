@@ -110,7 +110,7 @@
     "approve_comment": {
       "type": "string",
       "title": "Approve comment",
-      "description": "The comment of an approval you make with a or b, such as LGTM. The approve panel shows it before y; it is posted as written on each approval (an @mention in it notifies). Empty sends none. Approvals by ai_approve auto keep their own comment, saying the AI review approved on its own",
+      "description": "The comment of an approval you make with a or b, such as LGTM. The approve panel shows it before y; it is posted on each approval on one line, with control and invisible characters removed, exactly as the panel shows it (an @mention in it notifies). Empty sends none. Approvals by ai_approve auto keep their own comment, saying the AI review approved on its own",
       "default": ""
     },
     "auto_review": {
