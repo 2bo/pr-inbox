@@ -652,7 +652,8 @@ function byRequestedAt(a: PR, b: PR): number {
 
 // Sort my PRs into action / ready / waiting / stale
 function classify(pr: PR, now: number): { group: 'action' | 'ready' | 'waiting' | 'stale'; reasons: string[] } {
-  const reasons = blockers(pr)
+  // Drafts held for you (g) need you too, though they do not block the merge
+  const reasons = [...blockers(pr), ...(heldFor(pr).length > 0 ? ['held drafts'] : [])]
   if (reasons.length > 0) return { group: 'action', reasons }
   if (now - Date.parse(pr.updatedAt) > cfg.stale_days * DAY) return { group: 'stale', reasons }
   if (readyToMerge(pr)) return { group: 'ready', reasons }
@@ -1190,6 +1191,7 @@ const THREADS_QUERY = `query($ids: [ID!]!) {
 async function readThreads($: EngineInterface): Promise<void> {
   const ids = mine.filter((p) => (p.reviewThreads?.totalCount ?? 0) > 0 && typeof p.id === 'string').map((p) => p.id as string)
   const found = new Map<string, OpenThread[]>()
+  const capped = new Set<string>()
   // Held drafts are dropped only against threads read this time
   let known = true
   if (ids.length > 0 && viewer) {
@@ -1205,7 +1207,10 @@ async function readThreads($: EngineInterface): Promise<void> {
       for (const n of nodes) {
         const pr = mine.find((p) => p.id === n?.id)
         const threads = pr ? waitingThreads(n?.threads?.nodes ?? []) : []
-        if (pr && threads.length > 0) found.set(pr.url, threads)
+        if (!pr || threads.length === 0) continue
+        found.set(pr.url, threads.slice(0, MAX_REPLIES))
+        // More than one turn takes, or more than the query reads (first: 50): g says so
+        if (threads.length > MAX_REPLIES || (pr.reviewThreads?.totalCount ?? 0) > 50) capped.add(pr.url)
       }
       known = r.exitCode === 0
     } catch {
@@ -1213,6 +1218,8 @@ async function readThreads($: EngineInterface): Promise<void> {
     }
   }
   threadsByPr = found
+  threadsCapped = capped
+  threadsUnknown = !known
   for (const [url, held] of known ? heldReplies : []) {
     const open = new Set(openThreads(held.pr).map((t) => t.id))
     const replies = held.replies.filter((r) => open.has(r.thread.id))
@@ -1697,6 +1704,10 @@ type WritePanel = {
   movedNote: string
   // A PR that moved is only a warning (y still goes ahead, as a gh stack merge is not pinned), not a refusal
   movedWarns?: boolean
+  // The rows are only to read (j/k shows each in full): nothing to check, y takes them all
+  browse?: boolean
+  // y is not offered here, and why (another fix runs): drawn dim with its tag, as a refused choice is
+  refused?: { why: string; tag: string }
   // Shown while the write runs
   progress: string
   // The write y does (see runWrite)
@@ -1738,6 +1749,10 @@ function openPanel(
 // y: the panel's write, once; it closes when the write is done, and stays open with the reason when it is not
 async function sendPanel($: EngineInterface, p: WritePanel): Promise<void> {
   if (p.sending || writePanel !== p) return
+  if (p.refused) {
+    $.ui.toast(`y: ${p.refused.why}`, { timeoutMs: 4000 })
+    return
+  }
   const need = panelNeed(p)
   if (need) {
     $.ui.toast(`y: ${need} first`, { timeoutMs: 4000 })
@@ -1771,7 +1786,7 @@ async function sendPanel($: EngineInterface, p: WritePanel): Promise<void> {
 
 // What y still needs ('' when nothing): a row checked, then a choice picked
 function panelNeed(p: WritePanel): string {
-  if (p.items.length > 0 && !p.items.some((i) => i.checked))
+  if (p.items.length > 0 && !p.browse && !p.items.some((i) => i.checked))
     return `check ${p.write.kind === 'held' ? 'a draft' : 'a finding'} (x or its number)`
   if (p.choices.length > 0 && !p.chosen) return pickText(p)
   return ''
@@ -1802,7 +1817,7 @@ function sendsText(p: WritePanel): string {
     const checked = p.write.replies.filter((_, i) => p.items[i]?.checked)
     const rest = p.items.length - checked.length
     const { pr } = p.write
-    return `${checked.length === 1 ? '1 draft' : `${checked.length} drafts`} as written to their threads on ${pr.repository.nameWithOwner}#${pr.number}: ${checked.map((r) => threadPlace(r.thread)).join(', ')}${rest ? ` (${rest} stay held)` : ''}`
+    return `${checked.length === 1 ? '1 draft' : `${checked.length} drafts`} as written to their threads on ${pr.repository.nameWithOwner}#${pr.number}: ${checked.map((r) => threadPlace(r.thread)).join(', ')}${rest ? ` (${rest} ${rest === 1 ? 'stays' : 'stay'} held)` : ''}`
   }
   const own = p.choices.find((c) => c.key === p.chosen)?.sends
   return own ?? p.sends.replace('{choice}', chosenWord(p))
@@ -5188,7 +5203,7 @@ const ASCII: Record<string, string> = {
   '◌': '~',
   '⟳': '@',
   '⇡': '^',
-  '⚑': '!',
+  '⚑': '&',
   '⇢': '>',
   '↻': 'R',
   '✓': 'v',
@@ -5293,7 +5308,10 @@ function badgeOf(pr: PR): Cell {
   }
   if (isSnoozed(pr)) return { text: '⏸ SNZ ' }
   if (fixJob?.pr.url === pr.url) return { text: '⟳ WIP ', color: NEON.cyan, bold: true }
-  if (fixReady.has(pr.url)) return { text: '⇡ PUSH', color: NEON.cyan, bold: true }
+  const ready = fixReady.get(pr.url)
+  if (ready) return { text: repliesOnly(ready) ? '⇡ POST' : '⇡ PUSH', color: NEON.cyan, bold: true }
+  // Drafts held for you (g): they wait on you before anything else on the PR
+  if (heldFor(pr).length > 0) return { text: '⚑ YOU ', color: NEON.yellow, bold: true }
   const { group, reasons } = classify(pr, fetchedAt || Date.now())
   // Waiting on reviews with nobody asked: ask someone (w)
   if (needsReviewer(pr, fetchedAt || Date.now())) return { text: '○ ASK ', color: NEON.yellow, bold: true }
@@ -6005,9 +6023,9 @@ const FIX_TASKS: Record<FixTask, { verb: string; doing: string; what: string; ke
   ci: { verb: 'fix CI', doing: 'fixing the CI', what: 'CI', key: 'c', again: 'c, 1, y', replies: false },
   conflict: { verb: 'fix conflict', doing: 'resolving the conflict', what: 'conflict', key: 'c', again: 'c, 3, y', replies: false },
   comments: {
-    verb: 'address comments',
-    doing: 'addressing the review comments',
-    what: 'review comments',
+    verb: 'address threads',
+    doing: 'addressing the review threads',
+    what: 'review threads',
     key: 'g',
     again: 'g, y',
     replies: true,
@@ -6048,6 +6066,9 @@ const MAX_REPLIES = 30
 const REPLY_MAX = 2000
 // Your PRs' threads that wait on you, by PR URL: worked out once per fetch (readThreads), only for your own PRs
 let threadsByPr = new Map<string, OpenThread[]>()
+// PRs with more threads waiting than one turn takes (MAX_REPLIES) or the query reads, and whether the last read failed
+let threadsCapped = new Set<string>()
+let threadsUnknown = false
 function openThreads(pr: PR): OpenThread[] {
   return threadsByPr.get(pr.url) ?? []
 }
@@ -6063,7 +6084,7 @@ function waitingThreads(nodes: (ReviewThread | null)[]): OpenThread[] {
     const path = clean(typeof t.path === 'string' ? t.path : '')
     out.push({ id: t.id, path, line, outdated: t.isOutdated === true, by, bot: isBot(author) })
   }
-  return out.slice(0, MAX_REPLIES)
+  return out
 }
 const threadPlace = (t: OpenThread) => `${t.path || 'the PR'}${t.line ? `:${t.line}` : ''}${t.outdated ? ' (outdated)' : ''}`
 
@@ -6471,21 +6492,46 @@ async function afterFix($: EngineInterface, job: FixJob, end: FixEnd = 'done'): 
   const all = end === 'early' ? [] : await readReplies($, job)
   const hold = all.filter(isHeld)
   if (hold.length > 0) heldReplies.set(job.pr.url, { pr: job.pr, replies: hold })
-  const why = await settleFix(
-    $,
-    job,
-    end,
-    all.filter((r) => !isHeld(r)),
-  )
-  // Drafts held for you are said last, after what was pushed or posted; nothing opens for them
-  if (hold.length > 0)
-    $.ui.toast(
-      glyph(
-        `⚑ ${needYou(hold.length)} on ${job.pr.repository.nameWithOwner}#${job.pr.number}: Claude left a draft for each, not posted · ${paneOpen ? 'g' : '/pr-inbox, then g'}: read them`,
-      ),
-      { timeoutMs: 15000 },
+  // A comments fix that ended says what happened in one toast: each step's phrase, then the drafts held for you
+  // (nothing opens for them). Each step's own line stays in the transcript
+  const summed = FIX_TASKS[job.task].replies && end !== 'early'
+  if (summed) tally = []
+  let parts: Tally = []
+  let why = ''
+  try {
+    why = await settleFix(
+      $,
+      job,
+      end,
+      all.filter((r) => !isHeld(r)),
     )
+  } finally {
+    if (summed) {
+      parts = tally ?? []
+      tally = undefined
+    }
+  }
+  if (summed) {
+    const done = parts.filter((t) => t.ok).map((t) => t.phrase)
+    const waits = parts.filter((t) => !t.ok).map((t) => t.phrase)
+    const n = hold.length
+    const held = n ? `⚑ ${needYou(n)} · ${paneOpen ? 'g' : '/pr-inbox, then g'}: read ${n === 1 ? 'it' : 'them'}` : ''
+    const said = [done.join(', '), ...waits, held].filter(Boolean).join(' · ')
+    if (said)
+      $.ui.toast(glyph(`${waits.length || n ? '⇡' : '✦'} ${job.pr.repository.nameWithOwner}#${job.pr.number}: ${said}`), {
+        timeoutMs: 15000,
+      })
+  }
   return why
+}
+
+// While a comments fix's end is summed up (afterFix), what each step said: its phrase, and whether it went
+type Tally = { phrase: string; ok: boolean }[]
+let tally: Tally | undefined
+// A step's toast, or its phrase in the summary when one is being made
+function tell($: EngineInterface, toast: string, step: { phrase: string; ok: boolean; timeoutMs: number }): void {
+  if (tally) tally.push({ phrase: step.phrase, ok: step.ok })
+  else $.ui.toast(toast, { timeoutMs: step.timeoutMs })
 }
 
 // What the turn left: pushed (fix_push auto) or ready for the push panel, with the replies not held
@@ -6507,11 +6553,12 @@ async function settleFix($: EngineInterface, job: FixJob, end: FixEnd, replies: 
     const noReply = FIX_TASKS[job.task].replies
       ? ` and no reply to post${dropped ? ` (${repliesWord(dropped)} said fixed with no commit, left out)` : ''}`
       : ''
-    $.ui.toast(
+    tell(
+      $,
       SHA.test(merging)
         ? `No new commit for ${askLabel(job.pr)}: a merge of ${clean(job.into)} is left unfinished in ${job.dir} · c, 3, y: Claude goes on from it`
         : `No new commit for ${askLabel(job.pr)} in ${job.dir}${noReply}`,
-      { timeoutMs: 8000 },
+      { phrase: `no new commit${noReply}`, ok: true, timeoutMs: 8000 },
     )
     return ''
   }
@@ -6536,12 +6583,8 @@ async function settleFix($: EngineInterface, job: FixJob, end: FixEnd, replies: 
       : ''
   const waiting = replies.length ? ` (${repliesWord(replies.length)} wait for the push)` : ''
   const { key } = FIX_TASKS[job.task]
-  $.ui.toast(
-    glyph(
-      `⇡ fix ready for ${full}: ${how}${plural(commits.length, 'commit')} not pushed${waiting} · ${paneOpen ? key : `/pr-inbox, then ${key}`}: push panel`,
-    ),
-    { timeoutMs: 15000 },
-  )
+  const left = `${how}${plural(commits.length, 'commit')} not pushed${waiting} · ${paneOpen ? key : `/pr-inbox, then ${key}`}: push panel`
+  tell($, glyph(`⇡ fix ready for ${full}: ${left}`), { phrase: left, ok: false, timeoutMs: 15000 })
   return ''
 }
 
@@ -6558,13 +6601,9 @@ async function repliesReady($: EngineInterface, started: FixJob, ready: FixJob, 
   fixReady.set(ready.pr.url, ready)
   const full = `${ready.pr.repository.nameWithOwner}#${ready.pr.number}`
   const how = failed ? `not posted (${failed}); ` : end === 'interrupted' ? 'the fix turn stopped before it finished; ' : ''
-  const left = dropped ? ` · ${repliesWord(dropped)} said fixed with no commit, left out` : ''
-  $.ui.toast(
-    glyph(
-      `⇡ replies ready for ${full}: ${how}${repliesWord(ready.replies?.length ?? 0)} to post${left} · ${paneOpen ? 'g' : '/pr-inbox, then g'}: replies panel`,
-    ),
-    { timeoutMs: 15000 },
-  )
+  const dropNote = dropped ? ` · ${repliesWord(dropped)} said fixed with no commit, left out` : ''
+  const left = `${how}${repliesWord(ready.replies?.length ?? 0)} to post${dropNote} · ${paneOpen ? 'g' : '/pr-inbox, then g'}: replies panel`
+  tell($, glyph(`⇡ replies ready for ${full}: ${left}`), { phrase: left, ok: false, timeoutMs: 15000 })
   return ''
 }
 
@@ -6679,11 +6718,12 @@ async function sendPush($: EngineInterface, job: FixJob, head: string, auto = fa
       : `push failed: ${fit(clean(r.stderr), 120)} · your commits stay in ${job.dir}`
   }
   fixReady.delete(job.pr.url)
-  $.ui.toast(
+  tell(
+    $,
     auto
       ? `✦ pr-inbox pushed Claude's fix of ${job.repo}#${job.pr.number}: ${plural(commits.length, 'commit')} to ${job.branch} · CI runs again · fix_push ask in /config to check first`
       : `✦ pushed ${plural(commits.length, 'commit')} to ${job.branch} of ${job.repo} · CI runs again`,
-    { timeoutMs: auto ? 15000 : 8000 },
+    { phrase: `pushed ${plural(commits.length, 'commit')}`, ok: true, timeoutMs: auto ? 15000 : 8000 },
   )
   const key = FIX_TASKS[job.task].key
   const why = auto
@@ -6723,9 +6763,11 @@ function forgetFix($: EngineInterface, job: FixJob): void {
 async function stopWatching($: EngineInterface, job: FixJob): Promise<string> {
   if (fixJob === job) fixJob = undefined
   stoppedFixes.add(job)
-  const replies = FIX_TASKS[job.task].replies ? ' or posted' : ''
+  // A comments fix's replies are read only when a followed turn ends: they are dropped
   $.ui.toast(
-    `Stopped following the fix of ${askLabel(job.pr)}: nothing is pushed${replies} by itself; its commits stay in ${job.dir} · once it ends, ${FIX_TASKS[job.task].again}, then 3: push panel`,
+    FIX_TASKS[job.task].replies
+      ? `Stopped following the fix of ${askLabel(job.pr)}: nothing is pushed or posted; its commits stay in ${job.dir}, its replies are dropped · once it ends, ${FIX_TASKS[job.task].again}, then 3: push the commits`
+      : `Stopped following the fix of ${askLabel(job.pr)}: nothing is pushed by itself; its commits stay in ${job.dir} · once it ends, ${FIX_TASKS[job.task].again}, then 3: push panel`,
     { timeoutMs: 10000 },
   )
   $.ui.invalidate('ui.render')
@@ -6793,11 +6835,12 @@ async function stillOpenOn($: EngineInterface, job: FixJob): Promise<string> {
 function fixingPanel($: EngineInterface, pr: PR, job: FixJob): void {
   const full = `${pr.repository.nameWithOwner}#${pr.number}`
   const { replies } = FIX_TASKS[job.task]
-  const thenReplies = replies
-    ? cfg.fix_reply === 'auto'
-      ? ', then posts its replies (fix_reply auto)'
-      : '; its replies wait for g (fix_reply ask)'
-    : ''
+  // What happens when the turn ends, in the settings in effect. 2 stops following: nothing is pushed or posted then
+  const pushes = cfg.fix_push === 'auto' ? 'pr-inbox pushes its commits (fix_push auto)' : 'its commits wait for your push (fix_push ask)'
+  const posts = cfg.fix_reply === 'auto' ? 'then posts its replies (fix_reply auto)' : 'its replies wait for your y (fix_reply ask)'
+  const ends = replies
+    ? `When the turn ends, ${pushes}, ${posts}${cfg.fix_reply === 'auto' ? ' · to read them first: fix_reply ask in /config before it ends' : ''} · 2 stops following (nothing pushed or posted)`
+    : `When the turn ends, pr-inbox pushes its commits to ${job.branch} (fix_push auto); to check them first: 2`
   openPanel($, {
     verb: 'fixing',
     prs: [pr],
@@ -6806,14 +6849,7 @@ function fixingPanel($: EngineInterface, pr: PR, job: FixJob): void {
       {
         text: `Claude is ${FIX_TASKS[job.task].doing} of ${full} in ${job.dir} (${elapsed(new Date(job.startedAt).toISOString(), Date.now())})`,
       },
-      ...(cfg.fix_push === 'auto'
-        ? [
-            {
-              text: `When the turn ends, pr-inbox pushes its commits to ${job.branch} (fix_push auto)${thenReplies}; to check them first: 2`,
-              color: 'yellow' as const,
-            },
-          ]
-        : []),
+      ...(cfg.fix_push === 'auto' || (replies && cfg.fix_reply === 'auto') ? [{ text: ends, color: 'yellow' as const }] : []),
     ],
     sendsLead: 'y: ',
     sends: '',
@@ -6939,6 +6975,10 @@ async function commentsMenu($: EngineInterface, pr: PR): Promise<void> {
   // Drafts held for you come before a new turn: it would write over them
   const held = heldFor(pr)
   if (held.length > 0) return openHeld($, pr, held)
+  if (pr.isCrossRepository) {
+    $.ui.toast('g: your PR is from a fork; pr-inbox fixes only branches in the repository', { timeoutMs: 6000 })
+    return
+  }
   const threads = openThreads(pr)
   if (threads.length === 0) {
     $.ui.toast(`No review thread on ${askLabel(pr)} waits on you`, { timeoutMs: 6000 })
@@ -6947,16 +6987,17 @@ async function commentsMenu($: EngineInterface, pr: PR): Promise<void> {
   const full = `${pr.repository.nameWithOwner}#${pr.number}`
   const dir = worktreeDir('~', pr.repository.nameWithOwner, pr.number)
   const pushThen = FIX_PUSH[cfg.fix_push].after
+  // Another PR's fix runs: y is refused here, as c's choices are
   const busy = oneAtATime()
-  const fork = pr.isCrossRepository ? 'Your PR is from a fork: its branch is not in the repository, so g cannot fix it here' : ''
+  const more = threadsCapped.has(pr.url) ? ` (first ${MAX_REPLIES}; g again for the rest)` : ''
   openPanel($, {
-    verb: 'address comments',
+    verb: 'address threads',
     prs: [pr],
     title: '',
     notes: [
-      ...(busy ? [{ text: busy, color: 'yellow' as const }] : []),
-      ...(fork ? [{ text: fork, color: 'red' as const }] : []),
-      { text: `${plural(threads.length, 'unresolved review thread')} wait on you (the last word is someone else's):` },
+      {
+        text: `${plural(threads.length, 'unresolved review thread')} ${threads.length === 1 ? 'waits' : 'wait'} on you${more} (the last word is someone else's):`,
+      },
       ...threads.map((t) => ({ text: `  ${threadPlace(t)} · @${t.by}` })),
       {
         text: `Claude reads them in a worktree of its own, with this session's permissions; for each it fixes the code and commits, declines and says why, or asks back, then ${pushThen}; ${FIX_REPLY[cfg.fix_reply]}. One it should not settle alone is held with a draft for you (g, then y posts the ones you check). The threads stay unresolved for the reviewers`,
@@ -6968,6 +7009,7 @@ async function commentsMenu($: EngineInterface, pr: PR): Promise<void> {
     movedNote: 'the fix starts from its new head',
     progress: '⟳ starting…',
     failLead: 'Not started',
+    ...(busy ? { refused: { why: busy, tag: 'one at a time' } } : {}),
     write: { kind: 'comments' },
   })
 }
@@ -6987,6 +7029,7 @@ function openReplies($: EngineInterface, job: FixJob): string {
     prs: [{ ...pr, headRefOid: job.pushed ?? pr.headRefOid }],
     title: '',
     ...repliesLines(job),
+    browse: true,
     sendsLead: 'y posts: ',
     yes: 'post',
     movedNote: job.pushed
@@ -7005,23 +7048,18 @@ function sendable(job: FixJob): Reply[] {
 }
 
 // The replies panel's notes and the line above its keys (rebuilt when some went and others did not)
-function repliesLines(job: FixJob): { notes: PanelNote[]; sends: string } {
+// Each reply is a row to read (cut, the selected one in full): what it is, where it goes, to whom, and its text
+function repliesLines(job: FixJob): { notes: PanelNote[]; items: PanelItem[]; sends: string } {
   const replies = sendable(job)
   const full = `${job.pr.repository.nameWithOwner}#${job.pr.number}`
   return {
     notes: [
       ...(job.interrupted ? [{ text: 'The fix turn stopped before it finished', color: 'yellow' as const }] : []),
       {
-        text: `Claude's ${repliesWord(replies.length)}, posted as you with @mentions defused and a line saying Claude wrote them; the threads stay unresolved:`,
+        text: `Claude's ${repliesWord(replies.length)}, posted as you with @mentions defused and a line saying Claude wrote them; the threads stay unresolved`,
       },
-      ...replies.flatMap((r) => [
-        {
-          text: `${r.action} · ${threadPlace(r.thread)} · to @${r.thread.by}`,
-          color: r.action === 'fixed' ? ('green' as const) : undefined,
-        },
-        { text: `  ${r.text}` },
-      ]),
     ],
+    items: replies.map((r) => ({ text: `${r.action} · ${threadPlace(r.thread)} · @${r.thread.by} · ${r.text}`, note: '', checked: false })),
     sends: `${repliesWord(replies.length)} to review threads of ${full}${job.pushed ? `, fixes in ${job.pushed.slice(0, 7)}` : ''}`,
   }
 }
@@ -7083,11 +7121,12 @@ async function sendReplies(
       .join(', ')
     const after = pushed ? ` after pushing ${pushed.slice(0, 7)}` : ''
     $.ui.log(`pr-inbox posted ${repliesWord(sent.length)} (${kinds}) to review threads of ${full}${after}: ${REPLY_WHY[via]}`)
-    $.ui.toast(
+    tell(
+      $,
       via === 'auto'
         ? `✦ pr-inbox posted Claude's ${repliesWord(sent.length)} to review threads of ${full}${after} · fix_reply ask in /config to read them first`
         : `✦ posted ${repliesWord(sent.length)} to review threads of ${full}`,
-      { timeoutMs: via === 'auto' ? 15000 : 8000 },
+      { phrase: `posted ${repliesWord(sent.length)}`, ok: true, timeoutMs: via === 'auto' ? 15000 : 8000 },
     )
   }
   const left = replies.length - sent.length
@@ -7102,7 +7141,7 @@ async function postReplies($: EngineInterface, job: FixJob, via: ReplyVia): Prom
   job.replies = replies.filter((r) => !sent.includes(r))
   if (job.replies.length > 0) {
     fixReady.set(job.pr.url, job)
-    if (writePanel?.write.kind === 'replies' && writePanel.write.job === job) Object.assign(writePanel, repliesLines(job))
+    if (writePanel?.write.kind === 'replies' && writePanel.write.job === job) Object.assign(writePanel, repliesLines(job), { cursor: 0 })
   } else fixReady.delete(job.pr.url)
   $.ui.invalidate('ui.render')
   return error
@@ -7129,16 +7168,23 @@ function openHeld($: EngineInterface, pr: PR, replies: Reply[]): void {
 function heldLines(replies: Reply[]): { notes: PanelNote[]; items: PanelItem[] } {
   return {
     notes: [
-      {
-        text: "Claude did not settle these alone (or declines a person's comment, which fix_reply auto leaves to you): no code was changed for them, and none is posted unless you check it (x or its number) and press y. Each is posted as you, with @mentions defused and a line saying Claude wrote it; a thread you leave unchecked stays held for later. To talk one over with Claude first: q, then p (ask Claude about the PR)",
-      },
+      { text: 'Held for you: no code was changed for these, and only the drafts you check go, as you, with @mentions defused' },
+      { text: 'Unchecked ones stay held · to talk one over with Claude: q, then p (ask Claude about the PR)' },
     ],
     items: replies.map((r) => ({
-      text: `${threadPlace(r.thread)} · @${r.thread.by} · why: ${r.action === 'declined' ? 'Claude declines a person' : r.why || 'not given'} · draft: ${r.text}`,
+      text: `${threadPlace(r.thread)} · @${r.thread.by} · ${r.action === 'declined' ? 'held: a decline to a person (fix_reply auto)' : `held: needs you${r.why ? ` · ${r.why}` : ''}`} · draft: ${r.text}`,
       note: '',
       checked: false,
     })),
   }
+}
+
+// r in the held panel: the drafts are forgotten (nothing is sent) and g's panel opens, where y starts a new turn
+async function restartHeld($: EngineInterface, pr: PR): Promise<void> {
+  heldReplies.delete(pr.url)
+  writePanel = undefined
+  $.ui.toast(`Forgot the held drafts of ${askLabel(pr)}; nothing was posted`, { timeoutMs: 6000 })
+  await commentsMenu($, pr)
 }
 
 // y in the held panel: the checked drafts through sendReplies; what went leaves the held ones, the rest stay
@@ -7221,6 +7267,8 @@ export function register(on: On, options: PluginOptions) {
       const target = hits[0] as PR
       const address = fix[1] === 'address'
       const waiting = openThreads(target).length
+      if (address && waiting === 0 && threadsUnknown && (target.reviewThreads?.totalCount ?? 0) > 0)
+        return { text: `Could not read the review threads of ${target.url}: try /pr-inbox refresh` }
       if (address && waiting === 0) return { text: `No review thread on ${target.url} waits on you` }
       const task: FixTask = address ? 'comments' : (fixTasks(target)[0] ?? 'ci')
       $.clock.after(0, async () => {
@@ -7415,16 +7463,18 @@ export function register(on: On, options: PluginOptions) {
       )
     // Until a choice is picked, the line says to pick one; then exactly what y sends, with the choice in it
     const need = panelNeed(p)
-    const yesLabel = p.choices.find((c) => c.key === p.chosen)?.yes ?? p.yes
-    const sends = need
-      ? Text({ color: NEON.yellow, wrap: 'wrap', children: [`${need} · then y`] })
-      : Box({
-          flexDirection: 'row',
-          children: [
-            Text({ color: NEON.muted, children: [p.sendsLead] }),
-            Text({ color: NEON.cyan, bold: true, wrap: 'wrap', children: [sendsText(p)] }),
-          ],
-        })
+    const yesLabel = `${p.choices.find((c) => c.key === p.chosen)?.yes ?? p.yes}${p.refused ? ` (${p.refused.tag})` : ''}`
+    const sends = p.refused
+      ? Text({ color: NEON.yellow, wrap: 'wrap', children: [p.refused.why] })
+      : need
+        ? Text({ color: NEON.yellow, wrap: 'wrap', children: [`${need} · then y`] })
+        : Box({
+            flexDirection: 'row',
+            children: [
+              Text({ color: NEON.muted, children: [p.sendsLead] }),
+              Text({ color: NEON.cyan, bold: true, wrap: 'wrap', children: [sendsText(p)] }),
+            ],
+          })
     // The choices, each on its number key: the one picked marked, one not offered here dim (its key says why)
     const choices = p.choices.length
       ? [
@@ -7473,9 +7523,9 @@ export function register(on: On, options: PluginOptions) {
       children: [
         // Cancel first; n is a hidden second way out
         key('panel-cancel', 'cancel', 'q', leave, p.sending),
-        ...(p.items.length ? [key('panel-toggle', 'check / uncheck', 'x', () => toggle(p.cursor))] : []),
+        ...(p.items.length && !p.browse ? [key('panel-toggle', 'check / uncheck', 'x', () => toggle(p.cursor))] : []),
         Box({ display: 'none', children: [key('panel-no', 'cancel', 'n', leave)] }),
-        key('panel-yes', p.error ? 'try again' : yesLabel, 'y', () => void sendPanel($, p), need !== ''),
+        key('panel-yes', p.error ? 'try again' : yesLabel, 'y', () => void sendPanel($, p), need !== '' || Boolean(p.refused)),
         // The push panel: the fix's diff in the reader (c brings the panel back), or set the fix aside
         ...(p.write.kind === 'push'
           ? (() => {
@@ -7503,6 +7553,17 @@ export function register(on: On, options: PluginOptions) {
               ]
             })()
           : []),
+        // The held panel: forget these drafts and start over (g's panel opens; its y still starts the turn)
+        ...(p.write.kind === 'held'
+          ? (() => {
+              const { pr } = p.write
+              return [
+                key('panel-restart', 'forget and start over', 'r', () => {
+                  if (!p.sending) void restartHeld($, pr)
+                }),
+              ]
+            })()
+          : []),
         ...(only
           ? [
               key(
@@ -7519,10 +7580,11 @@ export function register(on: On, options: PluginOptions) {
     // Rows to check: the count, then the rows around the selected one, each with its number; x or the number checks
     const LIST_ROWS = 10
     const top = Math.max(0, Math.min(p.cursor - Math.floor(LIST_ROWS / 2), p.items.length - LIST_ROWS))
+    // A row to read is only selected; one to check is checked or unchecked too
     const toggle = (i: number) => {
       const item = p.items[i]
       if (!item || p.sending) return
-      item.checked = !item.checked
+      if (!p.browse) item.checked = !item.checked
       p.cursor = i
       redraw()
     }
@@ -7532,7 +7594,9 @@ export function register(on: On, options: PluginOptions) {
             color: NEON.violet,
             bold: true,
             children: [
-              `${p.items.filter((i) => i.checked).length} of ${plural(p.items.length, p.write.kind === 'held' ? 'draft' : 'finding')} checked${p.write.kind === 'findings' ? ' (those that block start checked)' : ''}`,
+              p.browse
+                ? `${repliesWord(p.items.length)} · j/k: read each in full`
+                : `${p.items.filter((i) => i.checked).length} of ${plural(p.items.length, p.write.kind === 'held' ? 'draft' : 'finding')} checked${p.write.kind === 'findings' ? ' (those that block start checked)' : ''}`,
             ],
           }),
           ...(top > 0 ? [Text({ color: NEON.muted, children: [`  ${top} more ↑`] })] : []),
@@ -7546,7 +7610,13 @@ export function register(on: On, options: PluginOptions) {
               children: [
                 Text({ color: focused ? NEON.pink : NEON.muted, bold: true, children: [here ? '▸' : ' '] }),
                 Text({ color: NEON.muted, children: [i < 9 ? `${i + 1}` : ' '] }),
-                Text({ color: item.checked ? NEON.green : NEON.muted, bold: item.checked, children: [item.checked ? ' [x] ' : ' [ ] '] }),
+                p.browse
+                  ? Text({ children: [' '] })
+                  : Text({
+                      color: item.checked ? NEON.green : NEON.muted,
+                      bold: item.checked,
+                      children: [item.checked ? ' [x] ' : ' [ ] '],
+                    }),
                 // The selected one in full: it is what you decide on
                 Text({
                   wrap: here ? 'wrap' : 'truncate-end',
@@ -7578,7 +7648,18 @@ export function register(on: On, options: PluginOptions) {
         ]
       : []
     const help = p.items.length
-      ? [Text({ color: NEON.muted, children: ['j/k move · 1-9 or x check a row · then pick what it is posted as · y'] })]
+      ? [
+          Text({
+            color: NEON.muted,
+            children: [
+              p.write.kind === 'held'
+                ? 'j/k move · 1-9 or x check a draft · y posts the checked · r forget and start over · q leave (all stay held)'
+                : p.browse
+                  ? 'j/k move (the selected one in full) · y posts them all · x forget · q leave'
+                  : 'j/k move · 1-9 or x check a row · then pick what it is posted as · y',
+            ],
+          }),
+        ]
       : []
     const tree: El[] = [head, rule(true), ...body, rule(), ...items, ...choices, ...status, keys, ...help]
     const picks = offered(p)
@@ -7593,7 +7674,7 @@ export function register(on: On, options: PluginOptions) {
           kit,
           tree,
           (k) =>
-            `${k}: no such key here · ${p.items.length ? 'j/k move · x check · ' : ''}${picks}y ${yesLabel}${p.write.kind === 'push' ? ' · d diff · x forget' : ''} · q cancel`,
+            `${k}: no such key here · ${p.items.length ? (p.browse ? 'j/k move · ' : 'j/k move · x check · ') : ''}${picks}y ${yesLabel}${p.write.kind === 'push' ? ' · d diff · x forget' : p.write.kind === 'replies' ? ' · x forget' : p.write.kind === 'held' ? ' · r forget and start over' : ''} · q cancel`,
           toast,
         ),
       ],
@@ -8829,8 +8910,11 @@ export function register(on: On, options: PluginOptions) {
         }
         const threads = openThreads(pr).length
         const held = heldFor(pr).length
-        if (threads > 0 || held > 0 || (fix && FIX_TASKS[fix.task].key === 'g')) {
-          const label = fix ? fixLabel : held ? needYou(held) : `address ${plural(threads, 'comment')}`
+        if (pr.isCrossRepository && threads > 0) {
+          // A fork: no g key drawn, but g says why
+          actions.push(Box({ display: 'none', children: [act('act-comments', 'fork', 'g', () => commentsMenu($, pr))] }))
+        } else if (threads > 0 || held > 0 || (fix && FIX_TASKS[fix.task].key === 'g')) {
+          const label = fix ? fixLabel : held ? `read ${plural(held, 'held draft')}` : `address ${plural(threads, 'thread')}`
           actions.push(act('act-comments', label, 'g', () => commentsMenu($, pr)))
         }
         actions.push(act('act-reviewers', reviewersKeyLabel(pr, now), 'w', () => openPicker($, pr)))
@@ -9017,8 +9101,9 @@ export function register(on: On, options: PluginOptions) {
       return n > 0 ? plural(n, 'comment') : ''
     }
     // Facts about the PR, one short phrase each, · between them; CI said once, in words
-    const metaLine = (p: PR): string => {
-      // Claude fixing it, or a fix waiting for your push, comes first
+    // What needs you or is under way comes first and is drawn bright (lead); the facts after it, dim (rest)
+    const metaLine = (p: PR): { lead: string; rest: string } => {
+      // Claude fixing it, a fix or replies waiting for you, or drafts held for you
       const ready = fixReady.get(p.url)
       const fixing =
         fixJob?.pr.url === p.url
@@ -9028,11 +9113,21 @@ export function register(on: On, options: PluginOptions) {
             : ready
               ? `⇡ fix ready: ${plural(ready.commits?.length ?? 0, 'commit')} not pushed · ${FIX_TASKS[ready.task].key}: push panel`
               : ''
-      // Review threads that wait on you, and the key that addresses them
-      const waiting = tab === 'mine' && !fixing ? openThreads(p).length : 0
-      const held = waiting ? heldFor(p).length : 0
-      const threads = held ? `⚑ ${needYou(held)} · g` : waiting ? `${plural(waiting, 'unresolved thread')} · g: address` : ''
-      return [fixing, branchNote(p), stackNote(p), ...metaOf(p), talkNote(p), threads, sessionNote(p)].filter(Boolean).join(' · ')
+      const held = tab === 'mine' && !fixing ? heldFor(p).length : 0
+      const lead = fixing || (held ? `⚑ ${needYou(held)} · g` : '')
+      // Review threads that wait on you, and the key that addresses them (none on a fork: g fixes only branches in the
+      // repository); threads that could not be read say so
+      const waiting = tab === 'mine' && !lead && !p.isCrossRepository ? openThreads(p).length : 0
+      const unread = tab === 'mine' && threadsUnknown && (p.reviewThreads?.totalCount ?? 0) > 0
+      const threads = waiting
+        ? `${plural(waiting, 'unresolved thread')} · g: address`
+        : unread
+          ? 'review threads not read (GitHub refused) · r: refresh'
+          : ''
+      return {
+        lead,
+        rest: [branchNote(p), stackNote(p), ...metaOf(p), talkNote(p), threads, sessionNote(p)].filter(Boolean).join(' · '),
+      }
     }
     const metaOf = (p: PR): string[] => {
       const size = `+${p.additions} -${p.deletions}`
@@ -9262,9 +9357,21 @@ export function register(on: On, options: PluginOptions) {
           )
         }
       }
-      const meta = metaLine(p)
+      const { lead, rest } = metaLine(p)
+      const meta = [lead, rest].filter(Boolean).join(' · ')
       add(
-        Box({ paddingLeft: INDENT, children: [Text({ wrap: 'wrap', dimColor: true, children: [meta] })] }),
+        Box({
+          paddingLeft: INDENT,
+          children: [
+            Text({
+              wrap: 'wrap',
+              children: [
+                ...(lead ? [Text({ color: lead.startsWith('⚑') ? NEON.yellow : NEON.cyan, bold: true, children: [lead] })] : []),
+                Text({ dimColor: true, children: [lead && rest ? ` · ${rest}` : rest] }),
+              ],
+            }),
+          ],
+        }),
         wrappedLines(meta, bodyColumns),
       )
       for (const r of tab === 'review' || reviews.has(p.url) ? reviewRows(p) : []) {
@@ -9563,7 +9670,7 @@ export function register(on: On, options: PluginOptions) {
             ],
             [
               'g',
-              "review threads that wait on you (open, someone else's last word): Claude fixes and commits, declines or asks back in a worktree, then y · the fix is pushed (fix_push) and pr-inbox posts its replies to the threads, never resolved (fix_reply auto; with ask: the replies panel, y posts) · a thread Claude should not settle alone (⚑ needs you), and with fix_reply auto a decline to a person (not a bot), is held with its draft: g lists them, x checks the drafts to post, y posts those, the rest stay held · /pr-inbox address <PR> from the prompt",
+              "review threads that wait on you (open, someone else's last word): Claude fixes and commits, declines or asks back in a worktree, then y · the fix is pushed (fix_push) and pr-inbox posts its replies to the threads, never resolved (fix_reply auto; with ask: the replies panel, y posts) · a thread Claude should not settle alone (⚑ needs you), and with fix_reply auto a decline to a person (not a bot), is held with its draft: g lists them, 1-9 or x checks the drafts to post, y posts those, the rest stay held, r forgets them and starts over · /pr-inbox address <PR> from the prompt",
             ],
             ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · y in it sends'],
             [
@@ -9670,7 +9777,7 @@ export function register(on: On, options: PluginOptions) {
         ],
         [
           '',
-          '⟳ WIP Claude is fixing its CI or conflict (c) or addressing its review comments (g) · ⇡ PUSH a fix or replies wait for you (fix_push or fix_reply ask, a turn cut short or a write refused)',
+          '⟳ WIP Claude is fixing its CI or conflict (c) or addressing its review threads (g) · ⇡ PUSH a fix waits for your push · ⇡ POST replies wait for your y · ⚑ YOU drafts held for you (g)',
           NEON.cyan,
         ],
         [

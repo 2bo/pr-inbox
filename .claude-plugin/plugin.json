@@ -124,7 +124,7 @@
     "fix_reply": {
       "type": "string",
       "title": "Fix replies",
-      "description": "What happens to Claude's replies when it addresses the review comments on your PR (g): auto (pr-inbox posts them to their threads when the fix turn ends on its own and its push went) or ask (the replies panel, then y). A fix turn cut short always waits for the panel",
+      "description": "What happens to Claude's replies when it addresses the review comments on your PR (g): auto (pr-inbox posts them to their threads when the fix turn ends on its own and its push went) or ask (the replies panel, then y). A fix turn cut short always waits for the panel. A thread Claude marks needs_you, and with auto a decline to a person (not a bot), always waits for you: g, check it, y",
       "default": "auto",
       "options": ["auto", "ask"]
     },
