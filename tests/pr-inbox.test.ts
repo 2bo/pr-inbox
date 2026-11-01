@@ -4546,8 +4546,8 @@ function addressStubs(
     git?: StubOptions['git']
     view?: unknown
     graphql?: string
-    // Set to refuse the threads query from then on
-    threadsRefused?: { now: boolean }
+    // Set to answer the threads query differently from then on: refused, or with these threads
+    threadsNow?: { refused?: boolean; nodes?: unknown[] }
   } = {},
 ) {
   const s = stubs(on, {
@@ -4555,19 +4555,21 @@ function addressStubs(
     git: opts.git ?? fixGit(opts.commits),
     locale: { HOME: '/home/me' },
     gh: (argv) =>
-      argv.includes('--input') && opts.threadsRefused?.now
+      argv.includes('--input') && opts.threadsNow?.refused
         ? { exitCode: 1 }
-        : argv.includes('state,headRefName,headRefOid,author')
-          ? {
-              stdout: JSON.stringify({
-                state: 'OPEN',
-                headRefName: 'fix-21',
-                author: { login: 'me' },
-                headRefOid: HEAD,
-                ...(opts.view as object | undefined),
-              }),
-            }
-          : undefined,
+        : argv.includes('--input') && opts.threadsNow?.nodes
+          ? { stdout: JSON.stringify({ data: { nodes: [{ id: 'PR_21', threads: { nodes: opts.threadsNow.nodes } }] } }) }
+          : argv.includes('state,headRefName,headRefOid,author')
+            ? {
+                stdout: JSON.stringify({
+                  state: 'OPEN',
+                  headRefName: 'fix-21',
+                  author: { login: 'me' },
+                  headRefOid: HEAD,
+                  ...(opts.view as object | undefined),
+                }),
+              }
+            : undefined,
   })
   const text = opts.replies ?? REPLY_JSON
   on('fs.stat', () => ({ value: { kind: 'file', size: text.length, mtimeMs: 0, isLink: false } }) as never)
@@ -4885,9 +4887,7 @@ test('c on a PR whose comments fix waits opens its push panel, replies listed, s
     origin: { kind: 'composer' },
     presentation: { isFullscreen: true, columns: 120 },
   })
-  expect(out.text).toContain('Fixing the CI of')
-  for (let i = 0; i < 10; i++) await s.clock.settle()
-  expect(s.toasts.at(-1)).toContain('a fix of the review threads of app#21 waits to be pushed or posted · g first')
+  expect(out.text).toBe('Not starting: a fix of the review threads of app#21 waits to be pushed or posted · g first')
   await ui.unmount()
 })
 
@@ -4932,6 +4932,8 @@ test('threads past the first page are read on, and a page GitHub refuses leaves 
   for (let i = 0; i < 5; i++) await s.clock.settle()
   const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
   expect(panel).toContain('app/late.rb:9 · @mika')
+  await ui.press({ key: 'panel-cancel' })
+  expect(await lineOf(ui, 21)).toContain('1 unresolved thread · g: address · review threads not all read · r: refresh')
   expect(panel).toContain('g again for the rest')
   await ui.unmount()
 })
@@ -5154,15 +5156,53 @@ test('a thread Claude should not settle alone is held with its draft: auto posts
 })
 
 test('held drafts stay when the threads could not be read, as they may still wait on you', async ($, on) => {
-  const threadsRefused = { now: false }
-  const s = addressStubs(on, { replies: HELD_JSON, threadsRefused })
+  const threadsNow: { refused?: boolean } = {}
+  const s = addressStubs(on, { replies: HELD_JSON, threadsNow })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   await addressAndEnd(ui, s, $, 'hold2')
-  threadsRefused.now = true
+  threadsNow.refused = true
   await ui.press({ key: 'refresh' })
   for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect((await ui.find({ key: 'act-comments' }))?.props.label).toBe('read 1 held draft')
+  await ui.unmount()
+})
+
+test('a held draft stays when its thread waits past the first 30 shown', async ($, on) => {
+  const threadsNow: { nodes?: unknown[] } = {}
+  const s = addressStubs(on, { replies: HELD_JSON, threadsNow })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await addressAndEnd(ui, s, $, 'hold3')
+  // 30 new threads come before the held one: it is past the cap, still waiting on you
+  threadsNow.nodes = [
+    ...Array.from({ length: 30 }, (_, i) => thread(`PRRT_new${i}`, 'app/new.rb', i + 1, 'mika')),
+    thread('PRRT_four', 'lib/form.rb', 7, 'coderabbitai'),
+  ]
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect((await ui.find({ key: 'act-comments' }))?.props.label).toBe('read 1 held draft')
+  await ui.unmount()
+})
+
+test('/pr-inbox address leaves held drafts to g first, and starts nothing', async ($, on) => {
+  const s = addressStubs(on, { replies: HELD_JSON })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await addressAndEnd(ui, s, $, 'hold4')
+  const asked = s.submitted.length
+  const out = await $.command.run({
+    command: 'pr-inbox',
+    args: 'address app#21',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: true, columns: 120 },
+  })
+  expect(out.text).toBe('Not starting: 1 thread needs you on app#21 · g first (r there starts over)')
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(s.submitted.length).toBe(asked)
   expect((await ui.find({ key: 'act-comments' }))?.props.label).toBe('read 1 held draft')
   await ui.unmount()
 })

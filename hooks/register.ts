@@ -1223,6 +1223,8 @@ async function readThreads($: EngineInterface): Promise<void> {
   const ids = asked.map((p) => p.id as string)
   const found = new Map<string, OpenThread[]>()
   const capped = new Set<string>()
+  // Every thread waiting on you that was read, before the cap: held drafts are checked against these
+  const waitingAll = new Map<string, Set<string>>()
   // Until read in full, every PR asked about is unread
   const unread = new Set(viewer ? asked.map((p) => p.url) : [])
   if (ids.length > 0 && viewer) {
@@ -1237,6 +1239,7 @@ async function readThreads($: EngineInterface): Promise<void> {
         const read = await morePages($, pr.id, n?.threads ?? {})
         if (!read.left) unread.delete(pr.url)
         const threads = waitingThreads(read.nodes)
+        waitingAll.set(pr.url, new Set(threads.map((t) => t.id)))
         if (threads.length === 0) continue
         found.set(pr.url, threads.slice(0, MAX_REPLIES))
         // More than one turn takes, or threads left unread: g says so
@@ -1252,8 +1255,8 @@ async function readThreads($: EngineInterface): Promise<void> {
   // Held drafts are dropped only against a PR's threads read in full this time
   for (const [url, held] of heldReplies) {
     if (unread.has(url)) continue
-    const open = new Set(openThreads(held.pr).map((t) => t.id))
-    const replies = held.replies.filter((r) => open.has(r.thread.id))
+    const open = waitingAll.get(url)
+    const replies = held.replies.filter((r) => open?.has(r.thread.id))
     if (replies.length > 0) heldReplies.set(url, { ...held, replies })
     else heldReplies.delete(url)
   }
@@ -6235,6 +6238,15 @@ const FIX_MARK = '[pr-inbox fix-ci]'
 function fixOn(pr: PR): { running?: FixJob; ready?: FixJob } {
   return { running: fixJob?.pr.url === pr.url ? fixJob : undefined, ready: fixReady.get(pr.url) }
 }
+// What a new fix of the PR must wait for, however it was asked (c, g, /pr-inbox fix or address): a fix waiting in the
+// PR's one worktree (its commits, its replies), and for g the drafts held for you. A new turn would drop them
+function waitsFirst(pr: PR, task: FixTask): string {
+  const waiting = fixReady.get(pr.url)
+  if (waiting)
+    return `a fix of the ${FIX_TASKS[waiting.task].what} of ${askLabel(pr)} waits to be pushed or posted · ${FIX_TASKS[waiting.task].key} first`
+  const held = task === 'comments' ? heldFor(pr).length : 0
+  return held ? `${needYou(held)} on ${askLabel(pr)} · g first (r there starts over)` : ''
+}
 // While another PR's fix runs, a new one waits: the note c's and g's panels show
 function oneAtATime(): string {
   return fixJob
@@ -6330,10 +6342,8 @@ async function startFix($: EngineInterface, pr: PR, task: FixTask, left?: 'go on
   const threads = task === 'comments' ? openThreads(pr) : []
   if (task === 'comments' && threads.length === 0) return `no review thread on ${askLabel(pr)} waits on you`
   if (fixJob) return `Claude is still ${FIX_TASKS[fixJob.task].doing} of ${askLabel(fixJob.pr)}: wait for it to finish`
-  // The PR's one worktree has a fix waiting (its commits, its replies): it goes first, or a new one would drop it
-  const waiting = fixReady.get(pr.url)
-  if (waiting && waiting.task !== task)
-    return `a fix of the ${FIX_TASKS[waiting.task].what} of ${askLabel(pr)} waits to be pushed or posted · ${FIX_TASKS[waiting.task].key} first`
+  const first = waitsFirst(pr, task)
+  if (first) return first
   const clone = await findClone($, pr, task)
   if (!clone) return ''
   // A conflict is resolved against the base as it is on GitHub now: fetch it too
@@ -7303,6 +7313,8 @@ export function register(on: On, options: PluginOptions) {
         return { text: `Could not read the review threads of ${target.url}: try /pr-inbox refresh` }
       if (address && waiting === 0) return { text: `No review thread on ${target.url} waits on you` }
       const task: FixTask = address ? 'comments' : (fixTasks(target)[0] ?? 'ci')
+      const first = waitsFirst(target, task)
+      if (first) return { text: `Not starting: ${first}` }
       $.clock.after(0, async () => {
         const why = await startFix($, target, task)
         if (why) $.ui.toast(`Not fixing ${askLabel(target)}: ${why}`, { timeoutMs: 10000 })
@@ -9151,11 +9163,12 @@ export function register(on: On, options: PluginOptions) {
       // repository); threads that could not be read say so
       const waiting = tab === 'mine' && !lead && !p.isCrossRepository ? openThreads(p).length : 0
       const unread = tab === 'mine' && threadsUnread.has(p.url)
-      const threads = waiting
-        ? `${plural(waiting, 'unresolved thread')} · g: address`
-        : unread
-          ? 'review threads not all read · r: refresh'
-          : ''
+      const threads = [
+        waiting ? `${plural(waiting, 'unresolved thread')} · g: address` : '',
+        unread ? 'review threads not all read · r: refresh' : '',
+      ]
+        .filter(Boolean)
+        .join(' · ')
       return {
         lead,
         rest: [branchNote(p), stackNote(p), ...metaOf(p), talkNote(p), threads, sessionNote(p)].filter(Boolean).join(' · '),
