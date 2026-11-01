@@ -65,7 +65,7 @@
     "risk_high": {
       "type": "string",
       "title": "High risk criteria",
-      "description": "What counts as high risk in the analysis. Empty uses the default (migrations, auth, billing, personal data, deletion, breaking API changes, changes hard to roll back, production config, CI/CD changes to permissions, secrets, privileged triggers (pull_request_target) or deploy steps, wide changes without tests)",
+      "description": "What counts as high risk in the analysis. Empty uses the default (migrations, auth, billing, personal data, deletion, breaking API changes, changes hard to roll back, production config, CI/CD changes to permissions, secrets, privileged triggers (pull_request_target) or deploy steps (a version bump of an action already in use is a dependency upgrade), wide changes without tests)",
       "default": ""
     },
     "risk_medium": {
@@ -77,7 +77,7 @@
     "risk_low": {
       "type": "string",
       "title": "Low risk criteria",
-      "description": "What counts as low risk. Empty uses the default (docs, tests only, patch dependency upgrades (GitHub Actions too) that add no new packages, types, wording or renames)",
+      "description": "What counts as low risk. Empty uses the default (docs, tests only, patch dependency upgrades (GitHub Actions too) that add no new packages, types, wording or renames that do not change behavior)",
       "default": ""
     },
     "release_impact": {
