@@ -465,7 +465,7 @@ test(
     const ui = await $.ui.mount(PANE)
     await pressApprove(ui, s)
     expect(s.panels.at(-1)).toContain(`y approves: acme/app#11 at ${HEAD.slice(0, 7)} with the comment "LGTM"`)
-    expect(s.calls).toContainEqual([...APPROVE_11, '-f', 'body=LGTM'])
+    expect(approvedAt(s)).toEqual([[...APPROVE_11, '-f', 'body=LGTM']])
     await ui.unmount()
   },
 )

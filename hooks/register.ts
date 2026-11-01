@@ -1742,7 +1742,7 @@ function chosenWord(p: WritePanel): string {
 async function runWrite($: EngineInterface, p: WritePanel): Promise<string> {
   const pr = p.prs[0]
   const method = METHODS.find((m) => m.key === p.chosen)
-  if (p.write.kind === 'approve') return approveAll($, p, p.write.how)
+  if (p.write.kind === 'approve') return approveAll($, p, p.write)
   if (p.write.kind === 'issue') {
     const reason = CLOSE_REASONS.find((r) => r.key === p.chosen)?.flag ?? ''
     if (p.write.to === 'close' && !reason) return ''
@@ -1779,19 +1779,15 @@ async function runWrite($: EngineInterface, p: WritePanel): Promise<string> {
 // y in the approve panel: exactly the commits it shows, one by one; postApproval reads each head again right before.
 // A failed approval says so in its own toast. Each one done leaves the panel as it goes, so if something throws
 // midway, the panel stays open naming only what is left, and y again never approves one twice
-async function approveAll($: EngineInterface, p: WritePanel, how: string): Promise<string> {
+async function approveAll($: EngineInterface, p: WritePanel, w: Extract<PanelWrite, { kind: 'approve' }>): Promise<string> {
   // Several: one toast for all of them at the end, each named in full
   const quiet = p.prs.length > 1
   const done: string[] = []
   for (const pr of [...p.prs]) {
     const run = reviewOfHead(pr)
-    const ok = await postApproval($, pr, how, quiet, p.write.kind === 'approve' ? p.write.comment : '')
+    const ok = await postApproval($, pr, w.how, quiet, w.comment)
     p.prs = p.prs.filter((x) => x !== pr)
-    Object.assign(
-      p,
-      approveLines(p.prs, p.write.kind === 'approve' ? p.write.comment : ''),
-      p.write.kind === 'approve' && p.write.bulk ? bulkLines(p.prs) : {},
-    )
+    Object.assign(p, approveLines(p.prs, w.comment), w.bulk ? bulkLines(p.prs) : {})
     if (ok) done.push(`${pr.repository.nameWithOwner}#${pr.number}`)
     if (ok && run?.state === 'passed') run.state = 'approved'
   }
@@ -1825,7 +1821,7 @@ function approveLines(prs: PR[], comment: string): { sends: string; yes: string 
 // The approve panel (a, b)
 function openApproval($: EngineInterface, prs: PR[], notes: PanelNote[], how: string, bulk = false): void {
   // Read when the panel opens, so y sends the comment it shows
-  const comment = String(cfg.approve_comment ?? '').trim()
+  const comment = custom(cfg.approve_comment)
   openPanel($, {
     verb: 'approve',
     prs,
@@ -1898,6 +1894,8 @@ const autoApproved = new Set<string>()
 async function postApproval($: EngineInterface, pr: PR, how: string, quiet = false, comment = ''): Promise<boolean> {
   const auto = how === AUTO_HOW
   const sha = pr.headRefOid.slice(0, 7)
+  // On GitHub too, an approval no person chose says so
+  const body = auto ? `Approved by the pr-inbox AI review on its own (ai_approve auto) at ${sha}.` : comment
   const fail = (why: string) => $.ui.toast(`Approve failed: ${fit(clean(why), 80)}`, { timeoutMs: 8000 })
   if (!REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) {
     fail('unexpected repository name or commit id')
@@ -1924,12 +1922,7 @@ async function postApproval($: EngineInterface, pr: PR, how: string, quiet = fal
       'event=APPROVE',
       '-f',
       `commit_id=${pr.headRefOid}`,
-      // On GitHub too, an approval no person chose says so
-      ...(auto
-        ? ['-f', `body=Approved by the pr-inbox AI review on its own (ai_approve auto) at ${sha}.`]
-        : comment
-          ? ['-f', `body=${comment}`]
-          : []),
+      ...(body ? ['-f', `body=${body}`] : []),
     ])
     .catch(ghMissing)
   if (r.exitCode !== 0) {
