@@ -624,7 +624,7 @@ test('the details say each fact once: why the risk on its own line, CI in words,
   expect(
     await ui.find({
       type: 'Text',
-      text: /^needs you: changes requested, CI failed · m: auto-merge when ready · \+10 -2 · updated 1d ago$/,
+      text: /^needs you: changes requested, CI failed · c: fix CI · m: auto-merge when ready · \+10 -2 · updated 1d ago$/,
     }),
   ).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /✗CI/ })).toBeUndefined()
@@ -1211,7 +1211,7 @@ async function pressApprove(ui: Pressable, s: Stubs, key = 'act-approve') {
 }
 
 // c, then in the panel it opens: the choice key, then y
-async function pressCi(ui: Pressable, s: Stubs, choice?: '1' | '2') {
+async function pressCi(ui: Pressable, s: Stubs, choice?: '1' | '2' | '3') {
   await ui.press({ key: 'act-ci' })
   for (let i = 0; i < 5; i++) await s.clock.settle()
   if (choice) await ui.press({ key: `panel-choice-${choice}` })
@@ -2750,7 +2750,7 @@ test('c, then 2 and y, re-runs only the failed GitHub Actions runs', async ($, o
   await ui.press({ key: 'act-ci' })
   expect(s.questions).toEqual([])
   const text = async () => ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
-  expect(await text()).toContain('pick what to do: 1 fix with Claude · 2 re-run the failed jobs · then y')
+  expect(await text()).toContain('pick what to do: 1 fix CI with Claude · 2 re-run the failed jobs · then y')
   await ui.press({ key: 'panel-choice-2' })
   expect(await text()).toContain('y: re-runs the failed jobs of 1 run on acme/app#21')
   await ui.press({ key: 'panel-yes' })
@@ -4195,6 +4195,111 @@ test('after the fix turn, no commit means nothing to push and nothing opens', as
   await ui.unmount()
 })
 
+// One of your PRs in conflict with main, CI passing
+const CONFLICT = pr({
+  number: 21,
+  title: '衝突あり',
+  url: 'https://github.com/acme/app/pull/21',
+  headRefName: 'fix-21',
+  baseRefName: 'main',
+  isCrossRepository: false,
+  mergeable: 'CONFLICTING',
+})
+const conflictGraphql = JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [CONFLICT] } } })
+
+test('your PR in conflict says so in its badge; c resolves it with Claude by merging the base in, never a rebase', async ($, on) => {
+  // Claude's merge commit is new; the 4 commits of main it brings in are on GitHub already
+  const git = (argv: readonly string[]) => {
+    const a = argv.join(' ')
+    if (a === `git -C ${WORKTREE} rev-parse --verify -q refs/remotes/origin/main`) return { stdout: `${'c'.repeat(40)}\n` }
+    if (a === `git -C ${WORKTREE} rev-list --count origin/fix-21..HEAD`) return { stdout: '5\n' }
+    if (a === `git -C ${WORKTREE} log --format=%h %s origin/fix-21..HEAD ^origin/main`) return { stdout: 'abc1234 Merge main into fix-21' }
+    if (a.startsWith(`git -C ${WORKTREE} log`)) return { stdout: '' }
+    return fixGit()(argv)
+  }
+  const s = stubs(on, { graphql: conflictGraphql, git, locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await lineOf(ui, 21)).toContain('✗ CONF')
+  expect((await ui.find({ key: 'act-ci' }))?.props.label).toBe('fix conflict')
+  await ui.press({ key: 'act-ci' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  const menu = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+  expect(menu).toContain('✗ Conflicts with main')
+  expect(menu).toContain('fix CI with Claude (CI not failed)')
+  await ui.press({ key: 'panel-choice-3' })
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  // The base is fetched with the branch, so the merge is against main as it is on GitHub
+  expect(s.calls).toContainEqual([
+    'git',
+    '-C',
+    '/work',
+    'fetch',
+    'origin',
+    'refs/heads/fix-21:refs/remotes/origin/fix-21',
+    'refs/heads/main:refs/remotes/origin/main',
+  ])
+  const text = s.submitted.at(-1) ?? ''
+  expect(text).toContain('Resolve the merge conflict of my PR https://github.com/acme/app/pull/21')
+  expect(text).toContain('Merge origin/main (fetched just now) into it with git merge')
+  expect(text).toContain('Do not rebase, reset or amend')
+  expect(text).toContain('Do not push')
+  expect(s.toasts.at(-1)).toContain('Claude is resolving the conflict of app#21')
+
+  await $.turn.start({ text, turnId: 'merge1' })
+  await $.turn.complete({ turnId: 'merge1', answer: '', reason: 'answer' } as never)
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  await ui.press({ key: 'act-ci' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  // The push panel lists the new commit and counts the ones of main that the merge brings in
+  const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+  expect(panel).toContain('abc1234 Merge main into fix-21')
+  expect(panel).toContain('y pushes: 1 commit (+ 4 commits of main the merge brings in, already on GitHub) to fix-21 of acme/app (#21)')
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'push', 'origin', `${HEAD}:refs/heads/fix-21`])
+  await ui.unmount()
+})
+
+test('a conflict fix that stops halfway through the merge says so, and how to go on', async ($, on) => {
+  const git = (argv: readonly string[]) => {
+    const a = argv.join(' ')
+    if (a === `git -C ${WORKTREE} rev-parse -q --verify MERGE_HEAD`) return { stdout: `${'d'.repeat(40)}\n` }
+    if (a.startsWith(`git -C ${WORKTREE} log`)) return { stdout: '' }
+    return fixGit()(argv)
+  }
+  const s = stubs(on, { graphql: conflictGraphql, git, locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /needs you: conflict · c: fix conflict/ })).toBeDefined()
+  await pressCi(ui, s, '3')
+  await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'merge2' })
+  await $.turn.complete({ turnId: 'merge2', answer: '' } as never)
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.toasts.at(-1)).toContain('a merge of main is left unfinished in')
+  expect(s.toasts.at(-1)).toContain('c, 3, y: Claude goes on from it')
+  await ui.unmount()
+})
+
+test('/pr-inbox fix on a PR in conflict resolves the conflict', async ($, on) => {
+  const s = stubs(on, { graphql: conflictGraphql, git: fixGit(), locale: { HOME: '/home/me' } })
+  await start($, s.clock)
+  const out = await $.command.run({
+    command: 'pr-inbox',
+    args: 'fix app#21',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: true, columns: 120 },
+  })
+  expect(out.text).toContain('Fixing the conflict of https://github.com/acme/app/pull/21')
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.submitted.at(-1)).toContain('Merge origin/main')
+})
+
 test('/pr-inbox fix takes one of your PRs by repo#number', async ($, on) => {
   const s = stubs(on, { git: fixGit(), locale: { HOME: '/home/me' } })
   await start($, s.clock)
@@ -4518,7 +4623,7 @@ test('a key the list does not use says why, instead of falling through to the pr
   const ui = await $.ui.mount(PANE)
   // c and m are for your own PRs; the review tab catches them
   await ui.press({ key: 'unbound-c' })
-  expect(s.toasts.at(-1)).toContain('c fixes failed CI on your PRs')
+  expect(s.toasts.at(-1)).toContain('c fixes failed CI or a conflict on your PRs')
   await ui.press({ key: 'unbound-m' })
   expect(s.toasts.at(-1)).toContain('m merges on your PRs')
   await ui.press({ key: 'unbound-g' })
@@ -4683,7 +4788,7 @@ test('a draft says so in the badge and the details, not in its title; what needs
   expect(await lineOf(ui, 11)).toContain('draft · requested')
   expect(await lineOf(ui, 11)).not.toContain('[draft]')
   await ui.press({ key: 'tab-mine' })
-  expect(await lineOf(ui, 23)).toContain('✗ FIX')
+  expect(await lineOf(ui, 23)).toContain('✗ CONF')
   expect(await lineOf(ui, 23)).toContain('a draft')
   expect(await lineOf(ui, 21)).toContain('✎ DRFT')
   expect(await lineOf(ui, 21)).not.toContain('[draft]')
