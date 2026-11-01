@@ -4639,7 +4639,7 @@ test('fix_reply auto: once the push went, pr-inbox posts the replies: only to th
   expect(question).not.toContain('Fixed in')
   // The threads stay for the reviewers to resolve
   expect(s.calls.some((c) => c.some((a) => /resolveReviewThread/.test(a)))).toBe(false)
-  expect(s.logs.some((l) => l.includes('posted 2 replies (1 fixed, 0 declined, 1 question) to review threads of acme/app#21'))).toBe(true)
+  expect(s.logs.some((l) => l.includes('posted 2 replies (1 fixed, 1 question) to review threads of acme/app#21'))).toBe(true)
   expect(s.toasts.at(-1)).toContain("✦ pr-inbox posted Claude's 2 replies to review threads of acme/app#21")
   await ui.unmount()
 })
@@ -4859,6 +4859,117 @@ test('/pr-inbox fix keeps fixing CI, and /pr-inbox address on a PR with no threa
   expect((await run('address app#21')).text).toBe('No review thread on https://github.com/acme/app/pull/21 waits on you')
   expect((await run('fix app#21')).text).toBe('Fixing the CI of https://github.com/acme/app/pull/21')
 })
+
+// Claude fixed one thread and left the other to you, with why and a draft
+const HELD_JSON = JSON.stringify([
+  { thread: 'PRRT_one', action: 'fixed', reply: 'Done.' },
+  {
+    thread: 'PRRT_four',
+    action: 'needs_you',
+    why: `A design choice: \u001b[31mshared form\u001b[0m or one per page ${'w'.repeat(1000)}`,
+    reply: 'Two ways: keep one shared form, or split it per page. @mika which do you prefer?',
+  },
+])
+
+test('a thread Claude should not settle alone is held with its draft: auto posts the rest, the held one waits for g', async ($, on) => {
+  const s = addressStubs(on, { replies: HELD_JSON })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await addressAndEnd(ui, s, $, 'hold1')
+  expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'push', 'origin', `${HEAD}:refs/heads/fix-21`])
+  expect(repliesPosted(s).map((p) => p.thread)).toEqual(['PRRT_one'])
+  // Said last, and nothing opens by itself
+  expect(s.toasts.at(-1)).toContain('⚑ 1 thread needs you on acme/app#21: Claude left a draft for each, not posted · g: read them')
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
+  expect(await lineOf(ui, 21)).toContain('⚑ 1 thread needs you · g')
+  expect((await ui.find({ key: 'act-comments' }))?.props.label).toBe('1 thread needs you')
+  await ui.unmount()
+})
+
+test('the held panel posts only the drafts you check, after y; none is checked for you', async ($, on) => {
+  const s = addressStubs(on, { replies: HELD_JSON })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await addressAndEnd(ui, s, $, 'hold2')
+  const before = repliesPosted(s).length
+  await ui.press({ key: 'act-comments' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+  expect(panel).toContain('0 of 1 draft checked')
+  expect(panel).toContain('lib/form.rb:7 · @coderabbitai · why: A design choice: shared form or one per page')
+  expect(panel).toContain('draft: Two ways: keep one shared form, or split it per page. @mika which do you prefer?')
+  // why is cleaned and cut: it is only drawn, never posted
+  expect(panel).not.toContain('\u001b')
+  expect(panel).not.toContain('w'.repeat(300))
+  expect(panel).toContain('q, then p (ask Claude about the PR)')
+  // Nothing checked: y posts nothing
+  await ui.press({ key: 'panel-yes' })
+  expect(s.toasts.at(-1)).toBe('y: check a draft (x or its number) first')
+  await ui.press({ key: 'unbound-a' })
+  expect(repliesPosted(s).length).toBe(before)
+  await ui.press({ key: 'panel-toggle' })
+  expect(((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text).toContain(
+    'y posts: 1 draft as written to their threads on acme/app#21: lib/form.rb:7',
+  )
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  const posted = repliesPosted(s).slice(before)
+  expect(posted.map((p) => p.thread)).toEqual(['PRRT_four'])
+  expect(posted[0]?.body).toContain('@​mika which do you prefer?')
+  expect(posted[0]?.body).toContain('<sub>Written by Claude, posted by pr-inbox after the PR author read it</sub>')
+  expect(posted[0]?.body).not.toContain('design choice')
+  expect(s.logs.some((l) => l.includes('(1 needs_you)') && l.includes('you checked them and pressed y in the held panel of g'))).toBe(true)
+  expect(await ui.find({ key: 'panel' })).toBeUndefined()
+  expect(await lineOf(ui, 21)).not.toContain('needs you')
+  await ui.unmount()
+})
+
+test('of two held drafts, the one left unchecked stays held', async ($, on) => {
+  const replies = JSON.stringify([
+    { thread: 'PRRT_one', action: 'needs_you', why: 'scope', reply: 'Shall I move this to a follow-up PR?' },
+    { thread: 'PRRT_four', action: 'needs_you', why: 'intent', reply: 'Do you mean the shared form?' },
+  ])
+  const s = addressStubs(on, { replies, commits: '' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await addressAndEnd(ui, s, $, 'hold3')
+  expect(s.calls.some((c) => c.includes('push'))).toBe(false)
+  expect(repliesPosted(s)).toEqual([])
+  expect(s.toasts.at(-1)).toContain('⚑ 2 threads need you on acme/app#21')
+  await ui.press({ key: 'act-comments' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  await ui.press({ key: 'panel-toggle' })
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(repliesPosted(s).map((p) => p.thread)).toEqual(['PRRT_one'])
+  expect(await lineOf(ui, 21)).toContain('⚑ 1 thread needs you · g')
+  await ui.unmount()
+})
+
+test(
+  'fix_reply ask: the replies panel leaves out what is held; those wait for the held panel',
+  { options: { fix_reply: 'ask' } },
+  async ($, on) => {
+    const s = addressStubs(on, { replies: HELD_JSON })
+    await start($, s.clock)
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'tab-mine' })
+    await addressAndEnd(ui, s, $, 'hold4')
+    await ui.press({ key: 'act-comments' })
+    for (let i = 0; i < 5; i++) await s.clock.settle()
+    const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+    expect(panel).toContain('y posts: 1 reply to review threads of acme/app#21')
+    expect(panel).not.toContain('lib/form.rb')
+    await ui.press({ key: 'panel-yes' })
+    for (let i = 0; i < 10; i++) await s.clock.settle()
+    expect(repliesPosted(s).map((p) => p.thread)).toEqual(['PRRT_one'])
+    expect((await ui.find({ key: 'act-comments' }))?.props.label).toBe('1 thread needs you')
+    await ui.unmount()
+  },
+)
 
 test('review requests in a stack are listed together too, bottom first, with their place', async ($, on) => {
   const requestedAt = (at: string) => ({
