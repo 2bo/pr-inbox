@@ -6551,7 +6551,7 @@ async function settleFix($: EngineInterface, job: FixJob, end: FixEnd, replies: 
     // A merge stopped halfway (conflict markers left) says so: the next fix goes on from it
     const merging = (await $.process.run(['git', '-C', job.dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'])).stdout.trim()
     const noReply = FIX_TASKS[job.task].replies
-      ? ` and no reply to post${dropped ? ` (${repliesWord(dropped)} said fixed with no commit, left out)` : ''}`
+      ? ` and nothing else to post${dropped ? ` (${repliesWord(dropped)} said fixed with no commit, left out)` : ''}`
       : ''
     tell(
       $,
