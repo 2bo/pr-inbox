@@ -4393,7 +4393,7 @@ test('fix_push auto: a commit made after the turn ended is not pushed with the o
 test('no push, automatic or not, when origin also pushes somewhere other than the PR repository', async ($, on) => {
   const git = (argv: readonly string[]) =>
     argv.join(' ').endsWith('remote get-url --push --all origin')
-      ? { stdout: 'git@github.com:acme/app.git\nhttps://example.com/mirror/app.git\n' }
+      ? { stdout: 'git@github.com:acme/app.git\nhttps://example.com/github.com/acme/app.git\n' }
       : fixGit()(argv)
   const s = stubs(on, { git, locale: { HOME: '/home/me' } })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))

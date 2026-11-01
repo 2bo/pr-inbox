@@ -5963,9 +5963,14 @@ const FIX_DENY = (push: Config['fix_push']) =>
 const BRANCH_NAME = /^(?!-)(?!.*\.\.)[\w./-]{1,200}$/
 const SHA = /^[0-9a-f]{40}$/
 
-// owner/repo of a GitHub remote URL (https or ssh)
+// owner/repo of a GitHub remote URL (https, ssh:// or git@github.com:), with github.com as its host: a URL that only
+// has github.com in its path (https://example.com/github.com/acme/app) is not one
 function githubRepoOf(remote: string): string {
-  return remote.trim().match(/github\.com[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/)?.[1] ?? ''
+  return (
+    remote
+      .trim()
+      .match(/^(?:(?:https|ssh):\/\/(?:[^@/]+@)?github\.com(?::\d+)?\/|git@github\.com:)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/)?.[1] ?? ''
+  )
 }
 
 async function cloneOf($: EngineInterface, dir: string, repo: string): Promise<boolean> {
