@@ -165,6 +165,14 @@ const MINE = [
     // Auto-merge is on: GitHub merges it once lena-park approves and CI passes
     autoMergeRequest: { mergeMethod: 'SQUASH' },
   }),
+  // main moved under it: it conflicts, and c offers to resolve it with Claude
+  pr('storefront', 478, 'Rename cart events to checkout events', 'you', {
+    ...nobody,
+    ...asked(user('lena-park')),
+    additions: 56,
+    deletions: 41,
+    mergeable: 'CONFLICTING',
+  }),
   // Nobody asked to review it yet
   pr('infra', 88, 'Tune autoscaling thresholds for queue workers', 'you', { ...nobody, additions: 14, deletions: 8 }),
   // A stack made with gh stack: metrics, then autoscaling on them, then a dashboard
