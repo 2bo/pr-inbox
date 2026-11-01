@@ -4304,7 +4304,7 @@ test('fix_push auto (default): a fix turn that ends on its own is pushed, pinned
   await ui.press({ key: 'act-ci' })
   for (let i = 0; i < 5; i++) await s.clock.settle()
   const menu = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
-  expect(menu).toContain('When it ends, pr-inbox pushes the commits to the PR branch, never forced (fix_push auto)')
+  expect(menu).toContain('then pr-inbox pushes it to the PR branch when the turn ends, never forced (fix_push auto)')
   await ui.press({ key: 'panel-choice-1' })
   await ui.press({ key: 'panel-yes' })
   for (let i = 0; i < 10; i++) await s.clock.settle()
@@ -4342,7 +4342,7 @@ test('fix_push auto: a push GitHub refuses leaves the fix ready for the push pan
   await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'auto3' })
   await $.turn.complete({ turnId: 'auto3', answer: '', reason: 'answer' } as never)
   for (let i = 0; i < 10; i++) await s.clock.settle()
-  expect(s.toasts.at(-1)).toContain('⇡ fix ready for acme/app#21: not pushed (fix-21 has new commits on GitHub')
+  expect(s.toasts.at(-1)).toContain('⇡ fix ready for acme/app#21: the push did not go through (fix-21 has new commits on GitHub')
   expect(await lineOf(ui, 21)).toContain('⇡ PUSH')
   await ui.unmount()
 })
@@ -5175,7 +5175,7 @@ test(
     await ui.press({ key: 'act-ci' })
     const text = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
     expect(text).toContain('✗ rspec')
-    expect(text).toContain('Nothing is pushed until you say so')
+    expect(text).toContain('nothing is pushed until you say so')
     await ui.press({ key: 'panel-choice-1' })
     await ui.press({ key: 'panel-yes' })
     for (let i = 0; i < 10; i++) await s.clock.settle()
