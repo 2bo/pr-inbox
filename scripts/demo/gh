@@ -769,6 +769,9 @@ if (args[0] === 'api' && args[1] === 'graphql' && args.includes('--input')) {
   if (args[1] === 'diff') out(d.diff)
   else if (args.includes('--web')) out('')
   else if (fields === 'headRefOid') out({ headRefOid: p.headRefOid })
+  // What pr-inbox reads again right before it pushes or posts replies
+  else if (fields === 'state,headRefName,headRefOid,author')
+    out({ state: 'OPEN', headRefName: p.headRefName ?? `feature/${p.number}`, headRefOid: p.headRefOid, author: p.author })
   else if (fields.startsWith('comments')) out(TALK[key(p)] ?? { comments: [], reviews: [] })
   else if (fields === 'body,comments,reviews') out({ body: d.body, ...(TALK[key(p)] ?? { comments: [], reviews: [] }) })
   else

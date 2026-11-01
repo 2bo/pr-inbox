@@ -1176,15 +1176,45 @@ function settleApprovedHere(now: number, found: PR[]): void {
 }
 
 // Your own PRs' review threads, only what g needs to tell which ones wait on you (no comment text), and only for
-// PRs that have threads at all: one query after the list, by node id, so the list's own query stays light
+// PRs that have threads at all: one query after the list, by node id, so the list's own query stays light. A PR with
+// more than a page of threads is read on, page by page (THREAD_PAGES at most), so a thread past the first page counts
+const THREAD_FIELDS =
+  'pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path line comments(last: 1) { nodes { author { login __typename } } } }'
 const THREADS_QUERY = `query($ids: [ID!]!) {
-  nodes(ids: $ids) {
-    ... on PullRequest {
-      id
-      threads: reviewThreads(first: 50) { nodes { id isResolved isOutdated path line comments(last: 1) { nodes { author { login __typename } } } } }
-    }
-  }
+  nodes(ids: $ids) { ... on PullRequest { id threads: reviewThreads(first: 50) { ${THREAD_FIELDS} } } }
 }`
+const THREADS_PAGE_QUERY = `query($id: ID!, $after: String!) {
+  node(id: $id) { ... on PullRequest { threads: reviewThreads(first: 50, after: $after) { ${THREAD_FIELDS} } } }
+}`
+const THREAD_PAGES = 10
+type ThreadPage = { pageInfo?: { hasNextPage?: unknown; endCursor?: unknown }; nodes?: (ReviewThread | null)[] }
+// The cursor of the next page, when there is one
+const nextCursor = (page: ThreadPage | undefined) =>
+  page?.pageInfo?.hasNextPage === true && typeof page.pageInfo.endCursor === 'string' ? page.pageInfo.endCursor : undefined
+
+// The pages after the first, while there are more and up to THREAD_PAGES in all: the threads read, and whether some
+// were left unread (too many pages, or a page GitHub refused)
+async function morePages($: EngineInterface, id: string, first: ThreadPage): Promise<{ nodes: (ReviewThread | null)[]; left: boolean }> {
+  const nodes = [...(first.nodes ?? [])]
+  let after = nextCursor(first)
+  for (let page = 1; after && page < THREAD_PAGES; page++) {
+    const r = await $.process
+      .run(['gh', 'api', 'graphql', '--input', '-'], {
+        stdin: JSON.stringify({ query: THREADS_PAGE_QUERY, variables: { id, after } }),
+      })
+      .catch(ghMissing)
+    let next: ThreadPage | undefined
+    try {
+      next = r.exitCode === 0 ? (JSON.parse(r.stdout).data?.node?.threads as ThreadPage | undefined) : undefined
+    } catch {
+      next = undefined
+    }
+    if (!next) return { nodes, left: true }
+    nodes.push(...(next.nodes ?? []))
+    after = nextCursor(next)
+  }
+  return { nodes, left: Boolean(after) }
+}
 
 // After each fetch: which threads wait on you, per PR (threadsByPr), and the held drafts of threads that no longer
 // do dropped. A failure only leaves the threads unknown (no g), never the refresh failed
@@ -1200,17 +1230,16 @@ async function readThreads($: EngineInterface): Promise<void> {
       .run(['gh', 'api', 'graphql', '--input', '-'], { stdin: JSON.stringify({ query: THREADS_QUERY, variables: { ids } }) })
       .catch(ghMissing)
     try {
-      const nodes =
-        r.exitCode === 0
-          ? ((JSON.parse(r.stdout).data?.nodes ?? []) as ({ id?: unknown; threads?: { nodes?: (ReviewThread | null)[] } } | null)[])
-          : []
+      const nodes = r.exitCode === 0 ? ((JSON.parse(r.stdout).data?.nodes ?? []) as ({ id?: unknown; threads?: ThreadPage } | null)[]) : []
       for (const n of nodes) {
         const pr = mine.find((p) => p.id === n?.id)
-        const threads = pr ? waitingThreads(n?.threads?.nodes ?? []) : []
-        if (!pr || threads.length === 0) continue
+        if (!pr || typeof pr.id !== 'string') continue
+        const read = await morePages($, pr.id, n?.threads ?? {})
+        const threads = waitingThreads(read.nodes)
+        if (threads.length === 0) continue
         found.set(pr.url, threads.slice(0, MAX_REPLIES))
-        // More than one turn takes, or more than the query reads (first: 50): g says so
-        if (threads.length > MAX_REPLIES || (pr.reviewThreads?.totalCount ?? 0) > 50) capped.add(pr.url)
+        // More than one turn takes, or threads left unread: g says so
+        if (threads.length > MAX_REPLIES || read.left) capped.add(pr.url)
       }
       known = r.exitCode === 0
     } catch {

@@ -4898,6 +4898,34 @@ test('threads that cannot be read leave the refresh working and offer no g', asy
   await ui.unmount()
 })
 
+test('threads past the first page are read on, and a page GitHub refuses leaves g saying there are more', async ($, on) => {
+  // The first page has only resolved threads; the one waiting on you is on the second
+  const first = { pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [thread('PRRT_old', 'app/old.rb', 3, 'mika', true)] }
+  const second = { pageInfo: { hasNextPage: true, endCursor: 'c2' }, nodes: [thread('PRRT_late', 'app/late.rb', 9, 'mika')] }
+  let pages = 0
+  const s = stubs(on, {
+    graphql: commentedGraphql({ ...COMMENTED, threads: first }),
+    gh: (argv) => {
+      if (!argv.includes('--input')) return undefined
+      pages++
+      if (pages === 2) return { stdout: JSON.stringify({ data: { node: { threads: second } } }) }
+      return pages > 2 ? { exitCode: 1 } : undefined
+    },
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ key: 'act-comments' })).toBeDefined()
+  const asked = s.calls.map((c, i) => (c.includes('--input') ? JSON.parse(s.stdins[i] ?? '{}').variables : undefined)).filter(Boolean)
+  expect(asked).toEqual([{ ids: ['PR_21'] }, { id: 'PR_21', after: 'c1' }, { id: 'PR_21', after: 'c2' }])
+  await ui.press({ key: 'act-comments' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+  expect(panel).toContain('app/late.rb:9 · @mika')
+  expect(panel).toContain('g again for the rest')
+  await ui.unmount()
+})
+
 test('threads that could not be read say so on the row and to /pr-inbox address', async ($, on) => {
   const s = stubs(on, {
     graphql: commentedGraphql(),
