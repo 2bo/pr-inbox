@@ -1,6 +1,6 @@
 {
   "name": "pr-inbox",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "An inbox for review requests, your own PRs and your issues (assigned to you or created by you): AI summary and risk, an AI review that can approve, a reader for the description and diff, asking reviewers (teams that assign too), merging (gh stack too), CI and conflict fixes with Claude, and asking the Claude Code session that made or last worked on your PR for more",
   "author": {
     "name": "2bo"
@@ -113,6 +113,13 @@
       "description": "Run the AI review (v) without pressing v when a review request arrives or gets new commits: bots (bot PRs only), review requests (every review request, bots too) or off. Interactive sessions only, one at a time, at most 6 an hour across sessions (each about two review_model calls per perspective); drafts, conflicts, changes requested and running CI wait. v on one it runs cancels it and pauses this for an hour. Approving still follows ai_approve",
       "default": "off",
       "options": ["off", "bots", "review requests"]
+    },
+    "fix_push": {
+      "type": "string",
+      "title": "Fix push",
+      "description": "What happens to the commits of a fix of your PR (c: failed CI or a conflict): auto (pushed to the PR's branch when the fix turn ends on its own, never forced) or ask (the push panel, then y). A fix turn cut short always waits for the push panel",
+      "default": "auto",
+      "options": ["auto", "ask"]
     },
     "review_model": {
       "type": "string",
