@@ -4540,24 +4540,34 @@ const REPLY_JSON = JSON.stringify([
 // as gh reads it before replies go out
 function addressStubs(
   on: TestOn,
-  opts: { replies?: string; commits?: string; git?: StubOptions['git']; view?: unknown; graphql?: string } = {},
+  opts: {
+    replies?: string
+    commits?: string
+    git?: StubOptions['git']
+    view?: unknown
+    graphql?: string
+    // Set to refuse the threads query from then on
+    threadsRefused?: { now: boolean }
+  } = {},
 ) {
   const s = stubs(on, {
     graphql: opts.graphql ?? commentedGraphql(),
     git: opts.git ?? fixGit(opts.commits),
     locale: { HOME: '/home/me' },
     gh: (argv) =>
-      argv.includes('state,headRefName,headRefOid,author')
-        ? {
-            stdout: JSON.stringify({
-              state: 'OPEN',
-              headRefName: 'fix-21',
-              author: { login: 'me' },
-              headRefOid: HEAD,
-              ...(opts.view as object | undefined),
-            }),
-          }
-        : undefined,
+      argv.includes('--input') && opts.threadsRefused?.now
+        ? { exitCode: 1 }
+        : argv.includes('state,headRefName,headRefOid,author')
+          ? {
+              stdout: JSON.stringify({
+                state: 'OPEN',
+                headRefName: 'fix-21',
+                author: { login: 'me' },
+                headRefOid: HEAD,
+                ...(opts.view as object | undefined),
+              }),
+            }
+          : undefined,
   })
   const text = opts.replies ?? REPLY_JSON
   on('fs.stat', () => ({ value: { kind: 'file', size: text.length, mtimeMs: 0, isLink: false } }) as never)
@@ -4926,6 +4936,29 @@ test('threads past the first page are read on, and a page GitHub refuses leaves 
   await ui.unmount()
 })
 
+test('a PR whose threads were not all read says so, even with none waiting in what was read', async ($, on) => {
+  // The first page has nothing waiting on you; the next one is refused
+  const first = { pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [thread('PRRT_old', 'app/old.rb', 3, 'mika', true)] }
+  let pages = 0
+  const s = stubs(on, {
+    graphql: commentedGraphql({ ...COMMENTED, threads: first }),
+    gh: (argv) => (argv.includes('--input') && ++pages > 1 ? { exitCode: 1 } : undefined),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await lineOf(ui, 21)).toContain('review threads not all read · r: refresh')
+  expect(await ui.find({ key: 'act-comments' })).toBeUndefined()
+  const out = await $.command.run({
+    command: 'pr-inbox',
+    args: 'address app#21',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: true, columns: 120 },
+  })
+  expect(out.text).toBe('Could not read the review threads of https://github.com/acme/app/pull/21: try /pr-inbox refresh')
+  await ui.unmount()
+})
+
 test('threads that could not be read say so on the row and to /pr-inbox address', async ($, on) => {
   const s = stubs(on, {
     graphql: commentedGraphql(),
@@ -4934,7 +4967,7 @@ test('threads that could not be read say so on the row and to /pr-inbox address'
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  expect(await lineOf(ui, 21)).toContain('review threads not read (GitHub refused) · r: refresh')
+  expect(await lineOf(ui, 21)).toContain('review threads not all read · r: refresh')
   const out = await $.command.run({
     command: 'pr-inbox',
     args: 'address app#21',
@@ -5116,6 +5149,20 @@ test('a thread Claude should not settle alone is held with its draft: auto posts
   expect(s.toasts.at(-1)).toContain('⇡ acme/app#21: pushed 1 commit, posted 1 reply · ⚑ 1 thread needs you · g: read it')
   expect(await ui.find({ key: 'panel' })).toBeUndefined()
   expect(await lineOf(ui, 21)).toContain('⚑ 1 thread needs you · g')
+  expect((await ui.find({ key: 'act-comments' }))?.props.label).toBe('read 1 held draft')
+  await ui.unmount()
+})
+
+test('held drafts stay when the threads could not be read, as they may still wait on you', async ($, on) => {
+  const threadsRefused = { now: false }
+  const s = addressStubs(on, { replies: HELD_JSON, threadsRefused })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await addressAndEnd(ui, s, $, 'hold2')
+  threadsRefused.now = true
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
   expect((await ui.find({ key: 'act-comments' }))?.props.label).toBe('read 1 held draft')
   await ui.unmount()
 })

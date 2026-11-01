@@ -1217,15 +1217,15 @@ async function morePages($: EngineInterface, id: string, first: ThreadPage): Pro
 }
 
 // After each fetch: which threads wait on you, per PR (threadsByPr), and the held drafts of threads that no longer
-// do dropped. A failure only leaves the threads unknown (no g), never the refresh failed
+// do dropped. A failure only leaves a PR's threads unread (threadsUnread: said on its row), never the refresh failed
 async function readThreads($: EngineInterface): Promise<void> {
-  const ids = mine.filter((p) => (p.reviewThreads?.totalCount ?? 0) > 0 && typeof p.id === 'string').map((p) => p.id as string)
+  const asked = mine.filter((p) => (p.reviewThreads?.totalCount ?? 0) > 0 && typeof p.id === 'string')
+  const ids = asked.map((p) => p.id as string)
   const found = new Map<string, OpenThread[]>()
   const capped = new Set<string>()
-  // Held drafts are dropped only against threads read this time
-  let known = true
+  // Until read in full, every PR asked about is unread
+  const unread = new Set(viewer ? asked.map((p) => p.url) : [])
   if (ids.length > 0 && viewer) {
-    known = false
     const r = await $.process
       .run(['gh', 'api', 'graphql', '--input', '-'], { stdin: JSON.stringify({ query: THREADS_QUERY, variables: { ids } }) })
       .catch(ghMissing)
@@ -1235,21 +1235,23 @@ async function readThreads($: EngineInterface): Promise<void> {
         const pr = mine.find((p) => p.id === n?.id)
         if (!pr || typeof pr.id !== 'string') continue
         const read = await morePages($, pr.id, n?.threads ?? {})
+        if (!read.left) unread.delete(pr.url)
         const threads = waitingThreads(read.nodes)
         if (threads.length === 0) continue
         found.set(pr.url, threads.slice(0, MAX_REPLIES))
         // More than one turn takes, or threads left unread: g says so
         if (threads.length > MAX_REPLIES || read.left) capped.add(pr.url)
       }
-      known = r.exitCode === 0
     } catch {
-      // Threads unknown this time: g is not offered
+      // Threads unread this time: g offers only what was read
     }
   }
   threadsByPr = found
   threadsCapped = capped
-  threadsUnknown = !known
-  for (const [url, held] of known ? heldReplies : []) {
+  threadsUnread = unread
+  // Held drafts are dropped only against a PR's threads read in full this time
+  for (const [url, held] of heldReplies) {
+    if (unread.has(url)) continue
     const open = new Set(openThreads(held.pr).map((t) => t.id))
     const replies = held.replies.filter((r) => open.has(r.thread.id))
     if (replies.length > 0) heldReplies.set(url, { ...held, replies })
@@ -6095,9 +6097,10 @@ const MAX_REPLIES = 30
 const REPLY_MAX = 2000
 // Your PRs' threads that wait on you, by PR URL: worked out once per fetch (readThreads), only for your own PRs
 let threadsByPr = new Map<string, OpenThread[]>()
-// PRs with more threads waiting than one turn takes (MAX_REPLIES) or the query reads, and whether the last read failed
+// PRs with more threads waiting than one turn takes (MAX_REPLIES) or than were read, and PRs whose threads were not
+// all read last time (GitHub refused, or more pages than THREAD_PAGES)
 let threadsCapped = new Set<string>()
-let threadsUnknown = false
+let threadsUnread = new Set<string>()
 function openThreads(pr: PR): OpenThread[] {
   return threadsByPr.get(pr.url) ?? []
 }
@@ -7296,7 +7299,7 @@ export function register(on: On, options: PluginOptions) {
       const target = hits[0] as PR
       const address = fix[1] === 'address'
       const waiting = openThreads(target).length
-      if (address && waiting === 0 && threadsUnknown && (target.reviewThreads?.totalCount ?? 0) > 0)
+      if (address && waiting === 0 && threadsUnread.has(target.url))
         return { text: `Could not read the review threads of ${target.url}: try /pr-inbox refresh` }
       if (address && waiting === 0) return { text: `No review thread on ${target.url} waits on you` }
       const task: FixTask = address ? 'comments' : (fixTasks(target)[0] ?? 'ci')
@@ -9147,11 +9150,11 @@ export function register(on: On, options: PluginOptions) {
       // Review threads that wait on you, and the key that addresses them (none on a fork: g fixes only branches in the
       // repository); threads that could not be read say so
       const waiting = tab === 'mine' && !lead && !p.isCrossRepository ? openThreads(p).length : 0
-      const unread = tab === 'mine' && threadsUnknown && (p.reviewThreads?.totalCount ?? 0) > 0
+      const unread = tab === 'mine' && threadsUnread.has(p.url)
       const threads = waiting
         ? `${plural(waiting, 'unresolved thread')} · g: address`
         : unread
-          ? 'review threads not read (GitHub refused) · r: refresh'
+          ? 'review threads not all read · r: refresh'
           : ''
       return {
         lead,
