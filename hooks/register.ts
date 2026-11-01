@@ -914,7 +914,7 @@ function approvedBadge(pr: PR): Cell {
   const reasons = classify(pr, fetchedAt || Date.now()).reasons
   if (reasons.includes('changes requested')) return { text: '✗ CHG ', color: NEON.red }
   if (reasons.includes('CI failed')) return { text: '✗ CI  ', color: NEON.red }
-  if (reasons.includes('conflict')) return conflictBadge()
+  if (reasons.includes('conflict')) return { ...conflictBadge(), bold: false }
   if (pr.isDraft) return DRAFT_BADGE
   const ci = ciState(pr)
   if (ci === 'PENDING' || ci === 'EXPECTED') return { text: '◌ CI  ', color: NEON.yellow }
@@ -1760,7 +1760,7 @@ async function runWrite($: EngineInterface, p: WritePanel): Promise<string> {
   if (p.write.kind === 'fixing') return p.chosen === '1' ? afterFix($, p.write.job, 'early') : stopWatching($, p.write.job)
   if (p.write.kind === 'clone') return cloneAndFix($, pr, p.write.task)
   if (p.write.kind === 'worktree') {
-    if (p.chosen === '3') return pushLeft($, pr)
+    if (p.chosen === '3') return pushLeft($, pr, p.write.task)
     return startFix($, pr, p.write.task, p.chosen === '1' ? 'go on' : 'start again')
   }
   if (p.write.kind === 'push') return sendPush($, p.write.job, p.write.head)
@@ -5922,6 +5922,7 @@ type FixJob = {
   branch: string
   // The base branch (a conflict merges it in; its commits are on GitHub already, so a push panel leaves them out)
   into: string
+  task: FixTask
   dir: string
   base: string
   startedAt: number
@@ -6067,7 +6068,7 @@ async function startFix($: EngineInterface, pr: PR, task: FixTask, left?: 'go on
   }
   // Commits are counted from the branch as GitHub had it at the fetch: exactly what a push would send
   const base = `origin/${branch}`
-  const job: FixJob = { pr, repo, branch, into, dir, base, startedAt: await $.clock.now() }
+  const job: FixJob = { pr, repo, branch, into, task, dir, base, startedAt: await $.clock.now() }
   fixJob = job
   fixReady.delete(pr.url)
   // Not awaited: the call waits until the turn starts
@@ -6145,7 +6146,14 @@ async function afterFix($: EngineInterface, job: FixJob, end: FixEnd = 'done'): 
   $.ui.invalidate('ui.render')
   if (commits.length === 0) {
     fixReady.delete(job.pr.url)
-    $.ui.toast(`No new commit for ${askLabel(job.pr)} in ${job.dir}`, { timeoutMs: 8000 })
+    // A merge stopped halfway (conflict markers left) says so: the next fix goes on from it
+    const merging = (await $.process.run(['git', '-C', job.dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'])).stdout.trim()
+    $.ui.toast(
+      SHA.test(merging)
+        ? `No new commit for ${askLabel(job.pr)}: a merge of ${clean(job.into)} is left unfinished in ${job.dir} · c, 3, y: Claude goes on from it`
+        : `No new commit for ${askLabel(job.pr)} in ${job.dir}`,
+      { timeoutMs: 8000 },
+    )
     return ''
   }
   const ready: FixJob = { ...job, commits, ...(end === 'interrupted' ? { interrupted: true } : {}) }
@@ -6243,19 +6251,23 @@ async function sendPush($: EngineInterface, job: FixJob, head: string): Promise<
 }
 
 // 3 in the worktree panel: the commits left there go to the push panel, as a fix ready, with no new turn
-async function pushLeft($: EngineInterface, pr: PR): Promise<string> {
+async function pushLeft($: EngineInterface, pr: PR, task: FixTask): Promise<string> {
   const home = (await $.env.get('HOME')) || ''
   const branch = pr.headRefName ?? ''
   const dir = `${home}/.cache/pr-inbox/worktrees/${pr.repository.nameWithOwner}/pr-${pr.number}`
   const into = pr.baseRefName ?? ''
-  return openPush($, { pr, repo: pr.repository.nameWithOwner, branch, into, dir, base: `origin/${branch}`, startedAt: await $.clock.now() })
+  const startedAt = await $.clock.now()
+  return openPush($, { pr, repo: pr.repository.nameWithOwner, branch, into, task, dir, base: `origin/${branch}`, startedAt })
 }
 
 // x in the push panel: the fix is set aside; its commits stay in the worktree
 function forgetFix($: EngineInterface, job: FixJob): void {
   fixReady.delete(job.pr.url)
   if (writePanel?.write.kind === 'push') writePanel = undefined
-  $.ui.toast(`Forgot the fix of ${askLabel(job.pr)}; its commits stay in ${job.dir} · c, 1: push them later`, { timeoutMs: 8000 })
+  $.ui.toast(
+    `Forgot the fix of ${askLabel(job.pr)}; its commits stay in ${job.dir} · c, ${job.task === 'conflict' ? '3' : '1'}, y, then 3: push them later`,
+    { timeoutMs: 8000 },
+  )
   $.ui.invalidate('ui.render')
 }
 
@@ -6268,7 +6280,16 @@ async function stopWatching($: EngineInterface, job: FixJob): Promise<string> {
 
 // The fix's own diff (from the worktree) in the reader, before you push it
 async function openFixDiff($: EngineInterface, job: FixJob): Promise<void> {
-  const r = await $.process.run(['git', '-C', job.dir, 'diff', `${job.base}..HEAD`])
+  const [r, all] = await Promise.all([
+    $.process.run(['git', '-C', job.dir, 'diff', `${job.base}..HEAD`]),
+    $.process.run(['git', '-C', job.dir, 'rev-list', '--count', `${job.base}..HEAD`]),
+  ])
+  const commits = job.commits?.length ?? 0
+  // After a merge of the base, its changes are in this diff too: say so
+  const merged = Number.isInteger(Number(all.stdout.trim())) ? Math.max(0, Number(all.stdout.trim()) - commits) : 0
+  const alsoMerged = merged
+    ? ` + ${plural(merged, 'commit')} of ${clean(job.into)} the merge brings in (their changes are in this diff)`
+    : ''
   diffView = {
     pr: job.pr,
     body: '',
@@ -6277,7 +6298,7 @@ async function openFixDiff($: EngineInterface, job: FixJob): Promise<void> {
     at: FIRST_FILE,
     block: 0,
     cursor: 0,
-    note: `the fix, not pushed yet: ${plural(job.commits?.length ?? 0, 'commit')} in ${job.dir} · q, then c: push panel`,
+    note: `the fix, not pushed yet: ${plural(commits, 'commit')}${alsoMerged} in ${job.dir} · q, then c: push panel`,
     list: false,
     loading: false,
     error: r.exitCode === 0 ? '' : clean(r.stderr) || 'git diff failed',
@@ -6349,8 +6370,16 @@ async function fixMenu($: EngineInterface, pr: PR): Promise<void> {
     notes: [
       ...(conflict ? [{ text: `✗ Conflicts with ${into}`, color: 'red' as const }] : []),
       ...(ciFailed ? [{ text: `CI failed: ${failed.map((n) => `✗ ${n}`).join(', ') || 'see the checks'}`, color: 'red' as const }] : []),
+      ...(conflict
+        ? [
+            {
+              text: `3: Claude merges ${into} in and resolves the conflict${ciFailed ? ` (first: CI runs on the merge with ${into})` : ''}`,
+            },
+          ]
+        : []),
+      ...(ciFailed ? [{ text: '1: Claude reads the failed logs and fixes CI' }] : []),
       {
-        text: `A fix: Claude ${conflict ? `merges ${into} in and resolves the conflict` : 'reads the failed logs and fixes it'} in a worktree of its own, with this session's permissions, runs the tests and commits. Nothing is pushed until you say so`,
+        text: "In a worktree of its own, with this session's permissions; it runs the tests and commits. Nothing is pushed until you say so",
       },
     ],
     sendsLead: 'y: ',
@@ -6368,8 +6397,8 @@ async function fixMenu($: EngineInterface, pr: PR): Promise<void> {
       {
         key: '2',
         word: 're-run the failed jobs',
-        refused: runs.length ? '' : 'no failed GitHub Actions run here; open the check for other CI',
-        refusedTag: 'no Actions run',
+        refused: !ciFailed ? 'CI has not failed' : runs.length ? '' : 'no failed GitHub Actions run here; open the check for other CI',
+        refusedTag: !ciFailed ? 'CI not failed' : 'no Actions run',
         yes: 're-run',
         sends: `re-runs the failed jobs of ${plural(runs.length, 'run')} on ${full}: ${actions.join(', ')} (GitHub Actions only)`,
       },
@@ -8206,7 +8235,7 @@ export function register(on: On, options: PluginOptions) {
       const ready = fixReady.get(p.url)
       const fixing =
         fixJob?.pr.url === p.url
-          ? `⟳ Claude is fixing its CI in ${fixJob.dir} (${elapsed(new Date(fixJob.startedAt).toISOString(), now)})`
+          ? `⟳ Claude is ${FIX_TASKS[fixJob.task].doing} in ${fixJob.dir} (${elapsed(new Date(fixJob.startedAt).toISOString(), now)})`
           : ready
             ? `⇡ fix ready: ${plural(ready.commits?.length ?? 0, 'commit')} not pushed · c: push panel`
             : ''
@@ -8236,7 +8265,13 @@ export function register(on: On, options: PluginOptions) {
           : ''
       const state =
         (group === 'action'
-          ? `needs you: ${reasons.join(', ')}${p.isDraft ? ' · a draft' : ''}${again.length > 0 ? ` · w: re-request ${again.map(atName).join(', ')}` : ''}`
+          ? `needs you: ${reasons.join(', ')}${p.isDraft ? ' · a draft' : ''}${
+              fixTasks(p).length > 0
+                ? ` · c: ${fixTasks(p)
+                    .map((t) => FIX_TASKS[t].verb)
+                    .join(' / ')}`
+                : ''
+            }${again.length > 0 ? ` · w: re-request ${again.map(atName).join(', ')}` : ''}`
           : group === 'ready'
             ? 'ready to merge · m: merge now'
             : group === 'stale'
@@ -8728,7 +8763,10 @@ export function register(on: On, options: PluginOptions) {
               'm',
               'ready: merge now in the merge panel: 1/2/3 picks the method, then y (a stack: gh stack merge) · not ready: auto-merge when ready (⇢ AUTO), or off again · also on bot PRs (1)',
             ],
-            ['c', 'CI failed: 1 Claude fixes it in a worktree, 2 re-run, then y · a fix ready: the push panel (y push, d diff, x forget)'],
+            [
+              'c',
+              'CI failed or a conflict: 1 Claude fixes CI, 2 re-run, 3 Claude resolves the conflict (merges the base in), then y · a fix ready: the push panel (y push, d diff, x forget)',
+            ],
             ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · y in it sends'],
             [
               't',
@@ -8829,10 +8867,10 @@ export function register(on: On, options: PluginOptions) {
         ],
         [
           'STATE',
-          '✗ FIX needs you · ✓ RDY ready to merge · … REVW in review · ⇢ AUTO auto-merge on, merges when ready · ○ ASK nobody is asked to review it · ✎ DRFT a draft · ◇ OLD no update for a while · ⏸ SNZ snoozed',
+          '✗ CONF conflicts with its base (c) · ✗ FIX needs you · ✓ RDY ready to merge · … REVW in review · ⇢ AUTO auto-merge on, merges when ready · ○ ASK nobody is asked to review it · ✎ DRFT a draft · ◇ OLD no update for a while · ⏸ SNZ snoozed',
           NEON.green,
         ],
-        ['', '⟳ WIP Claude is fixing its CI · ⇡ PUSH a fix waits for your push', NEON.cyan],
+        ['', '⟳ WIP Claude is fixing its CI or conflict · ⇡ PUSH a fix waits for your push', NEON.cyan],
         [
           'approved',
           '↻ RE changed since you approved (re-review) · ✎ DRFT a draft · … REVW waits on other reviews · ◌ CI running · ✗ CI / CONF / CHG blocks it · ✓ RDY ready',

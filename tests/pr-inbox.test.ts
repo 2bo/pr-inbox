@@ -624,7 +624,7 @@ test('the details say each fact once: why the risk on its own line, CI in words,
   expect(
     await ui.find({
       type: 'Text',
-      text: /^needs you: changes requested, CI failed · m: auto-merge when ready · \+10 -2 · updated 1d ago$/,
+      text: /^needs you: changes requested, CI failed · c: fix CI · m: auto-merge when ready · \+10 -2 · updated 1d ago$/,
     }),
   ).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /✗CI/ })).toBeUndefined()
@@ -4261,6 +4261,28 @@ test('your PR in conflict says so in its badge; c resolves it with Claude by mer
   await ui.press({ key: 'panel-yes' })
   for (let i = 0; i < 10; i++) await s.clock.settle()
   expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'push', 'origin', `${HEAD}:refs/heads/fix-21`])
+  await ui.unmount()
+})
+
+test('a conflict fix that stops halfway through the merge says so, and how to go on', async ($, on) => {
+  const git = (argv: readonly string[]) => {
+    const a = argv.join(' ')
+    if (a === `git -C ${WORKTREE} rev-parse -q --verify MERGE_HEAD`) return { stdout: `${'d'.repeat(40)}\n` }
+    if (a.startsWith(`git -C ${WORKTREE} log`)) return { stdout: '' }
+    return fixGit()(argv)
+  }
+  const s = stubs(on, { graphql: conflictGraphql, git, locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /needs you: conflict · c: fix conflict/ })).toBeDefined()
+  await pressCi(ui, s, '3')
+  await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'merge2' })
+  await $.turn.complete({ turnId: 'merge2', answer: '' } as never)
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.toasts.at(-1)).toContain('a merge of main is left unfinished in')
+  expect(s.toasts.at(-1)).toContain('c, 3, y: Claude goes on from it')
   await ui.unmount()
 })
 
