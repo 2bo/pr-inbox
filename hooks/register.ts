@@ -6057,7 +6057,7 @@ async function startFix($: EngineInterface, pr: PR, task: FixTask, left?: 'go on
             word: 'go on from them',
             refused: '',
             yes: 'go on',
-            sends: `Claude goes on in ${dir} from those ${n}${cfg.fix_push === 'auto' ? ', pushed with its own when it ends' : ''}`,
+            sends: `Claude goes on in ${dir} from those ${n}${cfg.fix_push === 'auto' ? '; when the turn ends, pr-inbox pushes them with its new commits (fix_push auto)' : ''}`,
           },
           {
             key: '2',
@@ -6155,8 +6155,8 @@ async function notOnBase($: EngineInterface, dir: string, into: string): Promise
   return r.exitCode === 0 && SHA.test(r.stdout.trim()) ? [`^origin/${into}`] : []
 }
 
-// The turn ended, was cut short, or you asked early: what it committed waits for your word to push. When the turn
-// ends, nothing opens (a y meant for something else must never land in a push panel): the row, a toast and the hint
+// The turn ended, was cut short, or you asked early. With fix_push auto, a turn that ended on its own is pushed here
+// (sendPush, pinned to the HEAD it reads). Otherwise what it committed waits for your word to push: nothing opens (a y meant for something else must never land in a push panel): the row, a toast and the hint
 // under the prompt say a fix is ready, and c opens the push panel. Asked early, it opens now: you pressed it
 type FixEnd = 'done' | 'interrupted' | 'early'
 async function afterFix($: EngineInterface, job: FixJob, end: FixEnd = 'done'): Promise<string> {
@@ -6180,12 +6180,14 @@ async function afterFix($: EngineInterface, job: FixJob, end: FixEnd = 'done'): 
   if (end === 'early') return openPush($, ready, 'early')
   // fix_push auto: a fix turn that ended on its own pushes what it committed, as y in the push panel would. One cut
   // short is left to the push panel
-  const failed = end === 'done' && cfg.fix_push === 'auto' ? await sendPush($, ready) : undefined
+  // Not under an open push panel: it lists the commits you are reading, and y there pushes them
+  const auto = end === 'done' && cfg.fix_push === 'auto' && writePanel?.write.kind !== 'push'
+  const failed = auto ? await sendPush($, ready) : undefined
   if (failed === '') return ''
   fixReady.set(job.pr.url, ready)
   const full = `${job.pr.repository.nameWithOwner}#${job.pr.number}`
   const how = failed
-    ? `the push did not go through (${failed}); `
+    ? `auto push refused (${failed.split(';')[0]}); `
     : end === 'interrupted'
       ? 'the fix turn stopped before it finished; '
       : ''
@@ -6223,7 +6225,7 @@ async function openPush($: EngineInterface, job: FixJob, end: FixEnd = 'done'): 
   const merged = Number.isInteger(Number(all)) ? Math.max(0, Number(all) - commits.length) : 0
   const how =
     end === 'early'
-      ? 'Claude is still working: these are the commits so far; later ones come with c once it ends'
+      ? `Claude is still working: these are the commits so far; ${cfg.fix_push === 'auto' ? 'the rest are pushed when it ends (fix_push auto)' : 'later ones come with c once it ends'}`
       : job.interrupted
         ? 'The fix turn stopped before it finished'
         : ''
@@ -6268,14 +6270,16 @@ async function sendPush($: EngineInterface, job: FixJob, pinned?: string): Promi
     fixReady.set(job.pr.url, job)
     const moved = /non-fast-forward|fetch first|rejected/i.test(r.stderr)
     return moved
-      ? `${job.branch} has new commits on GitHub; your ${plural(commits.length, 'commit')} stay in ${job.dir}`
+      ? `${job.branch} has new commits on GitHub; ${commits.length === 1 ? 'your commit stays' : 'your commits stay'} in ${job.dir}`
       : `push failed: ${fit(clean(r.stderr), 120)} · your commits stay in ${job.dir}`
   }
   fixReady.delete(job.pr.url)
   const auto = pinned === undefined
   $.ui.toast(
-    `✦ pushed ${plural(commits.length, 'commit')} to ${job.branch} of ${job.repo}${auto ? ' on its own (fix_push auto)' : ''} · CI runs again`,
-    { timeoutMs: 8000 },
+    auto
+      ? `✦ pr-inbox pushed Claude's fix of ${job.repo}#${job.pr.number}: ${plural(commits.length, 'commit')} to ${job.branch} · CI runs again · fix_push ask in /config to check first`
+      : `✦ pushed ${plural(commits.length, 'commit')} to ${job.branch} of ${job.repo} · CI runs again`,
+    { timeoutMs: auto ? 15000 : 8000 },
   )
   const why = auto ? `the fix turn you started from c ended (fix_push auto): ${commits.join('; ')}` : 'you pressed y in the push panel of c'
   $.ui.log(`pr-inbox pushed ${commits.length} commit(s) up to ${head.slice(0, 7)} to ${job.repo} ${job.branch} from ${job.dir}: ${why}`)
@@ -6306,7 +6310,9 @@ function forgetFix($: EngineInterface, job: FixJob): void {
 
 async function stopWatching($: EngineInterface, job: FixJob): Promise<string> {
   if (fixJob === job) fixJob = undefined
-  $.ui.toast(`Stopped following the fix of ${askLabel(job.pr)}; the worktree stays in ${job.dir}`, { timeoutMs: 8000 })
+  $.ui.toast(`Stopped following the fix of ${askLabel(job.pr)}: nothing is pushed by itself; the worktree stays in ${job.dir}`, {
+    timeoutMs: 8000,
+  })
   $.ui.invalidate('ui.render')
   return ''
 }
@@ -6350,7 +6356,17 @@ async function fixMenu($: EngineInterface, pr: PR): Promise<void> {
       verb: 'fixing',
       prs: [pr],
       title: '',
-      notes: [{ text: `Claude is fixing ${full} in ${job.dir} (${elapsed(new Date(job.startedAt).toISOString(), Date.now())})` }],
+      notes: [
+        { text: `Claude is fixing ${full} in ${job.dir} (${elapsed(new Date(job.startedAt).toISOString(), Date.now())})` },
+        ...(cfg.fix_push === 'auto'
+          ? [
+              {
+                text: `When the turn ends, pr-inbox pushes its commits to ${job.branch} (fix_push auto); to check them first: 2`,
+                color: 'yellow' as const,
+              },
+            ]
+          : []),
+      ],
       sendsLead: 'y: ',
       sends: '',
       choiceWhat: 'what to do',
@@ -6367,7 +6383,7 @@ async function fixMenu($: EngineInterface, pr: PR): Promise<void> {
           word: 'stop watching',
           refused: '',
           yes: 'stop watching',
-          sends: `stops following the fix (Claude keeps working; Esc in the prompt stops it)`,
+          sends: `stops following the fix${cfg.fix_push === 'auto' ? ': nothing is pushed when it ends' : ''} (Claude keeps working; Esc in the prompt stops it)`,
         },
       ],
       yes: 'go',
@@ -8269,7 +8285,7 @@ export function register(on: On, options: PluginOptions) {
       const ready = fixReady.get(p.url)
       const fixing =
         fixJob?.pr.url === p.url
-          ? `⟳ Claude is ${FIX_TASKS[fixJob.task].doing} in ${fixJob.dir} (${elapsed(new Date(fixJob.startedAt).toISOString(), now)})`
+          ? `⟳ Claude is ${FIX_TASKS[fixJob.task].doing} in ${fixJob.dir} (${elapsed(new Date(fixJob.startedAt).toISOString(), now)})${cfg.fix_push === 'auto' ? ' · pushed when it ends (fix_push auto) · c, 2: stop that' : ''}`
           : ready
             ? `⇡ fix ready: ${plural(ready.commits?.length ?? 0, 'commit')} not pushed · c: push panel`
             : ''
@@ -8799,7 +8815,7 @@ export function register(on: On, options: PluginOptions) {
             ],
             [
               'c',
-              'CI failed or a conflict: 1 Claude fixes CI, 2 re-run, 3 Claude resolves the conflict (merges the base in), then y · a fix ready: the push panel (y push, d diff, x forget)',
+              'CI failed or a conflict: 1 Claude fixes CI, 2 re-run, 3 Claude resolves the conflict (merges the base in), then y · when the fix ends it is pushed (fix_push auto; with ask, a turn cut short or a push refused: the push panel, y push, d diff, x forget)',
             ],
             ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · y in it sends'],
             [
@@ -8904,7 +8920,11 @@ export function register(on: On, options: PluginOptions) {
           '✗ CONF conflicts with its base (c) · ✗ FIX needs you · ✓ RDY ready to merge · … REVW in review · ⇢ AUTO auto-merge on, merges when ready · ○ ASK nobody is asked to review it · ✎ DRFT a draft · ◇ OLD no update for a while · ⏸ SNZ snoozed',
           NEON.green,
         ],
-        ['', '⟳ WIP Claude is fixing its CI or conflict · ⇡ PUSH a fix waits for your push', NEON.cyan],
+        [
+          '',
+          '⟳ WIP Claude is fixing its CI or conflict · ⇡ PUSH a fix waits for your push (fix_push ask, a turn cut short or a push refused)',
+          NEON.cyan,
+        ],
         [
           'approved',
           '↻ RE changed since you approved (re-review) · ✎ DRFT a draft · … REVW waits on other reviews · ◌ CI running · ✗ CI / CONF / CHG blocks it · ✓ RDY ready',

@@ -4317,7 +4317,7 @@ test('fix_push auto (default): a fix turn that ends on its own is pushed, pinned
   for (let i = 0; i < 10; i++) await s.clock.settle()
   expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'push', 'origin', `${HEAD}:refs/heads/fix-21`])
   expect(s.calls.filter((c) => c.includes('push')).some((c) => c.includes('--force') || c.includes('-f'))).toBe(false)
-  expect(s.toasts.at(-1)).toContain('pushed 1 commit to fix-21 of acme/app on its own (fix_push auto)')
+  expect(s.toasts.at(-1)).toContain("✦ pr-inbox pushed Claude's fix of acme/app#21: 1 commit to fix-21")
   expect(s.logs.some((l) => l.includes('(fix_push auto): abc1234 Fix the flaky login spec'))).toBe(true)
 
   // Cut short: nothing more is pushed, the push panel waits for c
@@ -4342,7 +4342,9 @@ test('fix_push auto: a push GitHub refuses leaves the fix ready for the push pan
   await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'auto3' })
   await $.turn.complete({ turnId: 'auto3', answer: '', reason: 'answer' } as never)
   for (let i = 0; i < 10; i++) await s.clock.settle()
-  expect(s.toasts.at(-1)).toContain('⇡ fix ready for acme/app#21: the push did not go through (fix-21 has new commits on GitHub')
+  expect(s.toasts.at(-1)).toContain(
+    '⇡ fix ready for acme/app#21: auto push refused (fix-21 has new commits on GitHub); 1 commit not pushed',
+  )
   expect(await lineOf(ui, 21)).toContain('⇡ PUSH')
   await ui.unmount()
 })
