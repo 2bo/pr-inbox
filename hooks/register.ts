@@ -5946,14 +5946,19 @@ type FixJob = {
   interrupted?: boolean
 }
 let fixJob: FixJob | undefined
+// Fixes you stopped following (c, 2): never pushed on their own, even when the turn ends while afterFix is reading
+const stoppedFixes = new WeakSet<FixJob>()
 // Fixes that made commits you have not pushed yet (you cancelled, or looked at the diff first), by PR URL: c pushes them
 const fixReady = new Map<string, FixJob>()
 const FIX_MARK = '[pr-inbox fix-ci]'
 // What the fix turn may not run: pushes, and gh writes to the PR or the repository
 const FIX_FORBIDDEN =
   /\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr\s+(?:merge|review|comment|close|ready|edit)|release|repo\s+(?:delete|edit))\b|\bgh\s+api\b[^\n]*(?:-X\s*|--method[=\s]+)(?:POST|PUT|PATCH|DELETE)|\bgh\s+api\s+graphql\b[^\n]*\bmutation\b/i
-const FIX_DENY =
-  'pr-inbox: while fixing your PR, pushing, merging, approving and commenting are left to the user. Commit your fix in the worktree and stop: pr-inbox shows the commits and asks before it pushes.'
+// What a refused command hears back, in the words of fix_push
+const FIX_DENY = (push: Config['fix_push']) =>
+  push === 'auto'
+    ? 'pr-inbox: while fixing your PR, pushing, merging, approving and commenting are left to pr-inbox and the user. Commit your fix in the worktree and stop: pr-inbox pushes your commits when the turn ends.'
+    : 'pr-inbox: while fixing your PR, pushing, merging, approving and commenting are left to the user. Commit your fix in the worktree and stop: pr-inbox shows the commits and asks before it pushes.'
 // A branch name safe to hand to git as one argument
 const BRANCH_NAME = /^(?!-)(?!.*\.\.)[\w./-]{1,200}$/
 const SHA = /^[0-9a-f]{40}$/
@@ -6181,8 +6186,8 @@ async function afterFix($: EngineInterface, job: FixJob, end: FixEnd = 'done'): 
   // fix_push auto: a fix turn that ended on its own pushes what it committed, as y in the push panel would. One cut
   // short is left to the push panel
   // Not under an open push panel: it lists the commits you are reading, and y there pushes them
-  const auto = end === 'done' && cfg.fix_push === 'auto' && writePanel?.write.kind !== 'push'
-  const failed = auto ? await sendPush($, ready) : undefined
+  const auto = end === 'done' && cfg.fix_push === 'auto' && writePanel?.write.kind !== 'push' && !stoppedFixes.has(job)
+  const failed = auto ? (await stillOpenOn($, ready)) || (await sendPush($, ready)) : undefined
   if (failed === '') return ''
   fixReady.set(job.pr.url, ready)
   const full = `${job.pr.repository.nameWithOwner}#${job.pr.number}`
@@ -6310,6 +6315,7 @@ function forgetFix($: EngineInterface, job: FixJob): void {
 
 async function stopWatching($: EngineInterface, job: FixJob): Promise<string> {
   if (fixJob === job) fixJob = undefined
+  stoppedFixes.add(job)
   $.ui.toast(`Stopped following the fix of ${askLabel(job.pr)}: nothing is pushed by itself; the worktree stays in ${job.dir}`, {
     timeoutMs: 8000,
   })
@@ -6348,6 +6354,21 @@ async function openFixDiff($: EngineInterface, job: FixJob): Promise<void> {
 
 // c on one of your PRs: while Claude fixes it, push now or stop following; with a fix not pushed, the push panel;
 // with a failed CI or a conflict, what a fix would do, or a re-run of the failed jobs. Each is a panel: a choice, then y
+// Before an automatic push: the PR as GitHub has it now. A merged or closed PR, or one now on another branch, gets
+// no push (it would bring a deleted branch back). '' when it is still open on the branch the fix is for
+async function stillOpenOn($: EngineInterface, job: FixJob): Promise<string> {
+  const r = await $.process.run(['gh', 'pr', 'view', job.pr.url, '--json', 'state,headRefName']).catch(ghMissing)
+  try {
+    const now = JSON.parse(r.stdout) as { state?: unknown; headRefName?: unknown }
+    if (r.exitCode === 0 && now.state === 'OPEN' && now.headRefName === job.branch) return ''
+    if (r.exitCode === 0 && now.state !== 'OPEN') return `the PR is ${clean(String(now.state)).toLowerCase()}`
+    if (r.exitCode === 0) return `the PR is now on ${clean(String(now.headRefName))}`
+  } catch {
+    // handled below
+  }
+  return 'could not read the PR from GitHub'
+}
+
 async function fixMenu($: EngineInterface, pr: PR): Promise<void> {
   const full = `${pr.repository.nameWithOwner}#${pr.number}`
   if (fixJob?.pr.url === pr.url) {
@@ -6576,7 +6597,8 @@ export function register(on: On, options: PluginOptions) {
   on('tool.call', async (_, e, next) => {
     const command = (e as { command?: unknown }).command
     // While Claude fixes CI, pushing, merging, approving and commenting stay with you: pr-inbox asks before it pushes
-    if (fixJob?.turnId && e.tool === 'Bash' && typeof command === 'string' && FIX_FORBIDDEN.test(command)) return { deny: FIX_DENY }
+    if (fixJob?.turnId && e.tool === 'Bash' && typeof command === 'string' && FIX_FORBIDDEN.test(command))
+      return { deny: FIX_DENY(cfg.fix_push) }
     if (!guardedTurn || allowedWhileGuarded(e.tool, command)) return next(e)
     return { deny: GUARD_DENY }
   })

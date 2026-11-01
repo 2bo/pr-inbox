@@ -146,6 +146,8 @@ type StubOptions = {
   fail?: string[]
   // stderr of a failing command
   stderr?: string
+  // The state gh pr view gives for the PR a fix pushes to (OPEN unless set)
+  prState?: string
   // Whether the injection screen flags this content
   suspicious?: (prompt: string) => boolean
   // The AI review's answers: what to read next, a review, a verification
@@ -210,6 +212,8 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
     let stdout = ''
     if (e.argv[1] === 'api' && e.argv[2] === 'graphql') stdout = opts.graphql ?? GRAPHQL
     if (e.argv[2] === 'view' && e.argv.includes('headRefOid')) stdout = JSON.stringify({ headRefOid: opts.head ?? HEAD })
+    if (e.argv[2] === 'view' && e.argv.includes('state,headRefName'))
+      stdout = JSON.stringify({ state: opts.prState ?? 'OPEN', headRefName: 'fix-21' })
     if (e.argv[2] === 'view' && e.argv.includes('title,body,files'))
       stdout = JSON.stringify(opts.view ?? { title: 't', body: 'b', files: [] })
     if (e.argv[2] === 'diff') stdout = opts.diff ?? 'diff --git a/x b/x'
@@ -4328,6 +4332,40 @@ test('fix_push auto (default): a fix turn that ends on its own is pushed, pinned
   for (let i = 0; i < 10; i++) await s.clock.settle()
   expect(s.calls.filter((c) => c.includes('push')).length).toBe(pushes)
   expect(s.toasts.at(-1)).toContain('the fix turn stopped before it finished')
+  await ui.unmount()
+})
+
+test('fix_push auto: a PR merged while Claude worked gets no push, so its deleted branch is not brought back', async ($, on) => {
+  const s = stubs(on, { git: fixGit(), locale: { HOME: '/home/me' }, prState: 'MERGED' })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await pressCi(ui, s, '1')
+  await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'auto4' })
+  await $.turn.complete({ turnId: 'auto4', answer: '', reason: 'answer' } as never)
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.calls.some((c) => c.includes('push'))).toBe(false)
+  expect(s.toasts.at(-1)).toContain('auto push refused (the PR is merged)')
+  await ui.unmount()
+})
+
+test('fix_push auto: a fix you stopped following is not pushed when its turn ends; a refused command says pr-inbox pushes', async ($, on) => {
+  const s = stubs(on, { git: fixGit(), locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await pressCi(ui, s, '1')
+  const text = s.submitted.at(-1) ?? ''
+  await $.turn.start({ text, turnId: 'auto5' })
+  const denied = await $.tool.call({ tool: 'Bash', command: 'git push origin HEAD:fix-21' } as never)
+  expect(JSON.stringify(denied)).toContain('pr-inbox pushes your commits when the turn ends')
+  // c, 2: stop watching
+  await pressCi(ui, s, '2')
+  await $.turn.complete({ turnId: 'auto5', answer: '', reason: 'answer' } as never)
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.calls.some((c) => c.includes('push'))).toBe(false)
   await ui.unmount()
 })
 
