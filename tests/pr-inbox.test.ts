@@ -4994,6 +4994,37 @@ test('a fork PR offers no g and no row hint; g says why', async ($, on) => {
   await ui.unmount()
 })
 
+test('/pr-inbox address and fix on a fork PR say why at once, and start nothing', async ($, on) => {
+  const fork = { ...COMMENTED, isCrossRepository: true }
+  const s = addressStubs(on, { graphql: commentedGraphql(fork) })
+  await start($, s.clock)
+  for (const args of ['address app#21', 'fix app#21']) {
+    const out = await $.command.run({
+      command: 'pr-inbox',
+      args,
+      origin: { kind: 'composer' },
+      presentation: { isFullscreen: true, columns: 120 },
+    })
+    expect(out.text).toBe(
+      'Not starting: https://github.com/acme/app/pull/21 is from a fork; pr-inbox fixes only branches in the repository',
+    )
+  }
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(s.submitted).toEqual([])
+})
+
+test('with fix_push ask, g says its own key pushes the fix', { options: { fix_push: 'ask' } }, async ($, on) => {
+  const s = addressStubs(on)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-comments' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+  expect(panel).toContain('you push it from g (nothing is pushed until you say so)')
+  await ui.unmount()
+})
+
 test('while another PR is being fixed, g marks its start refused, as c does', async ($, on) => {
   const other = { ...COMMENTED, id: 'PR_25', number: 25, url: 'https://github.com/acme/app/pull/25', headRefName: 'fix-25' }
   const s = addressStubs(on, {

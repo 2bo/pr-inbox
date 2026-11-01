@@ -6065,14 +6065,15 @@ const FIX_TASKS: Record<FixTask, { verb: string; doing: string; what: string; ke
     replies: true,
   },
 }
-// What happens to a fix's commits, by fix_push: said in c's panel, its choices and the request to Claude
-const FIX_PUSH: Record<Config['fix_push'], { after: string; request: string }> = {
+// What happens to a fix's commits, by fix_push: said in c's and g's panels (with the key that pushes), their choices
+// and the request to Claude
+const FIX_PUSH: Record<Config['fix_push'], { after: (key: 'c' | 'g') => string; request: string }> = {
   auto: {
-    after: 'pr-inbox pushes it to the PR branch when the turn ends, never forced (fix_push auto)',
+    after: () => 'pr-inbox pushes it to the PR branch when the turn ends, never forced (fix_push auto)',
     request: 'Do not push: pr-inbox pushes your commits when you finish.',
   },
   ask: {
-    after: 'you push it from c (nothing is pushed until you say so)',
+    after: (key) => `you push it from ${key} (nothing is pushed until you say so)`,
     request: 'Do not push: pr-inbox shows me the commits and asks before it pushes.',
   },
 }
@@ -6303,7 +6304,9 @@ async function findClone($: EngineInterface, pr: PR, task: FixTask): Promise<str
   if (known) return known
   const ghq = await $.process.run(['ghq', 'root']).catch(() => undefined)
   if (ghq?.exitCode !== 0) {
-    $.ui.toast(`No clone of ${repo} found: clone it (gh repo clone ${repo}) and press c again`, { timeoutMs: 10000 })
+    $.ui.toast(`No clone of ${repo} found: clone it (gh repo clone ${repo}) and press ${FIX_TASKS[task].key} again`, {
+      timeoutMs: 10000,
+    })
     return undefined
   }
   openPanel($, {
@@ -6948,7 +6951,7 @@ async function fixMenu($: EngineInterface, pr: PR): Promise<void> {
   const ciFailed = tasks.includes('ci')
   const conflict = tasks.includes('conflict')
   const into = clean(pr.baseRefName ?? 'its base')
-  const pushThen = FIX_PUSH[cfg.fix_push].after
+  const pushThen = FIX_PUSH[cfg.fix_push].after('c')
   // Any fix running is another PR's here (this PR's own opened its panel above)
   const busy = oneAtATime()
   openPanel($, {
@@ -7028,7 +7031,7 @@ async function commentsMenu($: EngineInterface, pr: PR): Promise<void> {
   }
   const full = `${pr.repository.nameWithOwner}#${pr.number}`
   const dir = worktreeDir('~', pr.repository.nameWithOwner, pr.number)
-  const pushThen = FIX_PUSH[cfg.fix_push].after
+  const pushThen = FIX_PUSH[cfg.fix_push].after('g')
   // Another PR's fix runs: y is refused here, as c's choices are
   const busy = oneAtATime()
   const more = threadsCapped.has(pr.url) ? ` (first ${MAX_REPLIES}; g again for the rest)` : ''
@@ -7313,6 +7316,9 @@ export function register(on: On, options: PluginOptions) {
         return { text: `Could not read the review threads of ${target.url}: try /pr-inbox refresh` }
       if (address && waiting === 0) return { text: `No review thread on ${target.url} waits on you` }
       const task: FixTask = address ? 'comments' : (fixTasks(target)[0] ?? 'ci')
+      // A fork's branch is not in the repository: said here, not only in a toast after the command answered
+      if (target.isCrossRepository)
+        return { text: `Not starting: ${target.url} is from a fork; pr-inbox fixes only branches in the repository` }
       const first = waitsFirst(target, task)
       if (first) return { text: `Not starting: ${first}` }
       $.clock.after(0, async () => {
