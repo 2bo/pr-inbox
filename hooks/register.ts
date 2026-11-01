@@ -77,7 +77,7 @@ type ReviewThread = {
   isOutdated: boolean
   path: string | null
   line: number | null
-  comments: { nodes: ({ author: { login: string } | null } | null)[] }
+  comments: { nodes: ({ author: { login: string; __typename?: string } | null } | null)[] }
 }
 
 // An open issue assigned to you or created by you. Drawn only, never sent to a model; the pane writes to it only to close or reopen it,
@@ -252,7 +252,7 @@ const REVIEWED_FRAGMENT = `fragment reviewed on PullRequest {
 }`
 // Your own PRs: the review threads, only what g needs to tell which ones wait on you (no comment text)
 const THREADS_FRAGMENT = `fragment threads on PullRequest {
-  threads: reviewThreads(first: 50) { nodes { id isResolved isOutdated path line comments(last: 1) { nodes { author { login } } } } }
+  threads: reviewThreads(first: 50) { nodes { id isResolved isOutdated path line comments(last: 1) { nodes { author { login __typename } } } } }
 }`
 const ASKED_FRAGMENT = `fragment asked on PullRequest {
   reviewRequests(first: 20) { nodes { requestedReviewer { ...who } } }
@@ -5982,7 +5982,8 @@ function fixTasks(pr: PR): FixTask[] {
 
 // g: the review threads of your PR that wait on you (open, and the last word someone else's), at most MAX_REPLIES.
 // Only ids in GitHub's own node format go into the request, never the comments themselves: the turn reads those
-type OpenThread = { id: string; path: string; line: number | null; outdated: boolean; by: string }
+// bot: the last word is a bot's (a GitHub App, or a login ending in [bot]), as isBot tells a PR's author
+type OpenThread = { id: string; path: string; line: number | null; outdated: boolean; by: string; bot: boolean }
 const THREAD_ID = /^[A-Za-z0-9_=-]{1,100}$/
 const MAX_REPLIES = 30
 // The longest reply posted, in characters
@@ -5992,11 +5993,13 @@ function openThreads(pr: PR): OpenThread[] {
   const out: OpenThread[] = []
   for (const t of pr.threads?.nodes ?? []) {
     if (t?.isResolved !== false || typeof t.id !== 'string' || !THREAD_ID.test(t.id)) continue
-    const login = t.comments?.nodes?.at(-1)?.author?.login
+    const author = t.comments?.nodes?.at(-1)?.author
+    const login = author?.login
     const by = typeof login === 'string' ? clean(login) : 'ghost'
     if (by.toLowerCase() === viewer.toLowerCase()) continue
     const line = typeof t.line === 'number' && Number.isInteger(t.line) ? t.line : null
-    out.push({ id: t.id, path: clean(typeof t.path === 'string' ? t.path : ''), line, outdated: t.isOutdated === true, by })
+    const bot = author?.__typename === 'Bot' || /\[bot\]$/.test(by)
+    out.push({ id: t.id, path: clean(typeof t.path === 'string' ? t.path : ''), line, outdated: t.isOutdated === true, by, bot })
   }
   return out.slice(0, MAX_REPLIES)
 }
@@ -6102,8 +6105,10 @@ const fixReady = new Map<string, FixJob>()
 // g: drafts held for the person, by PR URL (replies are the drafts; nothing pushed with them): only y in the held
 // panel posts them, the ones checked there. A thread no longer waiting on you drops out (heldOf)
 const heldReplies = new Map<string, FixJob>()
-// A reply that waits for the person whatever fix_reply says: Claude said it should not decide
-const isHeld = (r: Reply) => r.action === 'needs_you'
+// A reply that waits for the person: one Claude said it should not decide, whatever fix_reply says, and, with
+// fix_reply auto, a decline to a person (not a bot): saying no to a reviewer is the author's call, not Claude's.
+// A rule in code, whatever Claude judged
+const isHeld = (r: Reply) => r.action === 'needs_you' || (cfg.fix_reply === 'auto' && r.action === 'declined' && !r.thread.bot)
 // The drafts held for a PR, only for threads that still wait on you
 function heldOf(pr: PR): FixJob | undefined {
   const job = heldReplies.get(pr.url)
@@ -7062,11 +7067,11 @@ function heldLines(job: FixJob): { notes: PanelNote[]; items: PanelItem[] } {
   return {
     notes: [
       {
-        text: 'Claude did not settle these alone: no code was changed for them, and none is posted unless you check it (x or its number) and press y. Each is posted as you, with @mentions defused and a line saying Claude wrote it; a thread you leave unchecked stays held for later. To talk one over with Claude first: q, then p (ask Claude about the PR)',
+        text: "Claude did not settle these alone (or declines a person's comment, which fix_reply auto leaves to you): no code was changed for them, and none is posted unless you check it (x or its number) and press y. Each is posted as you, with @mentions defused and a line saying Claude wrote it; a thread you leave unchecked stays held for later. To talk one over with Claude first: q, then p (ask Claude about the PR)",
       },
     ],
     items: (job.replies ?? []).map((r) => ({
-      text: `${threadPlace(r.thread)} · @${r.thread.by} · why: ${r.why || 'not given'} · draft: ${r.text}`,
+      text: `${threadPlace(r.thread)} · @${r.thread.by} · why: ${r.action === 'declined' ? 'Claude declines a person' : r.why || 'not given'} · draft: ${r.text}`,
       note: '',
       checked: false,
     })),
@@ -9502,7 +9507,7 @@ export function register(on: On, options: PluginOptions) {
             ],
             [
               'g',
-              "review threads that wait on you (open, someone else's last word): Claude fixes and commits, declines or asks back in a worktree, then y · the fix is pushed (fix_push) and pr-inbox posts its replies to the threads, never resolved (fix_reply auto; with ask: the replies panel, y posts) · a thread Claude should not settle alone (⚑ needs you) is held with its draft: g lists them, x checks the drafts to post, y posts those, the rest stay held · /pr-inbox address <PR> from the prompt",
+              "review threads that wait on you (open, someone else's last word): Claude fixes and commits, declines or asks back in a worktree, then y · the fix is pushed (fix_push) and pr-inbox posts its replies to the threads, never resolved (fix_reply auto; with ask: the replies panel, y posts) · a thread Claude should not settle alone (⚑ needs you), and with fix_reply auto a decline to a person (not a bot), is held with its draft: g lists them, x checks the drafts to post, y posts those, the rest stay held · /pr-inbox address <PR> from the prompt",
             ],
             ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · y in it sends'],
             [

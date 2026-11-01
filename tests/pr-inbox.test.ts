@@ -4494,7 +4494,8 @@ const thread = (id: string, path: string | null, line: number | null, by: string
   isOutdated: false,
   path,
   line,
-  comments: { nodes: [{ author: { login: by } }] },
+  // coderabbitai is a GitHub App (a bot); the others are people
+  comments: { nodes: [{ author: { login: by, __typename: by === 'coderabbitai' ? 'Bot' : 'User' } }] },
 })
 const THREADS = {
   threads: {
@@ -4859,6 +4860,62 @@ test('/pr-inbox fix keeps fixing CI, and /pr-inbox address on a PR with no threa
   expect((await run('address app#21')).text).toBe('No review thread on https://github.com/acme/app/pull/21 waits on you')
   expect((await run('fix app#21')).text).toBe('Fixing the CI of https://github.com/acme/app/pull/21')
 })
+
+// Claude declines a person's comment and a bot's
+const DECLINES_JSON = JSON.stringify([
+  { thread: 'PRRT_one', action: 'declined', reply: 'I would rather keep it as it is: the login flow depends on it.' },
+  { thread: 'PRRT_four', action: 'declined', reply: 'Not needed: the form is validated on the server.' },
+])
+
+test('fix_reply auto: a decline to a person is held for you whatever Claude judged; one to a bot is posted', async ($, on) => {
+  const s = addressStubs(on, { replies: DECLINES_JSON, commits: '' })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await addressAndEnd(ui, s, $, 'decl1')
+  expect(repliesPosted(s).map((p) => p.thread)).toEqual(['PRRT_four'])
+  expect(s.toasts.at(-1)).toContain('⚑ 1 thread needs you on acme/app#21')
+  await ui.press({ key: 'act-comments' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+  expect(panel).toContain('app/login.rb:12 · @mika · why: Claude declines a person · draft: I would rather keep it as it is')
+  await ui.press({ key: 'panel-toggle' })
+  await ui.press({ key: 'panel-yes' })
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(repliesPosted(s).map((p) => p.thread)).toEqual(['PRRT_four', 'PRRT_one'])
+  await ui.unmount()
+})
+
+test('a thread whose last word is a [bot] login counts as a bot: its decline goes on its own', async ($, on) => {
+  const botPr = { ...COMMENTED, threads: { nodes: [thread('PRRT_one', 'app/login.rb', 12, 'renovate[bot]')] } }
+  const replies = JSON.stringify([{ thread: 'PRRT_one', action: 'declined', reply: 'Pinned on purpose.' }])
+  const s = addressStubs(on, { replies, commits: '', graphql: commentedGraphql(botPr) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await addressAndEnd(ui, s, $, 'decl2')
+  expect(repliesPosted(s).map((p) => p.thread)).toEqual(['PRRT_one'])
+  await ui.unmount()
+})
+
+test(
+  'fix_reply ask: a decline to a person is in the replies panel with the rest, not held',
+  { options: { fix_reply: 'ask' } },
+  async ($, on) => {
+    const s = addressStubs(on, { replies: DECLINES_JSON, commits: '' })
+    await start($, s.clock)
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'tab-mine' })
+    await addressAndEnd(ui, s, $, 'decl3')
+    expect(repliesPosted(s)).toEqual([])
+    await ui.press({ key: 'act-comments' })
+    for (let i = 0; i < 5; i++) await s.clock.settle()
+    const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+    expect(panel).toContain('declined · app/login.rb:12 · to @mika')
+    expect(panel).toContain('y posts: 2 replies to review threads of acme/app#21')
+    await ui.unmount()
+  },
+)
 
 // Claude fixed one thread and left the other to you, with why and a draft
 const HELD_JSON = JSON.stringify([
