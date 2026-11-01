@@ -4080,6 +4080,7 @@ const fixGit =
     const a = argv.join(' ')
     if (a === 'git rev-parse --show-toplevel') return { stdout: '/work\n' }
     if (a.endsWith('remote get-url origin')) return { stdout: 'git@github.com:acme/app.git\n' }
+    if (a.endsWith('remote get-url --push --all origin')) return { stdout: 'git@github.com:acme/app.git\n' }
     if (a === `git -C ${WORKTREE} rev-parse --is-inside-work-tree`) return { exitCode: 128 }
     if (a === `git -C ${WORKTREE} rev-parse HEAD`) return { stdout: `${HEAD}\n` }
     if (a.startsWith(`git -C ${WORKTREE} log`)) return { stdout: commits }
@@ -4386,6 +4387,25 @@ test('fix_push auto: a commit made after the turn ended is not pushed with the o
   expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'log', '--format=%h %s', `origin/fix-21..${HEAD}`])
   expect(s.calls.some((c) => c.includes('push'))).toBe(false)
   expect(s.toasts.at(-1)).toContain('auto push refused (new commits came after the turn ended')
+  await ui.unmount()
+})
+
+test('no push, automatic or not, when origin also pushes somewhere other than the PR repository', async ($, on) => {
+  const git = (argv: readonly string[]) =>
+    argv.join(' ').endsWith('remote get-url --push --all origin')
+      ? { stdout: 'git@github.com:acme/app.git\nhttps://example.com/mirror/app.git\n' }
+      : fixGit()(argv)
+  const s = stubs(on, { git, locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await pressCi(ui, s, '1')
+  await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'auto7' })
+  await $.turn.complete({ turnId: 'auto7', answer: '', reason: 'answer' } as never)
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.calls.some((c) => c.includes('push') && !c.includes('get-url'))).toBe(false)
+  expect(s.toasts.at(-1)).toContain('pushes somewhere other than acme/app')
   await ui.unmount()
 })
 

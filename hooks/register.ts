@@ -6288,6 +6288,14 @@ async function sendPush($: EngineInterface, job: FixJob, head: string, auto = fa
       ? 'new commits came after the turn ended · c shows them'
       : 'Claude committed again since this opened · q, then c shows the new list'
   }
+  // Where a push really goes: every push URL of origin must be the PR's repository (the clone was checked by its
+  // fetch URL only)
+  const urls = await $.process.run(['git', '-C', job.dir, 'remote', 'get-url', '--push', '--all', 'origin'])
+  const targets = urls.stdout.split('\n').filter((u) => u.trim())
+  if (urls.exitCode !== 0 || targets.length === 0 || targets.some((u) => githubRepoOf(u).toLowerCase() !== job.repo.toLowerCase())) {
+    fixReady.set(job.pr.url, job)
+    return `origin of ${job.dir} pushes somewhere other than ${job.repo}; push it yourself`
+  }
   const commits = job.commits ?? []
   // A push that times out may or may not have gone through: say so, and keep the fix for c
   const r = await $.process
