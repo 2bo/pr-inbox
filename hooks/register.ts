@@ -1813,15 +1813,15 @@ function approveLines(prs: PR[], comment: string): { sends: string; yes: string 
     // In full, owner too, and the comment that goes with it
     sends:
       prs.map((p) => `${p.repository.nameWithOwner}#${p.number} at ${p.headRefOid.slice(0, 7)}`).join(', ') +
-      (comment ? ` with the comment "${clean(comment)}"` : ''),
+      (comment ? ` ${prs.length > 1 ? 'each ' : ''}with the comment "${comment}"` : ''),
     yes: prs.length === 1 ? 'approve' : `approve all ${prs.length}`,
   }
 }
 
 // The approve panel (a, b)
 function openApproval($: EngineInterface, prs: PR[], notes: PanelNote[], how: string, bulk = false): void {
-  // Read when the panel opens, so y sends the comment it shows
-  const comment = custom(cfg.approve_comment)
+  // Read and cleaned when the panel opens, so y sends exactly the comment it shows (on one line)
+  const comment = clean(custom(cfg.approve_comment))
   openPanel($, {
     verb: 'approve',
     prs,

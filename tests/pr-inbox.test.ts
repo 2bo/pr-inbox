@@ -470,16 +470,22 @@ test(
   },
 )
 
-test('approve_comment is drawn cleaned in the approve panel', { options: { approve_comment: 'LGTM\u001b[31m\u202e' } }, async ($, on) => {
-  const s = stubs(on, { approve: true })
-  await start($, s.clock)
-  const ui = await $.ui.mount(PANE)
-  await pressApprove(ui, s)
-  expect(s.panels.at(-1)).toContain('with the comment "LGTM')
-  expect(s.panels.at(-1)).not.toContain('\u001b')
-  expect(s.panels.at(-1)).not.toContain('\u202e')
-  await ui.unmount()
-})
+test(
+  'approve_comment is cleaned once: the panel shows exactly what y sends',
+  { options: { approve_comment: 'LGTM\nThanks\u001b[31m\u202e' } },
+  async ($, on) => {
+    const s = stubs(on, { approve: true })
+    await start($, s.clock)
+    const ui = await $.ui.mount(PANE)
+    await pressApprove(ui, s)
+    const sent = approvedAt(s)[0]?.at(-1) ?? ''
+    expect(sent).toMatch(/^body=LGTM Thanks/)
+    expect(sent).not.toContain('\u001b')
+    expect(sent).not.toContain('\u202e')
+    expect(s.panels.at(-1)).toContain(`with the comment "${sent.slice('body='.length)}"`)
+    await ui.unmount()
+  },
+)
 
 test('does not approve when the PR got new commits after it was shown', async ($, on) => {
   const s = stubs(on, { approve: true, head: 'b'.repeat(40) })

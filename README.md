@@ -78,7 +78,7 @@ A stack is listed together, bottom first, so the PR that merges next comes first
 
 | Key | Action |
 | :- | :- |
-| `a` | Approve: opens the approve panel in the pane, naming the commit, with the risk and the AI review's notes; `y` approves, `q` cancels. On a `↻ RE` PR, approves its new commit |
+| `a` | Approve: opens the approve panel in the pane, naming the commit and the `approve_comment`, if set, with the risk and the AI review's notes; `y` approves, `q` cancels. On a `↻ RE` PR, approves its new commit |
 | `v` | AI review ([below](#ai-review-and-approve)). `v` again cancels it. On your own PR (My PRs) too: a review for you to fix before others read it, which never approves |
 | `i` | Findings: every finding of the AI review, with links to the lines; `n` pages them when they do not fit. On your PR too, once it has an AI review |
 | `s` | Send the AI review's findings to the author: the findings panel opens in the pane, each finding a row (those that block checked to start with; `x` or its number checks it, `j`/`k` move), `r` request changes or `c` comment picks what it is posted as (none is picked for you; on your own PR only `c`, since GitHub refuses changes requested by the author), then `y` posts exactly the line above the keys: one GitHub review, each finding on its line (one with no line goes in the review's body, with the AI review's summary), pinned to the reviewed commit |
@@ -180,7 +180,7 @@ Change them with `/config` or `/plugin configure`.
 | `desktop_notify` | review requests | OS notifications for `review requests`, `all` (also approvals, changes requested and CI failures on your PRs, and issues newly assigned to you) or `off`. Uses `osascript` on macOS and `notify-send` on Linux. On macOS, allow notifications for Script Editor in System Settings if none appear |
 | `analysis` | auto | When review requests are analyzed: `auto` (from startup), `when opened` (once you open `/pr-inbox` in the session) or `off` |
 | `ai_approve` | confirm | When the AI review passes: `confirm` (the row says so, and `a` approves) or `auto` |
-| `approve_comment` | (empty) | The comment of an approval you make with `a` or `b`, such as `LGTM`, shown in the approve panel before `y`. Empty sends none. Approvals by `ai_approve` `auto` keep their own comment |
+| `approve_comment` | (empty) | The comment of an approval you make with `a` or `b`, such as `LGTM`, shown in the approve panel before `y` and posted as written on each approval (an @mention in it notifies). Empty sends none. Approvals by `ai_approve` `auto` keep their own comment |
 | `fix_push` | auto | A fix of your PR (`c`): `auto` pushes its commits to the PR's branch when the fix turn ends on its own (never forced), `ask` waits for `y` in the push panel |
 | `auto_review` | off | Run the AI review on its own when a review request arrives or gets new commits: `bots` (bot PRs only), `review requests` (all) or `off` |
 | `theme` | dark | `dark` (neon) or `light` (deeper colors for a light terminal) |
