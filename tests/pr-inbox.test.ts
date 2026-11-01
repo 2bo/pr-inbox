@@ -456,6 +456,31 @@ test('approves only when y is pressed in the approve panel', async ($, on) => {
   await ui.unmount()
 })
 
+test(
+  'approve_comment goes with an approval you make, named in the approve panel',
+  { options: { approve_comment: ' LGTM ' } },
+  async ($, on) => {
+    const s = stubs(on, { approve: true })
+    await start($, s.clock)
+    const ui = await $.ui.mount(PANE)
+    await pressApprove(ui, s)
+    expect(s.panels.at(-1)).toContain(`y approves: acme/app#11 at ${HEAD.slice(0, 7)} with the comment "LGTM"`)
+    expect(s.calls).toContainEqual([...APPROVE_11, '-f', 'body=LGTM'])
+    await ui.unmount()
+  },
+)
+
+test('approve_comment is drawn cleaned in the approve panel', { options: { approve_comment: 'LGTM\u001b[31m\u202e' } }, async ($, on) => {
+  const s = stubs(on, { approve: true })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await pressApprove(ui, s)
+  expect(s.panels.at(-1)).toContain('with the comment "LGTM')
+  expect(s.panels.at(-1)).not.toContain('\u001b')
+  expect(s.panels.at(-1)).not.toContain('\u202e')
+  await ui.unmount()
+})
+
 test('does not approve when the PR got new commits after it was shown', async ($, on) => {
   const s = stubs(on, { approve: true, head: 'b'.repeat(40) })
   await start($, s.clock)
@@ -1366,6 +1391,18 @@ test("ai_approve auto approves a member's PR without asking", { options: { ai_ap
   expect(approvedAt(s)).toEqual([AUTO_APPROVE_11])
   await ui.unmount()
 })
+
+test(
+  'an approval by ai_approve auto keeps its own comment, not approve_comment',
+  { options: { ai_approve: 'auto', approve_comment: 'LGTM' } },
+  async ($, on) => {
+    const s = stubs(on, { graphql: only(member()) })
+    await start($, s.clock)
+    const ui = await pressReview($, s)
+    expect(approvedAt(s)).toEqual([AUTO_APPROVE_11])
+    await ui.unmount()
+  },
+)
 
 for (const [who, over] of [
   ['an outside contributor', { authorAssociation: 'CONTRIBUTOR' }],

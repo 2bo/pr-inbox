@@ -1,6 +1,6 @@
 {
   "name": "pr-inbox",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "An inbox for review requests, your own PRs and your issues (assigned to you or created by you): AI summary and risk, an AI review that can approve, a reader for the description and diff, asking reviewers (teams that assign too), merging (gh stack too), CI and conflict fixes with Claude, and asking the Claude Code session that made or last worked on your PR for more",
   "author": {
     "name": "2bo"
@@ -106,6 +106,12 @@
       "description": "What happens when the AI review (v) passes: confirm (the row says so and a approves, after y in its panel) or auto (approve without asking, for PRs from members and collaborators of the repository and for Dependabot or Renovate; others are left to a)",
       "default": "confirm",
       "options": ["confirm", "auto"]
+    },
+    "approve_comment": {
+      "type": "string",
+      "title": "Approve comment",
+      "description": "The comment of an approval you make with a or b, such as LGTM. The approve panel shows it before y. Empty sends none. Approvals by ai_approve auto keep their own comment, saying the AI review approved on its own",
+      "default": ""
     },
     "auto_review": {
       "type": "string",
