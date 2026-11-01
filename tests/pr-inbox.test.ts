@@ -793,9 +793,21 @@ test('falls back to English with no language hints', async ($, on) => {
   expect(s.systems.at(-1)).toContain('in English.')
 })
 
+test('the default criteria rate privileged CI changes high, new dependencies medium and plain patch upgrades low', async ($, on) => {
+  const s = stubs(on)
+  await start($, s.clock)
+  const system = s.systems.at(-1) ?? ''
+  const line = (level: string) => system.split('\n').find((l) => l.startsWith(`- ${level}: `)) ?? ''
+  expect(line('high')).toContain('pull_request_target')
+  expect(line('high')).toContain('hard to roll back')
+  expect(line('medium')).toContain('new dependencies')
+  expect(line('medium')).toContain('other CI/CD workflow changes')
+  expect(line('low')).toContain('patch dependency upgrades (GitHub Actions too) that add no new packages')
+})
+
 test('redoes a stored analysis in a different language', async ($, on) => {
   const old = {
-    v: 5,
+    v: 6,
     lang: 'English',
     updatedAt: HUMAN.updatedAt,
     summary: 'old',
@@ -852,7 +864,7 @@ test('caps how many analyses start in an hour', async ($, on) => {
 
 test('a stored analysis with an unexpected shape is redone', async ($, on) => {
   const broken = {
-    v: 5,
+    v: 6,
     lang: 'Japanese',
     updatedAt: HUMAN.updatedAt,
     summary: 'x',
@@ -1099,7 +1111,7 @@ test(
   { options: { risk_high: 'anything touching payments', release_impact: 'Count any API change as yes.' } },
   async ($, on) => {
     const same = {
-      v: 5,
+      v: 6,
       lang: 'Japanese',
       updatedAt: HUMAN.updatedAt,
       summary: 'x',
