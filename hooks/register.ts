@@ -178,7 +178,7 @@ type Failed = { updatedAt: string; failed: string; attempts: number; retryAt: nu
 type Analysis = Done | Failed
 
 // Bump when the analysis changes; stored analyses from older versions are redone
-const ANALYSIS_VERSION = 5
+const ANALYSIS_VERSION = 6
 
 // Labels around the analysis: Japanese when the language is Japanese, English otherwise (to match the AI output)
 type Labels = {
@@ -289,9 +289,10 @@ fragment requested on PullRequest {
 
 // Built-in criteria. Each can be replaced from the settings (risk_high, risk_medium, risk_low, release_impact)
 const DEFAULT_RISK: Record<Risk, string> = {
-  high: 'database migrations; authentication, authorization, billing or personal data; data deletion; breaking changes to public APIs or shared interfaces; production configuration or infrastructure; wide changes without tests',
-  medium: 'changes in application behavior, minor or major dependency upgrades, features with thin tests',
-  low: 'documentation, tests only, patch dependency upgrades, types, wording or renames that do not change behavior',
+  high: 'database migrations; authentication, authorization, billing or personal data; data deletion; breaking changes to public APIs or shared interfaces; changes that are hard to roll back (formats of stored or serialized data, messages or caches, contracts with external systems); production configuration or infrastructure; CI/CD changes to permissions or secrets, privileged triggers that run pull request code (such as pull_request_target), or the deploy and release steps (a version bump of an action already in use is a dependency upgrade, rated as one); wide changes without tests',
+  medium:
+    'changes in application behavior, minor or major dependency upgrades, new dependencies (added directly, or new packages in the lockfile), other CI/CD workflow changes (jobs, steps, when tests run), features with thin tests',
+  low: 'documentation, tests only, patch dependency upgrades (GitHub Actions too) that add no new packages, types, wording or renames that do not change behavior',
 }
 const DEFAULT_RELEASE_IMPACT = [
   'Once this PR is released (merged and deployed), is there a change visible to end users or to internal users of the system (admin screen users, API callers, operators)?',

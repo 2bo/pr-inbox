@@ -1,6 +1,6 @@
 {
   "name": "pr-inbox",
-  "version": "2.3.2",
+  "version": "2.3.3",
   "description": "An inbox for review requests, your own PRs and your issues (assigned to you or created by you): AI summary and risk, an AI review that can approve, a reader for the description and diff, asking reviewers (teams that assign too), merging (gh stack too), CI fixes with Claude, and asking the Claude Code session that made or last worked on your PR for more",
   "author": {
     "name": "2bo"
@@ -65,19 +65,19 @@
     "risk_high": {
       "type": "string",
       "title": "High risk criteria",
-      "description": "What counts as high risk in the analysis. Empty uses the default (migrations, auth, billing, personal data, deletion, breaking API changes, production config, wide changes without tests)",
+      "description": "What counts as high risk in the analysis. Empty uses the default (migrations, auth, billing, personal data, deletion, breaking API changes, changes hard to roll back, production config, CI/CD changes to permissions, secrets, privileged triggers (pull_request_target) or deploy and release steps (a version bump of an action already in use is a dependency upgrade), wide changes without tests)",
       "default": ""
     },
     "risk_medium": {
       "type": "string",
       "title": "Medium risk criteria",
-      "description": "What counts as medium risk. Empty uses the default (behavior changes, minor or major dependency upgrades, thinly tested features)",
+      "description": "What counts as medium risk. Empty uses the default (behavior changes, minor or major dependency upgrades, new dependencies, CI/CD workflow changes not rated high, thinly tested features)",
       "default": ""
     },
     "risk_low": {
       "type": "string",
       "title": "Low risk criteria",
-      "description": "What counts as low risk. Empty uses the default (docs, tests only, patch upgrades, types, wording or renames)",
+      "description": "What counts as low risk. Empty uses the default (docs, tests only, patch dependency upgrades (GitHub Actions too) that add no new packages, types, wording or renames that do not change behavior)",
       "default": ""
     },
     "release_impact": {
