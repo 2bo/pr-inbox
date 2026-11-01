@@ -25,6 +25,7 @@ const run = (name, conclusion, id) => ({
 })
 
 const pr = (repo, number, title, author, extra) => ({
+  id: `PR_${repo}_${number}`,
   number,
   title,
   url: `https://github.com/acme/${repo}/pull/${number}`,
@@ -126,7 +127,9 @@ const MINE = [
     additions: 188,
     deletions: 64,
     reviewDecision: 'CHANGES_REQUESTED',
-    // Review threads: two wait on you (g addresses them), one you answered last, one resolved
+    // Review threads: two wait on you (g addresses them), one you answered last, one resolved. The list says how many;
+    // the threads themselves come from the query by node id below
+    reviewThreads: { totalCount: 4 },
     threads: {
       nodes: [
         { id: 'PRRT_demo1', isResolved: false, isOutdated: false, path: 'app/session/store.rb', line: 42, comments: { nodes: [{ author: { login: 'mtanaka' } }] } },
@@ -602,7 +605,12 @@ const TEAMS = [
   { slug: 'platform', name: 'Platform' },
 ]
 
-if (args[0] === 'api' && args[1] === 'graphql') {
+if (args[0] === 'api' && args[1] === 'graphql' && args.includes('--input')) {
+  // The review threads of your PRs, by node id (pr-inbox asks after the list)
+  const { variables } = JSON.parse(fs.readFileSync(0, 'utf8') || '{}')
+  const ids = new Set(variables?.ids ?? [])
+  out({ data: { nodes: MINE.filter((p) => ids.has(p.id)).map((p) => ({ id: p.id, threads: p.threads ?? { nodes: [] } })) } })
+} else if (args[0] === 'api' && args[1] === 'graphql') {
   const query = (args.find((a) => a.startsWith('query=')) ?? '').slice('query='.length)
   const number = Number(flag('-F')?.replace(/^number=/, ''))
   const repo = (args.find((a) => a.startsWith('name=')) ?? '').slice('name='.length)

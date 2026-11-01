@@ -211,9 +211,14 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
     cwds.push(e.init?.cwd)
     let stdout = ''
     if (e.argv[1] === 'api' && e.argv[2] === 'graphql') stdout = opts.graphql ?? GRAPHQL
+    // The review threads of your PRs, asked for by node id after the list: those the list's PRs carry
+    if (e.argv[1] === 'api' && e.argv[2] === 'graphql' && e.argv.includes('--input')) {
+      const listed = (JSON.parse(opts.graphql ?? GRAPHQL).data?.mine?.nodes ?? []) as { id?: string; threads?: unknown }[]
+      stdout = JSON.stringify({ data: { nodes: listed.filter((p) => p.id).map((p) => ({ id: p.id, threads: p.threads })) } })
+    }
     if (e.argv[2] === 'view' && e.argv.includes('headRefOid')) stdout = JSON.stringify({ headRefOid: opts.head ?? HEAD })
-    if (e.argv[2] === 'view' && e.argv.includes('state,headRefName'))
-      stdout = JSON.stringify({ state: opts.prState ?? 'OPEN', headRefName: 'fix-21' })
+    if (e.argv[2] === 'view' && e.argv.includes('state,headRefName,headRefOid,author'))
+      stdout = JSON.stringify({ state: opts.prState ?? 'OPEN', headRefName: 'fix-21', headRefOid: HEAD, author: { login: 'me' } })
     if (e.argv[2] === 'view' && e.argv.includes('title,body,files'))
       stdout = JSON.stringify(opts.view ?? { title: 't', body: 'b', files: [] })
     if (e.argv[2] === 'diff') stdout = opts.diff ?? 'diff --git a/x b/x'
@@ -4497,7 +4502,10 @@ const thread = (id: string, path: string | null, line: number | null, by: string
   // coderabbitai is a GitHub App (a bot); the others are people
   comments: { nodes: [{ author: { login: by, __typename: by === 'coderabbitai' ? 'Bot' : 'User' } }] },
 })
+// The node id the threads are fetched by, the count the list reports, and the threads that query returns
 const THREADS = {
+  id: 'PR_21',
+  reviewThreads: { totalCount: 4 },
   threads: {
     nodes: [
       thread('PRRT_one', 'app/login.rb', 12, 'mika'),
@@ -4539,8 +4547,16 @@ function addressStubs(
     git: opts.git ?? fixGit(opts.commits),
     locale: { HOME: '/home/me' },
     gh: (argv) =>
-      argv.includes('state,author,headRefOid')
-        ? { stdout: JSON.stringify(opts.view ?? { state: 'OPEN', author: { login: 'me' }, headRefOid: HEAD }) }
+      argv.includes('state,headRefName,headRefOid,author')
+        ? {
+            stdout: JSON.stringify({
+              state: 'OPEN',
+              headRefName: 'fix-21',
+              author: { login: 'me' },
+              headRefOid: HEAD,
+              ...(opts.view as object | undefined),
+            }),
+          }
         : undefined,
   })
   const text = opts.replies ?? REPLY_JSON
@@ -4753,7 +4769,8 @@ test(
 for (const [why, view, says] of [
   ['its head moved', { state: 'OPEN', author: { login: 'me' }, headRefOid: 'b'.repeat(40) }, 'its head is not the fix pushed'],
   ['it is not yours', { state: 'OPEN', author: { login: 'mika' }, headRefOid: HEAD }, 'the PR is not yours'],
-  ['it was closed', { state: 'CLOSED', author: { login: 'me' }, headRefOid: HEAD }, 'the PR is closed'],
+  // Read before the push too: nothing is pushed, so nothing is posted
+  ['it was closed', { state: 'CLOSED', author: { login: 'me' }, headRefOid: HEAD }, 'auto push refused (the PR is closed)'],
 ] as const)
   test(`no reply is posted when, read again, ${why}`, async ($, on) => {
     const s = addressStubs(on, { view })
@@ -4762,7 +4779,7 @@ for (const [why, view, says] of [
     await ui.press({ key: 'tab-mine' })
     await addressAndEnd(ui, s, $, 'talk6')
     expect(repliesPosted(s)).toEqual([])
-    expect(s.toasts.at(-1)).toContain(`not posted (${says}`)
+    expect(s.toasts.at(-1)).toContain(says)
     await ui.unmount()
   })
 
@@ -4809,7 +4826,7 @@ test('while Claude addresses comments it cannot reply, comment, resolve or push 
   await ui.unmount()
 })
 
-test('c and g each follow their own fix: c offers no way into a comments fix, and starts none while it runs', async ($, on) => {
+test('c and g both follow the fix running on the PR, whichever key started it', async ($, on) => {
   // CI failed and threads wait on you
   const both = { ...CHANGES, ...THREADS }
   const s = addressStubs(on, { graphql: commentedGraphql(both) })
@@ -4821,20 +4838,61 @@ test('c and g each follow their own fix: c offers no way into a comments fix, an
   await ui.press({ key: 'panel-yes' })
   for (let i = 0; i < 10; i++) await s.clock.settle()
   await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'talk9' })
-  // c is still the CI's: its menu, with the fix refused while the comments fix runs
-  expect((await ui.find({ key: 'act-ci' }))?.props.label).toBe('fix CI')
+  // The PR has one worktree: c opens the fixing panel of the comments fix, as g does
+  for (const key of ['act-ci', 'act-comments']) {
+    expect((await ui.find({ key }))?.props.label).toBe('push early / stop watching')
+    await ui.press({ key })
+    for (let i = 0; i < 5; i++) await s.clock.settle()
+    expect(((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text).toContain(
+      'Claude is addressing the review comments of acme/app#21',
+    )
+    await ui.press({ key: 'panel-cancel' })
+  }
+  await ui.unmount()
+})
+
+test('c on a PR whose comments fix waits opens its push panel, replies listed, so neither is lost', async ($, on) => {
+  const both = { ...CHANGES, ...THREADS }
+  const git = (argv: readonly string[]) => (argv.includes('push') && !argv.includes('get-url') ? { exitCode: 1 } : fixGit()(argv))
+  const s = addressStubs(on, { graphql: commentedGraphql(both), git })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await addressAndEnd(ui, s, $, 'talk10')
+  expect(repliesPosted(s)).toEqual([])
+  expect((await ui.find({ key: 'act-ci' }))?.props.label).toBe('push fix')
   await ui.press({ key: 'act-ci' })
   for (let i = 0; i < 5; i++) await s.clock.settle()
-  const menu = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
-  expect(menu).toContain('fix CI with Claude (one at a time)')
-  await ui.press({ key: 'panel-cancel' })
-  // g follows the comments fix
-  expect((await ui.find({ key: 'act-comments' }))?.props.label).toBe('push early / stop watching')
-  await ui.press({ key: 'act-comments' })
-  for (let i = 0; i < 5; i++) await s.clock.settle()
-  expect(((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text).toContain(
-    'Claude is addressing the review comments of acme/app#21',
-  )
+  const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
+  expect(panel).toContain('y pushes: 1 commit to fix-21')
+  expect(panel).toContain('Then 2 replies to review threads')
+  // A new CI fix from the prompt would drop them: it says to push or post them first
+  const out = await $.command.run({
+    command: 'pr-inbox',
+    args: 'fix app#21',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: true, columns: 120 },
+  })
+  expect(out.text).toContain('Fixing the CI of')
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  expect(s.toasts.at(-1)).toContain('a fix of the review comments of app#21 waits to be pushed or posted · g first')
+  await ui.unmount()
+})
+
+test('threads that cannot be read leave the refresh working and offer no g', async ($, on) => {
+  const s = stubs(on, {
+    graphql: commentedGraphql(),
+    gh: (argv) => (argv.includes('--input') ? { exitCode: 1 } : undefined),
+  })
+  await start($, s.clock)
+  expect(s.statuses.at(-1)).toContain('my PRs')
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ key: `line-${COMMENTED.url}` })).toBeDefined()
+  expect(await ui.find({ key: 'act-comments' })).toBeUndefined()
+  // Only PRs with threads are asked about, by node id, on stdin
+  const i = s.calls.findIndex((c) => c.includes('--input'))
+  expect(JSON.parse(s.stdins[i] ?? '{}').variables).toEqual({ ids: ['PR_21'] })
   await ui.unmount()
 })
 
