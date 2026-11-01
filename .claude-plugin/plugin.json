@@ -65,7 +65,7 @@
     "risk_high": {
       "type": "string",
       "title": "High risk criteria",
-      "description": "What counts as high risk in the analysis. Empty uses the default (migrations, auth, billing, personal data, deletion, breaking API changes, changes hard to roll back, production config, CI/CD changes to permissions, secrets, privileged triggers or deploys, wide changes without tests)",
+      "description": "What counts as high risk in the analysis. Empty uses the default (migrations, auth, billing, personal data, deletion, breaking API changes, changes hard to roll back, production config, CI/CD changes to permissions, secrets or deploys, wide changes without tests)",
       "default": ""
     },
     "risk_medium": {

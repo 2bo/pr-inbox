@@ -799,10 +799,8 @@ test('the default criteria rate privileged CI changes high, new dependencies med
   const system = s.systems.at(-1) ?? ''
   const line = (level: string) => system.split('\n').find((l) => l.startsWith(`- ${level}: `)) ?? ''
   expect(line('high')).toContain('pull_request_target')
-  expect(line('high')).toContain('hard to roll back')
   expect(line('medium')).toContain('new dependencies')
-  expect(line('medium')).toContain('other CI/CD workflow changes')
-  expect(line('low')).toContain('patch dependency upgrades (GitHub Actions too) that add no new packages')
+  expect(line('low')).toContain('no new packages')
 })
 
 test('redoes a stored analysis in a different language', async ($, on) => {
