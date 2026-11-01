@@ -289,7 +289,7 @@ fragment requested on PullRequest {
 
 // Built-in criteria. Each can be replaced from the settings (risk_high, risk_medium, risk_low, release_impact)
 const DEFAULT_RISK: Record<Risk, string> = {
-  high: 'database migrations; authentication, authorization, billing or personal data; data deletion; breaking changes to public APIs or shared interfaces; changes that are hard to roll back (formats of stored or serialized data, messages or caches, contracts with external systems); production configuration or infrastructure; CI/CD changes to permissions or secrets, privileged triggers that run pull request code (such as pull_request_target), or the deploy and release steps; wide changes without tests',
+  high: 'database migrations; authentication, authorization, billing or personal data; data deletion; breaking changes to public APIs or shared interfaces; changes that are hard to roll back (formats of stored or serialized data, messages or caches, contracts with external systems); production configuration or infrastructure; CI/CD changes to permissions or secrets, privileged triggers that run pull request code (such as pull_request_target), or the deploy and release steps (a version bump of an action already in use is a dependency upgrade, rated as one); wide changes without tests',
   medium:
     'changes in application behavior, minor or major dependency upgrades, new dependencies (added directly, or new packages in the lockfile), other CI/CD workflow changes (jobs, steps, when tests run), features with thin tests',
   low: 'documentation, tests only, patch dependency upgrades (GitHub Actions too) that add no new packages, types, wording or renames that do not change behavior',
