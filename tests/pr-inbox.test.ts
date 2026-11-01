@@ -4390,24 +4390,29 @@ test('fix_push auto: a commit made after the turn ended is not pushed with the o
   await ui.unmount()
 })
 
-test('no push, automatic or not, when origin also pushes somewhere other than the PR repository', async ($, on) => {
-  const git = (argv: readonly string[]) =>
-    argv.join(' ').endsWith('remote get-url --push --all origin')
-      ? { stdout: 'git@github.com:acme/app.git\nhttps://example.com/github.com/acme/app.git\n' }
-      : fixGit()(argv)
-  const s = stubs(on, { git, locale: { HOME: '/home/me' } })
-  on('turn.start', (_, e) => ({ turnId: e.turnId }))
-  await start($, s.clock)
-  const ui = await $.ui.mount(PANE)
-  await ui.press({ key: 'tab-mine' })
-  await pressCi(ui, s, '1')
-  await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'auto7' })
-  await $.turn.complete({ turnId: 'auto7', answer: '', reason: 'answer' } as never)
-  for (let i = 0; i < 10; i++) await s.clock.settle()
-  expect(s.calls.some((c) => c.includes('push') && !c.includes('get-url'))).toBe(false)
-  expect(s.toasts.at(-1)).toContain('pushes somewhere other than acme/app')
-  await ui.unmount()
-})
+for (const bad of [
+  'https://example.com/github.com/acme/app.git',
+  'https://example.com?x=@github.com/acme/app.git',
+  'https://example.com#@github.com/acme/app.git',
+  'https://a@example.com@github.com/acme/app.git',
+  'http://github.com/acme/app.git',
+])
+  test(`no push, automatic or not, when origin also pushes to ${bad}`, async ($, on) => {
+    const git = (argv: readonly string[]) =>
+      argv.join(' ').endsWith('remote get-url --push --all origin') ? { stdout: `git@github.com:acme/app.git\n${bad}\n` } : fixGit()(argv)
+    const s = stubs(on, { git, locale: { HOME: '/home/me' } })
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+    await start($, s.clock)
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'tab-mine' })
+    await pressCi(ui, s, '1')
+    await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'auto7' })
+    await $.turn.complete({ turnId: 'auto7', answer: '', reason: 'answer' } as never)
+    for (let i = 0; i < 10; i++) await s.clock.settle()
+    expect(s.calls.some((c) => c.includes('push') && !c.includes('get-url'))).toBe(false)
+    expect(s.toasts.at(-1)).toContain('pushes somewhere other than acme/app')
+    await ui.unmount()
+  })
 
 test('fix_push auto: a push GitHub refuses leaves the fix ready for the push panel and says why', async ($, on) => {
   const git = (argv: readonly string[]) => (argv.includes('push') ? { exitCode: 1 } : fixGit()(argv))

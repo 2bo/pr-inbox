@@ -5963,14 +5963,22 @@ const FIX_DENY = (push: Config['fix_push']) =>
 const BRANCH_NAME = /^(?!-)(?!.*\.\.)[\w./-]{1,200}$/
 const SHA = /^[0-9a-f]{40}$/
 
-// owner/repo of a GitHub remote URL (https, ssh:// or git@github.com:), with github.com as its host: a URL that only
-// has github.com in its path (https://example.com/github.com/acme/app) is not one
+// owner/repo of a GitHub remote URL (https, ssh:// or git@github.com:) whose host is github.com. The URL is parsed,
+// not matched: one with github.com elsewhere (https://example.com/github.com/acme/app, https://example.com?x=@github.com/
+// acme/app) is not one. Only plain characters and at most one @, so git and the URL parser cannot see different hosts
 function githubRepoOf(remote: string): string {
-  return (
-    remote
-      .trim()
-      .match(/^(?:(?:https|ssh):\/\/(?:[^@/]+@)?github\.com(?::\d+)?\/|git@github\.com:)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/)?.[1] ?? ''
-  )
+  const url = remote.trim()
+  if (!/^[\w.:@/~%+-]+$/.test(url) || url.split('@').length > 2) return ''
+  const scp = url.match(/^git@github\.com:([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/)
+  if (scp) return scp[1] ?? ''
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return ''
+  }
+  if (!['https:', 'ssh:'].includes(parsed.protocol) || parsed.hostname !== 'github.com' || parsed.search || parsed.hash) return ''
+  return parsed.pathname.match(/^\/([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/)?.[1] ?? ''
 }
 
 async function cloneOf($: EngineInterface, dir: string, repo: string): Promise<boolean> {
