@@ -126,6 +126,15 @@ const MINE = [
     additions: 188,
     deletions: 64,
     reviewDecision: 'CHANGES_REQUESTED',
+    // Review threads: two wait on you (g addresses them), one you answered last, one resolved
+    threads: {
+      nodes: [
+        { id: 'PRRT_demo1', isResolved: false, isOutdated: false, path: 'app/session/store.rb', line: 42, comments: { nodes: [{ author: { login: 'mtanaka' } }] } },
+        { id: 'PRRT_demo2', isResolved: false, isOutdated: false, path: 'config/redis.yml', line: 7, comments: { nodes: [{ author: { login: 'mtanaka' } }] } },
+        { id: 'PRRT_demo3', isResolved: false, isOutdated: false, path: 'README.md', line: 12, comments: { nodes: [{ author: { login: 'you' } }] } },
+        { id: 'PRRT_demo4', isResolved: true, isOutdated: false, path: 'app/session/store.rb', line: 10, comments: { nodes: [{ author: { login: 'mtanaka' } }] } },
+      ],
+    },
     ...ci('FAILURE', [
       run('test (ubuntu-latest)', 'FAILURE', 9101),
       run('lint', 'SUCCESS', 9102),
