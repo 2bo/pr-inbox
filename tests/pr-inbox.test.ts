@@ -4397,7 +4397,7 @@ for (const bad of [
   'https://a@example.com@github.com/acme/app.git',
   'http://github.com/acme/app.git',
 ])
-  test(`no push, automatic or not, when origin also pushes to ${bad}`, async ($, on) => {
+  test(`fix_push auto: no push when origin also pushes to ${bad}`, async ($, on) => {
     const git = (argv: readonly string[]) =>
       argv.join(' ').endsWith('remote get-url --push --all origin') ? { stdout: `git@github.com:acme/app.git\n${bad}\n` } : fixGit()(argv)
     const s = stubs(on, { git, locale: { HOME: '/home/me' } })
@@ -4411,6 +4411,23 @@ for (const bad of [
     for (let i = 0; i < 10; i++) await s.clock.settle()
     expect(s.calls.some((c) => c.includes('push') && !c.includes('get-url'))).toBe(false)
     expect(s.toasts.at(-1)).toContain('pushes somewhere other than acme/app')
+    await ui.unmount()
+  })
+
+for (const good of ['https://github.com/acme/app.git', 'ssh://git@github.com/acme/app.git', 'https://github.com/acme/app'])
+  test(`fix_push auto: pushes when the push URL of origin is ${good}`, async ($, on) => {
+    const git = (argv: readonly string[]) =>
+      argv.join(' ').endsWith('remote get-url --push --all origin') ? { stdout: `${good}\n` } : fixGit()(argv)
+    const s = stubs(on, { git, locale: { HOME: '/home/me' } })
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+    await start($, s.clock)
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'tab-mine' })
+    await pressCi(ui, s, '1')
+    await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'auto8' })
+    await $.turn.complete({ turnId: 'auto8', answer: '', reason: 'answer' } as never)
+    for (let i = 0; i < 10; i++) await s.clock.settle()
+    expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'push', 'origin', `${HEAD}:refs/heads/fix-21`])
     await ui.unmount()
   })
 
