@@ -4257,8 +4257,7 @@ test('your PR in conflict says so in its badge; c resolves it with Claude by mer
   // The push panel lists the new commit and counts the ones of main that the merge brings in
   const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
   expect(panel).toContain('abc1234 Merge main into fix-21')
-  expect(panel).toContain('and 4 commits of main that the merge brings in, already on GitHub')
-  expect(panel).toContain('y pushes: 1 commit (+ 4 commits already on main) to fix-21 of acme/app (#21)')
+  expect(panel).toContain('y pushes: 1 commit (+ 4 commits of main the merge brings in, already on GitHub) to fix-21 of acme/app (#21)')
   await ui.press({ key: 'panel-yes' })
   for (let i = 0; i < 10; i++) await s.clock.settle()
   expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'push', 'origin', `${HEAD}:refs/heads/fix-21`])
