@@ -4369,6 +4369,26 @@ test('fix_push auto: a fix you stopped following is not pushed when its turn end
   await ui.unmount()
 })
 
+test('fix_push auto: a commit made after the turn ended is not pushed with the ones listed', async ($, on) => {
+  let reads = 0
+  const git = (argv: readonly string[]) =>
+    argv.join(' ') === `git -C ${WORKTREE} rev-parse HEAD` ? { stdout: `${reads++ === 0 ? HEAD : 'b'.repeat(40)}\n` } : fixGit()(argv)
+  const s = stubs(on, { git, locale: { HOME: '/home/me' } })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await pressCi(ui, s, '1')
+  await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'auto6' })
+  await $.turn.complete({ turnId: 'auto6', answer: '', reason: 'answer' } as never)
+  for (let i = 0; i < 10; i++) await s.clock.settle()
+  // Listed up to the HEAD read when the turn ended, and that is all a push may send
+  expect(s.calls).toContainEqual(['git', '-C', WORKTREE, 'log', '--format=%h %s', `origin/fix-21..${HEAD}`])
+  expect(s.calls.some((c) => c.includes('push'))).toBe(false)
+  expect(s.toasts.at(-1)).toContain('auto push refused (new commits came after the turn ended')
+  await ui.unmount()
+})
+
 test('fix_push auto: a push GitHub refuses leaves the fix ready for the push panel and says why', async ($, on) => {
   const git = (argv: readonly string[]) => (argv.includes('push') ? { exitCode: 1 } : fixGit()(argv))
   const s = stubs(on, { git, locale: { HOME: '/home/me' }, stderr: '! [rejected] (fetch first)' })

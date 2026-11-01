@@ -6148,8 +6148,16 @@ function conflictSteps(into: string): string[] {
 
 // The worktree's commits a push would send: those not on the branch as last fetched. Those on the base as fetched
 // (what merging it in brings) are on GitHub already and left out; the push panel counts them
-async function commitsAhead($: EngineInterface, dir: string, branch: string, into = ''): Promise<string[]> {
-  const log = await $.process.run(['git', '-C', dir, 'log', '--format=%h %s', `origin/${branch}..HEAD`, ...(await notOnBase($, dir, into))])
+async function commitsAhead($: EngineInterface, dir: string, branch: string, into = '', to = 'HEAD'): Promise<string[]> {
+  const log = await $.process.run([
+    'git',
+    '-C',
+    dir,
+    'log',
+    '--format=%h %s',
+    `origin/${branch}..${to}`,
+    ...(await notOnBase($, dir, into)),
+  ])
   return log.exitCode === 0 ? log.stdout.split('\n').map(clean).filter(Boolean) : []
 }
 
@@ -6167,7 +6175,10 @@ type FixEnd = 'done' | 'interrupted' | 'early'
 async function afterFix($: EngineInterface, job: FixJob, end: FixEnd = 'done'): Promise<string> {
   // Asked early, Claude goes on: keep following it, so what it commits later is offered too
   if (fixJob === job && end !== 'early') fixJob = undefined
-  const commits = await commitsAhead($, job.dir, job.branch, job.into)
+  // An automatic push sends the HEAD read here, and the list below is of exactly those commits
+  const mayPush = end === 'done' && cfg.fix_push === 'auto'
+  const pinned = mayPush ? (await $.process.run(['git', '-C', job.dir, 'rev-parse', 'HEAD'])).stdout.trim() : ''
+  const commits = await commitsAhead($, job.dir, job.branch, job.into, SHA.test(pinned) ? pinned : 'HEAD')
   $.ui.invalidate('ui.render')
   if (commits.length === 0) {
     fixReady.delete(job.pr.url)
@@ -6185,9 +6196,13 @@ async function afterFix($: EngineInterface, job: FixJob, end: FixEnd = 'done'): 
   if (end === 'early') return openPush($, ready, 'early')
   // fix_push auto: a fix turn that ended on its own pushes what it committed, as y in the push panel would. One cut
   // short is left to the push panel
-  // Not under an open push panel: it lists the commits you are reading, and y there pushes them
-  const auto = end === 'done' && cfg.fix_push === 'auto' && writePanel?.write.kind !== 'push' && !stoppedFixes.has(job)
-  const failed = auto ? (await stillOpenOn($, ready)) || (await sendPush($, ready)) : undefined
+  // Not under an open push panel or for a fix you stopped following, checked again after reading GitHub
+  const held = () => writePanel?.write.kind === 'push' || stoppedFixes.has(job)
+  let failed: string | undefined
+  if (mayPush && !held()) {
+    failed = SHA.test(pinned) ? await stillOpenOn($, ready) : `could not read the HEAD of ${job.dir}`
+    if (!failed && !held()) failed = await sendPush($, ready, pinned, true)
+  }
   if (failed === '') return ''
   fixReady.set(job.pr.url, ready)
   const full = `${job.pr.repository.nameWithOwner}#${job.pr.number}`
@@ -6264,13 +6279,20 @@ async function openPush($: EngineInterface, job: FixJob, end: FixEnd = 'done'): 
 
 // y in the push panel. HEAD is read again first: if Claude committed since the panel opened, nothing is pushed, as
 // the panel did not list it. Then exactly that commit goes to the PR's branch
-// With no pinned head (fix_push auto, the turn over), it pushes the HEAD read now: no panel listed anything to pin to
-async function sendPush($: EngineInterface, job: FixJob, pinned?: string): Promise<string> {
-  const head = (await $.process.run(['git', '-C', job.dir, 'rev-parse', 'HEAD'])).stdout.trim()
-  if (!SHA.test(head)) return `could not read the HEAD of ${job.dir}`
-  if (pinned !== undefined && head !== pinned) return 'Claude committed again since this opened · q, then c shows the new list'
+// auto: fix_push auto, when the turn ended, pinned to the HEAD read then (only the words differ)
+async function sendPush($: EngineInterface, job: FixJob, head: string, auto = false): Promise<string> {
+  const now = (await $.process.run(['git', '-C', job.dir, 'rev-parse', 'HEAD'])).stdout.trim()
+  if (now !== head) {
+    fixReady.set(job.pr.url, job)
+    return auto
+      ? 'new commits came after the turn ended · c shows them'
+      : 'Claude committed again since this opened · q, then c shows the new list'
+  }
   const commits = job.commits ?? []
-  const r = await $.process.run(['git', '-C', job.dir, 'push', 'origin', `${head}:refs/heads/${job.branch}`], { timeoutMs: 120000 })
+  // A push that times out may or may not have gone through: say so, and keep the fix for c
+  const r = await $.process
+    .run(['git', '-C', job.dir, 'push', 'origin', `${head}:refs/heads/${job.branch}`], { timeoutMs: 120000 })
+    .catch((err: unknown) => ({ exitCode: 1, stdout: '', stderr: `did not finish (${messageOf(err)}); check ${job.branch} on GitHub` }))
   if (r.exitCode !== 0) {
     fixReady.set(job.pr.url, job)
     const moved = /non-fast-forward|fetch first|rejected/i.test(r.stderr)
@@ -6279,7 +6301,6 @@ async function sendPush($: EngineInterface, job: FixJob, pinned?: string): Promi
       : `push failed: ${fit(clean(r.stderr), 120)} · your commits stay in ${job.dir}`
   }
   fixReady.delete(job.pr.url)
-  const auto = pinned === undefined
   $.ui.toast(
     auto
       ? `✦ pr-inbox pushed Claude's fix of ${job.repo}#${job.pr.number}: ${plural(commits.length, 'commit')} to ${job.branch} · CI runs again · fix_push ask in /config to check first`
@@ -6316,9 +6337,10 @@ function forgetFix($: EngineInterface, job: FixJob): void {
 async function stopWatching($: EngineInterface, job: FixJob): Promise<string> {
   if (fixJob === job) fixJob = undefined
   stoppedFixes.add(job)
-  $.ui.toast(`Stopped following the fix of ${askLabel(job.pr)}: nothing is pushed by itself; the worktree stays in ${job.dir}`, {
-    timeoutMs: 8000,
-  })
+  $.ui.toast(
+    `Stopped following the fix of ${askLabel(job.pr)}: nothing is pushed by itself; its commits stay in ${job.dir} · once it ends, c, ${job.task === 'conflict' ? '3' : '1'}, y, then 3: push panel`,
+    { timeoutMs: 10000 },
+  )
   $.ui.invalidate('ui.render')
   return ''
 }
