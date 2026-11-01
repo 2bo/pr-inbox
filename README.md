@@ -238,7 +238,7 @@ Tests live in `tests/*.test.ts`. GitHub, the model, the store and the environmen
 
 ## Disclaimer
 
-pr-inbox is provided as is, without warranty of any kind. You use it at your own risk: the authors are not responsible for anything that results from using it, including approvals, merges, pushes, comments and other writes it makes on your behalf, what it sends to a model, and decisions taken on the strength of its analysis or AI review. Check what each panel says it will send before you press `y`. See [LICENSE](LICENSE) for the full terms.
+pr-inbox is provided as is, without warranty of any kind. You use it at your own risk: the authors are not responsible for anything that results from using it, including approvals, merges, pushes, comments and other writes it makes on your behalf, what it sends to a model, and decisions taken on the strength of its analysis or AI review. Check what each panel says it will send before you press `y`, and know what runs without one: `ai_approve` on `auto` approves on its own, and the turns `p` and `c` start run with your session's permissions (see [Security](#security)). See [LICENSE](LICENSE) for the full terms.
 
 ## License
 
