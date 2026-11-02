@@ -149,6 +149,8 @@ type Config = {
   glyphs: 'unicode' | 'ascii'
   // AI review and approve (v)
   ai_approve: 'confirm' | 'auto'
+  // The comment of an approval you make (a, b), such as LGTM; empty sends none
+  approve_comment: string
   // Which review requests the AI review takes up on its own when they arrive or get new commits
   auto_review: 'off' | 'bots' | 'review requests'
   // A fix of your PR (c, g): pushed when the turn ends on its own (auto), or from the push panel with y (ask)
@@ -368,6 +370,7 @@ let cfg: Config = {
   theme: 'dark',
   glyphs: 'unicode',
   ai_approve: 'confirm',
+  approve_comment: '',
   auto_review: 'off',
   fix_push: 'auto',
   fix_reply: 'auto',
@@ -1687,7 +1690,7 @@ type PanelNote = { text: string; color?: 'red' | 'yellow' | 'green' }
 // Data, not a callback: the write runs through runWrite, a named function per kind
 // bulk: the panel after b, whose header and notes list the PRs (rebuilt from those left as each is approved)
 type PanelWrite =
-  | { kind: 'approve'; how: string; bulk: boolean }
+  | { kind: 'approve'; how: string; bulk: boolean; comment: string }
   | { kind: 'merge' }
   | { kind: 'auto-merge on' }
   | { kind: 'auto-merge off' }
@@ -1854,7 +1857,8 @@ function sendsText(p: WritePanel): string {
     return `${checked.length === 1 ? '1 draft' : `${checked.length} drafts`} as written to their threads on ${pr.repository.nameWithOwner}#${pr.number}: ${checked.map((r) => threadPlace(r.thread)).join(', ')}${rest ? ` (${rest} ${rest === 1 ? 'stays' : 'stay'} held)` : ''}`
   }
   const own = p.choices.find((c) => c.key === p.chosen)?.sends
-  return own ?? p.sends.replace('{choice}', chosenWord(p))
+  // Only a panel with choices has a {choice} to fill: elsewhere the text is sent as it is (an approve_comment)
+  return own ?? (p.choices.length ? p.sends.replace('{choice}', chosenWord(p)) : p.sends)
 }
 
 // The word of the choice picked ('' before one is)
@@ -1866,7 +1870,7 @@ function chosenWord(p: WritePanel): string {
 async function runWrite($: EngineInterface, p: WritePanel): Promise<string> {
   const pr = p.prs[0]
   const method = METHODS.find((m) => m.key === p.chosen)
-  if (p.write.kind === 'approve') return approveAll($, p, p.write.how)
+  if (p.write.kind === 'approve') return approveAll($, p, p.write)
   if (p.write.kind === 'issue') {
     const reason = CLOSE_REASONS.find((r) => r.key === p.chosen)?.flag ?? ''
     if (p.write.to === 'close' && !reason) return ''
@@ -1906,15 +1910,15 @@ async function runWrite($: EngineInterface, p: WritePanel): Promise<string> {
 // y in the approve panel: exactly the commits it shows, one by one; postApproval reads each head again right before.
 // A failed approval says so in its own toast. Each one done leaves the panel as it goes, so if something throws
 // midway, the panel stays open naming only what is left, and y again never approves one twice
-async function approveAll($: EngineInterface, p: WritePanel, how: string): Promise<string> {
+async function approveAll($: EngineInterface, p: WritePanel, w: Extract<PanelWrite, { kind: 'approve' }>): Promise<string> {
   // Several: one toast for all of them at the end, each named in full
   const quiet = p.prs.length > 1
   const done: string[] = []
   for (const pr of [...p.prs]) {
     const run = reviewOfHead(pr)
-    const ok = await postApproval($, pr, how, quiet)
+    const ok = await postApproval($, pr, w.how, quiet, w.comment)
     p.prs = p.prs.filter((x) => x !== pr)
-    Object.assign(p, approveLines(p.prs), p.write.kind === 'approve' && p.write.bulk ? bulkLines(p.prs) : {})
+    Object.assign(p, approveLines(p.prs, w.comment), w.bulk ? bulkLines(p.prs) : {})
     if (ok) done.push(`${pr.repository.nameWithOwner}#${pr.number}`)
     if (ok && run?.state === 'passed') run.state = 'approved'
   }
@@ -1935,16 +1939,20 @@ function bulkLines(prs: PR[]): { title: string; notes: PanelNote[] } {
 }
 
 // What the approve panel says y sends, and y's label
-function approveLines(prs: PR[]): { sends: string; yes: string } {
+function approveLines(prs: PR[], comment: string): { sends: string; yes: string } {
   return {
-    // In full, owner too
-    sends: prs.map((p) => `${p.repository.nameWithOwner}#${p.number} at ${p.headRefOid.slice(0, 7)}`).join(', '),
+    // In full, owner too, and the comment that goes with it
+    sends:
+      prs.map((p) => `${p.repository.nameWithOwner}#${p.number} at ${p.headRefOid.slice(0, 7)}`).join(', ') +
+      (comment ? ` ${prs.length > 1 ? 'each ' : ''}with the comment "${comment}"` : ''),
     yes: prs.length === 1 ? 'approve' : `approve all ${prs.length}`,
   }
 }
 
 // The approve panel (a, b)
 function openApproval($: EngineInterface, prs: PR[], notes: PanelNote[], how: string, bulk = false): void {
+  // Read and cleaned when the panel opens, so y sends exactly the comment it shows (on one line)
+  const comment = clean(custom(cfg.approve_comment))
   openPanel($, {
     verb: 'approve',
     prs,
@@ -1952,10 +1960,10 @@ function openApproval($: EngineInterface, prs: PR[], notes: PanelNote[], how: st
     notes,
     ...(bulk ? bulkLines(prs) : {}),
     sendsLead: 'y approves: ',
-    ...approveLines(prs),
+    ...approveLines(prs, comment),
     movedNote: 'it will not be approved',
     progress: '⟳ approving…',
-    write: { kind: 'approve', how, bulk },
+    write: { kind: 'approve', how, bulk, comment },
   })
 }
 
@@ -2012,10 +2020,13 @@ const AUTO_HOW = 'automatically (ai_approve auto, the AI review passed)'
 // PRs approved that way in this session, so the pane says who decided
 const autoApproved = new Set<string>()
 
-// quiet: no toast of its own when it is approved (approveAll sums several up in one); failures always say so
-async function postApproval($: EngineInterface, pr: PR, how: string, quiet = false): Promise<boolean> {
+// quiet: no toast of its own when it is approved (approveAll sums several up in one); failures always say so.
+// comment: the body of an approval you made (approve_comment, as the panel showed it); an automatic one has its own
+async function postApproval($: EngineInterface, pr: PR, how: string, quiet = false, comment = ''): Promise<boolean> {
   const auto = how === AUTO_HOW
   const sha = pr.headRefOid.slice(0, 7)
+  // On GitHub too, an approval no person chose says so
+  const body = auto ? `Approved by the pr-inbox AI review on its own (ai_approve auto) at ${sha}.` : comment
   const fail = (why: string) => $.ui.toast(`Approve failed: ${fit(clean(why), 80)}`, { timeoutMs: 8000 })
   if (!REPO_NAME.test(pr.repository.nameWithOwner) || !/^[0-9a-f]{40}$/.test(pr.headRefOid)) {
     fail('unexpected repository name or commit id')
@@ -2042,8 +2053,7 @@ async function postApproval($: EngineInterface, pr: PR, how: string, quiet = fal
       'event=APPROVE',
       '-f',
       `commit_id=${pr.headRefOid}`,
-      // On GitHub too, an approval no person chose says so
-      ...(auto ? ['-f', `body=Approved by the pr-inbox AI review on its own (ai_approve auto) at ${sha}.`] : []),
+      ...(body ? ['-f', `body=${body}`] : []),
     ])
     .catch(ghMissing)
   if (r.exitCode !== 0) {
@@ -7522,7 +7532,8 @@ export function register(on: On, options: PluginOptions) {
             flexDirection: 'row',
             children: [
               Text({ color: NEON.muted, children: [p.sendsLead] }),
-              Text({ color: NEON.cyan, bold: true, wrap: 'wrap', children: [sendsText(p)] }),
+              // The approve_comment as it goes to GitHub, never through glyphs ascii
+              (p.write.kind === 'approve' ? kit.Text : Text)({ color: NEON.cyan, bold: true, wrap: 'wrap', children: [sendsText(p)] }),
             ],
           })
     // The choices, each on its number key: the one picked marked, one not offered here dim (its key says why)
