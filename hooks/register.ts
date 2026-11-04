@@ -2167,7 +2167,7 @@ async function addToPrompt($: EngineInterface, box: string, word: string): Promi
 }
 
 async function dropFromPrompt($: EngineInterface, box: string, word: string): Promise<void> {
-  await $.prompt.fill({ text: box.replace(`${word} `, '').replace(word, '') })
+  await $.prompt.fill({ text: box.replaceAll(`${word} `, '').replaceAll(word, '') })
 }
 
 // p: the link goes in the prompt → the link comes out again

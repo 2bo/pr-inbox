@@ -7056,6 +7056,7 @@ test('4 puts the id of the session in the prompt, in view, and again takes it ou
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
+  expect((await ui.find({ key: 'act-session-id' }))?.props.hotkey).toBe('4')
   await ui.press({ key: 'act-session-id' })
   // Only the id: no title, path or transcript
   expect(s.promptBox()).toBe(`${SESSION} `)
@@ -7079,6 +7080,10 @@ test('4 keeps what is typed in the prompt, on a session open now too', async ($,
   expect(s.promptBox()).toBe(`read ${SESSION} `)
   await ui.press({ key: 'act-session-id' })
   expect(s.promptBox()).toBe('read ')
+  // However many times it is there, it all comes out
+  await $.prompt.fill({ text: `${SESSION} and ${SESSION} and ${SESSION}` } as never)
+  await ui.press({ key: 'act-session-id' })
+  expect(s.promptBox()).toBe('and and ')
   await ui.unmount()
 })
 
