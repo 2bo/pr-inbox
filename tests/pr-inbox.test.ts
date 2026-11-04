@@ -6790,6 +6790,12 @@ function rgAnswers(argv: readonly string[], links: string, opts: { exitCode?: nu
   return { stdout: SESSION_TITLES.filter((row) => argv.includes(row.split('\0')[0] ?? '')).join('\n') }
 }
 
+function noOpenSessions(on: TestOn) {
+  on('fs.list', () => ({ value: [] }) as never)
+  on('fs.exists', () => ({ value: true }) as never)
+  on('session.id', () => ({ value: 'this-session' }) as never)
+}
+
 function sessionStubs(
   on: TestOn,
   open: boolean,
@@ -6863,8 +6869,11 @@ test('sessions are found with the rg on PATH: its config is ignored, and titles 
   const reads = s.calls.filter((c) => c[0] === 'rg' && !c.includes('--version'))
   expect(reads).toHaveLength(2)
   expect(reads.every((c) => c.includes('--no-config'))).toBe(true)
-  expect(reads[0]?.join(' ')).toContain('pr-link')
-  expect(reads[0]?.join(' ')).not.toContain('custom-title')
+  // Only your open PRs' rows are asked for, each URL escaped; titles are not
+  const links = reads[0]?.join(' ') ?? ''
+  expect(links).toContain('pr-link')
+  expect(links).toContain(CHANGES.url.replaceAll('.', '\\.'))
+  expect(links).not.toContain('custom-title')
   // Only SESSION made the PRs, so only its transcript is read for a title
   expect(reads[1]?.filter((a) => a.endsWith('.jsonl'))).toEqual([`${PROJECTS}/${SESSION}.jsonl`])
   // grep still reads one transcript at a time, never all of them
@@ -6873,9 +6882,7 @@ test('sessions are found with the rg on PATH: its config is ignored, and titles 
 })
 
 test('with no rg on PATH, sessions are found with the ripgrep inside Claude Code, through a link of ours', async ($, on) => {
-  on('fs.list', () => ({ value: [] }) as never)
-  on('fs.exists', () => ({ value: true }) as never)
-  on('session.id', () => ({ value: 'this-session' }) as never)
+  noOpenSessions(on)
   const link = '/home/me/.cache/pr-inbox/bin/rg'
   const s = stubs(on, {
     locale: { HOME: '/home/me', CLAUDE_CODE_EXECPATH: '/opt/claude/2.1.318' },
@@ -6891,9 +6898,7 @@ test('with no rg on PATH, sessions are found with the ripgrep inside Claude Code
 })
 
 test('a link that does not answer as ripgrep is not used: t says ripgrep is needed', async ($, on) => {
-  on('fs.list', () => ({ value: [] }) as never)
-  on('fs.exists', () => ({ value: true }) as never)
-  on('session.id', () => ({ value: 'this-session' }) as never)
+  noOpenSessions(on)
   const s = stubs(on, {
     locale: { HOME: '/home/me', CLAUDE_CODE_EXECPATH: '/opt/claude/2.1.318' },
     fail: ['rg'],
@@ -6908,23 +6913,8 @@ test('a link that does not answer as ripgrep is not used: t says ripgrep is need
   await ui.unmount()
 })
 
-test('a read of the transcripts that fails says so on t', async ($, on) => {
-  on('fs.list', () => ({ value: [] }) as never)
-  on('fs.exists', () => ({ value: true }) as never)
-  on('session.id', () => ({ value: 'this-session' }) as never)
-  const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, '', { exitCode: 3 }) })
-  await start($, s.clock)
-  const ui = await $.ui.mount(PANE)
-  await ui.press({ key: 'tab-mine' })
-  await ui.press({ key: 'unbound-t' })
-  expect(s.toasts.at(-1)).toMatch(/: reading the transcripts failed or took too long/)
-  await ui.unmount()
-})
-
 test('a read cut at the output limit keeps the rows it has: a cut last row is dropped', async ($, on) => {
-  on('fs.list', () => ({ value: [] }) as never)
-  on('fs.exists', () => ({ value: true }) as never)
-  on('session.id', () => ({ value: 'this-session' }) as never)
+  noOpenSessions(on)
   const rows = `${sessionLinks()}\n${prLink(SESSION, READY, '2026-09-30T00:02:00.000Z').slice(0, 60)}`
   const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, rows, { isStdoutTruncated: true }) })
   await start($, s.clock)
@@ -6934,18 +6924,21 @@ test('a read cut at the output limit keeps the rows it has: a cut last row is dr
   await ui.unmount()
 })
 
-test('a PR with no session after a cut read: t says the rest was not read, not that no session made it', async ($, on) => {
-  on('fs.list', () => ({ value: [] }) as never)
-  on('fs.exists', () => ({ value: true }) as never)
-  on('session.id', () => ({ value: 'this-session' }) as never)
-  const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, '', { isStdoutTruncated: true }) })
-  await start($, s.clock)
-  const ui = await $.ui.mount(PANE)
-  await ui.press({ key: 'tab-mine' })
-  await ui.press({ key: 'unbound-t' })
-  expect(s.toasts.at(-1)).toMatch(/: there were too many transcripts to read them all/)
-  await ui.unmount()
-})
+for (const [why, opts, says] of [
+  ['failed', { exitCode: 3 }, /: reading the transcripts failed or took too long/],
+  ['cut at the output limit', { isStdoutTruncated: true }, /: there were too many transcripts to read them all/],
+] as const) {
+  test(`on a PR with no session after a read that ${why}, t says so, not that no session made it`, async ($, on) => {
+    noOpenSessions(on)
+    const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, '', opts) })
+    await start($, s.clock)
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'tab-mine' })
+    await ui.press({ key: 'unbound-t' })
+    expect(s.toasts.at(-1)).toMatch(says)
+    await ui.unmount()
+  })
+}
 
 test('a session that only pushed to your PR is drawn as having worked on it; the last one is the one t asks', async ($, on) => {
   // Neither session noted the PR when it was created: it was made elsewhere. The other session pushed last, and is open
@@ -6969,19 +6962,14 @@ test('t on a PR this session only pushed to says so: last worked on, not made', 
 })
 
 test('only the first note of a PR can make it: a later one near the creation, after an earlier one, only worked on it', async ($, on) => {
-  on('fs.list', () => ({ value: [] }) as never)
-  on('fs.exists', () => ({ value: true }) as never)
-  on('session.id', () => ({ value: 'this-session' }) as never)
+  noOpenSessions(on)
   // A clock three minutes behind: SESSION's note comes before the PR's creation, OTHER_SESSION's a minute before it
   const rows = [CHANGES, READY, WAITING, STALE]
     .flatMap((p) => [prLink(SESSION, p, '2026-09-29T23:57:00.000Z'), prLink(OTHER_SESSION, p, '2026-09-29T23:59:00.000Z')])
     .join('\n')
   const s = stubs(on, {
     locale: { HOME: '/home/me' },
-    run: (argv) => {
-      if (argv[0] === 'rg') return rgAnswers(argv, rows)
-      return undefined
-    },
+    run: (argv) => rgAnswers(argv, rows),
   })
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
@@ -7082,9 +7070,7 @@ test('t with an empty request sends nothing', async ($, on) => {
 
 test('t keeps a request that could not go in the field, for Enter to try again; moving to another PR closes it', async ($, on) => {
   let fails = true
-  on('fs.list', () => ({ value: [] }) as never)
-  on('fs.exists', () => ({ value: true }) as never)
-  on('session.id', () => ({ value: 'this-session' }) as never)
+  noOpenSessions(on)
   const s = stubs(on, {
     locale: { HOME: '/home/me' },
     stderr: 'No conversation found',

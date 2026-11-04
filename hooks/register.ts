@@ -2222,9 +2222,11 @@ const SESSIONS_EVERY = MINUTE
 // The session that runs gh pr create notes the PR a second or two later; the rest allows for clock skew
 const CREATED_WITHIN = 2 * MINUTE
 const CLAUDE_SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-// A whole pr-link row, and the start of a title row up to the title's closing quote. Inside a message (a tool's
-// output that shows a transcript, say) the quotes are escaped, so these match only Claude Code's own rows
-const SESSION_LINKS = String.raw`\{"type":"pr-link",[^{}]*\}`
+// A whole pr-link row of one of these PRs, and the start of a title row up to the title's closing quote. Inside a
+// message (a tool's output that shows a transcript, say) the quotes are escaped, so these match only Claude Code's own
+// rows. The PRs are named in the pattern so that what rg prints follows your open PRs, not all your history
+const sessionLinks = (urls: Iterable<string>) =>
+  String.raw`\{"type":"pr-link",[^{}]*"prUrl":"(${[...urls].map((url) => url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})"[^{}]*\}`
 const SESSION_TITLES = String.raw`\{"type":"(custom-title|ai-title)","(customTitle|aiTitle)":"([^"\\]|\\.)*"`
 // Prints what grep -H --null -o prints. No config file: one could change what it prints. No ignore files: a transcript is
 // never to be skipped
@@ -2260,14 +2262,6 @@ function grepHits(stdout: string): { path: string; id: string; match: string }[]
     const [path = '', match = ''] = line.split('\0')
     return { path, id: path.match(/\/([^/]+)\.jsonl$/)?.[1] ?? '', match }
   })
-}
-
-function parseRow(text: string): Record<string, unknown> | undefined {
-  try {
-    return JSON.parse(text) as Record<string, unknown>
-  } catch {
-    return undefined
-  }
 }
 
 // ripgrep: the one on PATH, or else the one inside Claude Code, which runs as ripgrep when started under that name, so
@@ -2313,7 +2307,7 @@ async function readSessions($: EngineInterface): Promise<void> {
   }
   const root = `${home}/.claude/projects`
   const rows = await $.process
-    .run([rg, ...RG_FLAGS, '-g', '*.jsonl', '-e', SESSION_LINKS, root], { timeoutMs: 20000 })
+    .run([rg, ...RG_FLAGS, '-g', '*.jsonl', '-e', sessionLinks(own.keys()), root], { timeoutMs: MINUTE })
     .catch(() => undefined)
   // rg says 1 when nothing matched, 2 when a file could not be read (what it found elsewhere still counts)
   if (!rows || rows.exitCode > 2) {
@@ -2329,7 +2323,7 @@ async function readSessions($: EngineInterface): Promise<void> {
   for (const { path, id, match } of grepHits(rows.stdout)) {
     if (!CLAUDE_SESSION.test(id) || !path.startsWith(`${root}/`)) continue
     files.set(id, path)
-    const row = parseRow(match)
+    const row = lastJson(match)
     if (row?.type !== 'pr-link' || row.sessionId !== id || typeof row.prUrl !== 'string') continue
     const url = safeHref(row.prUrl)
     const at = Date.parse(String(row.timestamp))
@@ -2356,7 +2350,7 @@ async function readSessions($: EngineInterface): Promise<void> {
       .run([rg, ...RG_FLAGS, '-e', SESSION_TITLES, ...ids.map((id) => files.get(id) ?? '')], { timeoutMs: 20000 })
       .catch(() => undefined)
     for (const { id, match } of grepHits(r?.stdout ?? '')) {
-      const row = parseRow(`${match}}`)
+      const row = lastJson(`${match}}`)
       if (!row) continue
       const title = titles.get(id) ?? {}
       titles.set(id, title)
@@ -2371,10 +2365,8 @@ async function readSessions($: EngineInterface): Promise<void> {
       .run(['grep', '-m1', '-HoE', '--null', SESSION_CWD, ...unread.map((id) => files.get(id) ?? '')], { timeoutMs: 20000 })
       .catch(() => undefined)
     for (const { id, match } of grepHits(r?.stdout ?? '')) {
-      try {
-        const cwd = (JSON.parse(`{${match}}`) as { cwd?: unknown }).cwd
-        if (typeof cwd === 'string' && cwd.startsWith('/') && clean(cwd) === cwd && !sessionCwds.has(id)) sessionCwds.set(id, cwd)
-      } catch {}
+      const cwd = lastJson(`{${match}}`)?.cwd
+      if (typeof cwd === 'string' && cwd.startsWith('/') && clean(cwd) === cwd && !sessionCwds.has(id)) sessionCwds.set(id, cwd)
     }
   }
   prSessions = new Map(
@@ -2440,9 +2432,10 @@ function sessionNote(pr: PR): string {
 
 function noSessionWhy(pr: PR): string {
   if (sessionsLoading || sessionsReadAt === 0) return `t: still looking for the session that made or worked on ${askLabel(pr)}…`
-  if (sessionsTrouble)
-    return `Could not look through every session for ${askLabel(pr)}: ${sessionsTrouble} · p: put its link in the prompt here`
-  return `No Claude Code session on this computer made or worked on ${askLabel(pr)} · p: put its link in the prompt here`
+  const lead = sessionsTrouble
+    ? `Could not look through every session for ${askLabel(pr)}: ${sessionsTrouble}`
+    : `No Claude Code session on this computer made or worked on ${askLabel(pr)}`
+  return `${lead} · p: put its link in the prompt here`
 }
 
 // The request being typed for a PR's session (t), drawn as a field above the list; failed: why the last Enter did
