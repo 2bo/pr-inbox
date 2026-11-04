@@ -700,7 +700,7 @@ test('on My PRs, the session has a line of its own', async ($, on) => {
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  expect(await ui.find({ type: 'Text', text: /^session “login fix”$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^session “login fix” · ${SESSION}$`) })).toBeDefined()
   await ui.unmount()
 })
 
@@ -7048,6 +7048,56 @@ test('a later read that fails forgets the sessions found before; one that only l
   await readAgain()
   expect(await ui.find({ type: 'Text', text: /login fix/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /session unknown \(t: why\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('4 puts the id of the session in the prompt, in view, and again takes it out; nothing goes until you send', async ($, on) => {
+  const s = sessionStubs(on, false)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect((await ui.find({ key: 'act-session-id' }))?.props.hotkey).toBe('4')
+  await ui.press({ key: 'act-session-id' })
+  // Only the id: no title, path or transcript
+  expect(s.promptBox()).toBe(`${SESSION} `)
+  expect(s.toasts.at(-1)).toMatch(/^app#\d+: session id in the prompt \(“login fix”\) · Esc, then type around it$/)
+  // No model saw it
+  expect(s.prompts.join('\n')).not.toContain(SESSION)
+  expect(s.calls.some((c) => c[0] === 'claude')).toBe(false)
+  await ui.press({ key: 'act-session-id' })
+  expect(s.promptBox()).toBe('')
+  expect(s.toasts.at(-1)).toMatch(/^app#\d+: session id taken out of the prompt$/)
+  await ui.unmount()
+})
+
+test('4 keeps what is typed in the prompt, on a session open now too', async ($, on) => {
+  const s = sessionStubs(on, true)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await $.prompt.fill({ text: 'read' } as never)
+  await ui.press({ key: 'act-session-id' })
+  expect(s.promptBox()).toBe(`read ${SESSION} `)
+  await ui.press({ key: 'act-session-id' })
+  expect(s.promptBox()).toBe('read ')
+  // However many times it is there, it all comes out
+  await $.prompt.fill({ text: `${SESSION} and ${SESSION} and ${SESSION}` } as never)
+  await ui.press({ key: 'act-session-id' })
+  expect(s.promptBox()).toBe('and and ')
+  await ui.unmount()
+})
+
+test('4 on a PR with no session says why, and on To review says where it works', async ($, on) => {
+  noOpenSessions(on)
+  const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, '') })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'unbound-4' })
+  expect(s.toasts.at(-1)).toContain('4 puts the id of the Claude Code session')
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'unbound-4' })
+  expect(s.toasts.at(-1)).toMatch(/^No Claude Code session on this computer made or worked on app#\d+/)
+  expect(s.promptBox()).toBe('')
   await ui.unmount()
 })
 

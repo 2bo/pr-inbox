@@ -2155,24 +2155,31 @@ function askLabel(pr: { number: number; repository: { nameWithOwner: string } })
   return `${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number}`
 }
 
+// A word added to the prompt box, in color, with what is there left as it was
+async function addToPrompt($: EngineInterface, box: string, word: string): Promise<void> {
+  const lead = box && !box.endsWith(' ') ? ' ' : ''
+  const start = lead.length
+  await $.prompt.fill({
+    text: `${lead}${word} `,
+    mode: 'append',
+    decorations: [{ start, end: start + word.length, color: NEON.cyan }],
+  } as never)
+}
+
+async function dropFromPrompt($: EngineInterface, box: string, word: string): Promise<void> {
+  await $.prompt.fill({ text: box.replaceAll(`${word} `, '').replaceAll(word, '') })
+}
+
 // p: the link goes in the prompt → the link comes out again
 async function toggleAsk($: EngineInterface, of: PR | Issue, kind: AskTarget['kind'] = 'PR'): Promise<void> {
   const pr: AskTarget = { url: of.url, number: of.number, repository: of.repository, kind }
   const box = await $.prompt.read()
   if (!asking || asking.pr.url !== pr.url) {
     asking = { pr }
-    if (!box.text.includes(pr.url)) {
-      const text = `${box.text && !box.text.endsWith(' ') ? ' ' : ''}${pr.url} `
-      const start = box.text.length + (text.startsWith(' ') ? 1 : 0)
-      await $.prompt.fill({
-        text,
-        mode: 'append',
-        decorations: [{ start: start - box.text.length, end: start - box.text.length + pr.url.length, color: NEON.cyan }],
-      } as never)
-    }
+    if (!box.text.includes(pr.url)) await addToPrompt($, box.text, pr.url)
   } else {
     asking = undefined
-    await $.prompt.fill({ text: box.text.replace(`${pr.url} `, '').replace(pr.url, '') })
+    await dropFromPrompt($, box.text, pr.url)
   }
   $.ui.toast(
     asking
@@ -2427,23 +2434,35 @@ function sessionName(s: PrSession): string {
   return `“${fit(s.title, 32)}”`
 }
 
+// 4: the id of the PR's session goes in the prompt, in view → it comes out again. Only what the person then sends with
+// it reaches a model
+async function toggleSessionId($: EngineInterface, pr: PR, s: PrSession): Promise<void> {
+  const box = await $.prompt.read()
+  const inBox = box.text.includes(s.id)
+  await (inBox ? dropFromPrompt($, box.text, s.id) : addToPrompt($, box.text, s.id))
+  const toast = inBox
+    ? `${askLabel(pr)}: session id taken out of the prompt`
+    : `${askLabel(pr)}: session id in the prompt (${sessionName(s)}) · Esc, then type around it`
+  $.ui.toast(toast, { timeoutMs: 6000 })
+}
+
 // Why t would only refuse on this PR's session, in a few words (open now, or this session); '' when t can ask it
 function sessionBusy(s: PrSession): string {
   if (s.id === thisSession) return 'this session'
   return openSessions.has(s.id) ? 'open: write to it there' : ''
 }
 
-// Your PR's session, as the list draws it: its title, whether it only worked on the PR, and why t leaves it to you,
-// if it does
+// Your PR's session, as the list draws it: its title, whether it only worked on the PR, why t leaves it to you, if it
+// does, and its id in full, as claude --resume takes it
 function sessionNote(pr: PR): string {
   const s = prSessions.get(pr.url)
   if (!s) return sessionsTrouble ? 'session unknown (t: why)' : ''
   const notes = [s.made ? '' : 'last worked on it', sessionBusy(s), sessionsTrouble ? 'may be incomplete' : ''].filter(Boolean)
-  return `session ${sessionName(s)}${notes.length > 0 ? ` (${notes.join(', ')})` : ''}`
+  return `session ${sessionName(s)}${notes.length > 0 ? ` (${notes.join(', ')})` : ''} · ${s.id}`
 }
 
-function noSessionWhy(pr: PR): string {
-  if (sessionsLoading || sessionsReadAt === 0) return `t: still looking for the session that made or worked on ${askLabel(pr)}…`
+function noSessionWhy(pr: PR, key = 't'): string {
+  if (sessionsLoading || sessionsReadAt === 0) return `${key}: still looking for the session that made or worked on ${askLabel(pr)}…`
   const lead = sessionsTrouble
     ? `No session found for ${askLabel(pr)}: ${sessionsTrouble}`
     : `No Claude Code session on this computer made or worked on ${askLabel(pr)}`
@@ -9059,6 +9078,7 @@ export function register(on: On, options: PluginOptions) {
                 : 'ask its session'
           actions.push(act('act-session', label, 't', () => tellSession($, pr), Boolean(busy)))
         }
+        if (session) actions.push(act('act-session-id', 'session id in/out of prompt', '4', () => toggleSessionId($, pr, session), true))
       }
       // An AI review of your own PR is one to fix before others read it; it never approves
       if (isReview || isMine) actions.push(act('act-ai-review', reviewLabel, 'v', () => aiReview($, pr)))
@@ -9177,10 +9197,12 @@ export function register(on: On, options: PluginOptions) {
             : `No AI review findings to send for ${n} · v: AI review`
         case 'w':
           return `w asks for reviews ${ownTab} · b: AI review the bots`
-        case 't':
-          return pr && mine.some((p) => p.url === pr.url)
-            ? noSessionWhy(pr)
-            : `t asks the Claude Code session that made it or last worked on it, ${ownTab}`
+        case '4':
+        case 't': {
+          if (pr && mine.some((p) => p.url === pr.url)) return noSessionWhy(pr, k)
+          const session = 'the Claude Code session that made it or last worked on it'
+          return `${k === 't' ? `t asks ${session}` : `4 puts the id of ${session} in the prompt`}, ${ownTab}`
+        }
         case 'b':
           return tab === 'review' ? 'Every bot PR has an AI review of its current commit' : 'b reviews the bot PRs on To review (1)'
         case 'z':
@@ -9800,6 +9822,10 @@ export function register(on: On, options: PluginOptions) {
             [
               't',
               "ask the Claude Code session that made it, or last worked on it (“session …” on the row, “last worked on it” when it did not make it): type a request, Enter resumes that session in the background with it (claude --bg --resume), in the permission mode it last ran in, shown in the field (Bypass permissions and Don't ask are lowered to Manual, and so is none noted; Auto and Accept edits stay) · a request that could not go stays in the field · one open now: write to it there",
+            ],
+            [
+              '4',
+              "the session's id in the prompt, in view, for your own command or question (again: take it out) · it goes to Claude only if you send it · a key of the PR, not a tab",
             ],
           ],
         ],
