@@ -2157,9 +2157,13 @@ function askLabel(pr: { number: number; repository: { nameWithOwner: string } })
 
 // A word added to the prompt box, in color, with what is there left as it was
 async function addToPrompt($: EngineInterface, box: string, word: string): Promise<void> {
-  const text = `${box && !box.endsWith(' ') ? ' ' : ''}${word} `
-  const start = text.startsWith(' ') ? 1 : 0
-  await $.prompt.fill({ text, mode: 'append', decorations: [{ start, end: start + word.length, color: NEON.cyan }] } as never)
+  const lead = box && !box.endsWith(' ') ? ' ' : ''
+  const start = lead.length
+  await $.prompt.fill({
+    text: `${lead}${word} `,
+    mode: 'append',
+    decorations: [{ start, end: start + word.length, color: NEON.cyan }],
+  } as never)
 }
 
 async function dropFromPrompt($: EngineInterface, box: string, word: string): Promise<void> {
@@ -2432,12 +2436,7 @@ function sessionName(s: PrSession): string {
 
 // 4: the id of the PR's session goes in the prompt, in view → it comes out again. Only what the person then sends with
 // it reaches a model
-async function toggleSessionId($: EngineInterface, pr: PR): Promise<void> {
-  const s = prSessions.get(pr.url)
-  if (!s) {
-    $.ui.toast(noSessionWhy(pr), { timeoutMs: 6000 })
-    return
-  }
+async function toggleSessionId($: EngineInterface, s: PrSession): Promise<void> {
   const box = await $.prompt.read()
   const inBox = box.text.includes(s.id)
   await (inBox ? dropFromPrompt($, box.text, s.id) : addToPrompt($, box.text, s.id))
@@ -2463,7 +2462,7 @@ function sessionNote(pr: PR): string {
 }
 
 function noSessionWhy(pr: PR): string {
-  if (sessionsLoading || sessionsReadAt === 0) return `t: still looking for the session that made or worked on ${askLabel(pr)}…`
+  if (sessionsLoading || sessionsReadAt === 0) return `Still looking for the session that made or worked on ${askLabel(pr)}…`
   const lead = sessionsTrouble
     ? `No session found for ${askLabel(pr)}: ${sessionsTrouble}`
     : `No Claude Code session on this computer made or worked on ${askLabel(pr)}`
@@ -9060,6 +9059,7 @@ export function register(on: On, options: PluginOptions) {
         actions.push(act('act-reviewers', reviewersKeyLabel(pr, now), 'w', () => openPicker($, pr)))
         if (merge && merge !== 'merge') actions.push(act('act-merge', MERGE_LABELS[merge], 'm', () => mergePr($, pr)))
         const session = prSessions.get(pr.url)
+        if (session) actions.push(act('act-session-id', 'session id to prompt', '4', () => toggleSessionId($, session), true))
         if (session && Input) {
           // A session t would only point you to is named so, dimmed
           const busy = sessionBusy(session)
@@ -9072,7 +9072,6 @@ export function register(on: On, options: PluginOptions) {
                   : 'session open'
                 : 'ask its session'
           actions.push(act('act-session', label, 't', () => tellSession($, pr), Boolean(busy)))
-          actions.push(act('act-session-id', 'session id to prompt', '4', () => toggleSessionId($, pr), true))
         }
       }
       // An AI review of your own PR is one to fix before others read it; it never approves
@@ -9193,13 +9192,11 @@ export function register(on: On, options: PluginOptions) {
         case 'w':
           return `w asks for reviews ${ownTab} · b: AI review the bots`
         case '4':
-          return pr && mine.some((p) => p.url === pr.url)
-            ? noSessionWhy(pr)
-            : `4 puts the id of the Claude Code session that made it or last worked on it in the prompt, ${ownTab}`
-        case 't':
-          return pr && mine.some((p) => p.url === pr.url)
-            ? noSessionWhy(pr)
-            : `t asks the Claude Code session that made it or last worked on it, ${ownTab}`
+        case 't': {
+          if (pr && mine.some((p) => p.url === pr.url)) return noSessionWhy(pr)
+          const session = 'the Claude Code session that made it or last worked on it'
+          return `${k === 't' ? `t asks ${session}` : `4 puts the id of ${session} in the prompt`}, ${ownTab}`
+        }
         case 'b':
           return tab === 'review' ? 'Every bot PR has an AI review of its current commit' : 'b reviews the bot PRs on To review (1)'
         case 'z':

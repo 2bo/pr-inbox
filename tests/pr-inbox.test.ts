@@ -7018,10 +7018,10 @@ test('4 puts the id of the session in the prompt, in view, and again takes it ou
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   await ui.press({ key: 'act-session-id' })
+  // Only the id: no title, path or transcript
   expect(s.promptBox()).toBe(`${SESSION} `)
   expect(s.toasts.at(-1)).toBe('The id of “login fix” is in the prompt: Esc, then type around it')
-  // Only the id: no title, path or transcript, and no model saw it
-  expect(s.promptBox()).not.toContain('login fix')
+  // No model saw it
   expect(s.prompts.join('\n')).not.toContain(SESSION)
   expect(s.calls.some((c) => c[0] === 'claude')).toBe(false)
   await ui.press({ key: 'act-session-id' })
