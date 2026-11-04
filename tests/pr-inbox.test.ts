@@ -7020,13 +7020,13 @@ test('4 puts the id of the session in the prompt, in view, and again takes it ou
   await ui.press({ key: 'act-session-id' })
   // Only the id: no title, path or transcript
   expect(s.promptBox()).toBe(`${SESSION} `)
-  expect(s.toasts.at(-1)).toBe('The id of “login fix” is in the prompt: Esc, then type around it')
+  expect(s.toasts.at(-1)).toMatch(/^app#\d+: session id in the prompt \(“login fix”\) · Esc, then type around it$/)
   // No model saw it
   expect(s.prompts.join('\n')).not.toContain(SESSION)
   expect(s.calls.some((c) => c[0] === 'claude')).toBe(false)
   await ui.press({ key: 'act-session-id' })
   expect(s.promptBox()).toBe('')
-  expect(s.toasts.at(-1)).toBe('Took the id of “login fix” out of the prompt')
+  expect(s.toasts.at(-1)).toMatch(/^app#\d+: session id taken out of the prompt$/)
   await ui.unmount()
 })
 

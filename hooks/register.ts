@@ -2436,14 +2436,14 @@ function sessionName(s: PrSession): string {
 
 // 4: the id of the PR's session goes in the prompt, in view → it comes out again. Only what the person then sends with
 // it reaches a model
-async function toggleSessionId($: EngineInterface, s: PrSession): Promise<void> {
+async function toggleSessionId($: EngineInterface, pr: PR, s: PrSession): Promise<void> {
   const box = await $.prompt.read()
   const inBox = box.text.includes(s.id)
   await (inBox ? dropFromPrompt($, box.text, s.id) : addToPrompt($, box.text, s.id))
-  const name = sessionName(s)
-  $.ui.toast(inBox ? `Took the id of ${name} out of the prompt` : `The id of ${name} is in the prompt: Esc, then type around it`, {
-    timeoutMs: 6000,
-  })
+  const toast = inBox
+    ? `${askLabel(pr)}: session id taken out of the prompt`
+    : `${askLabel(pr)}: session id in the prompt (${sessionName(s)}) · Esc, then type around it`
+  $.ui.toast(toast, { timeoutMs: 6000 })
 }
 
 // Why t would only refuse on this PR's session, in a few words (open now, or this session); '' when t can ask it
@@ -2461,8 +2461,8 @@ function sessionNote(pr: PR): string {
   return `session ${sessionName(s)}${notes.length > 0 ? ` (${notes.join(', ')})` : ''}`
 }
 
-function noSessionWhy(pr: PR): string {
-  if (sessionsLoading || sessionsReadAt === 0) return `Still looking for the session that made or worked on ${askLabel(pr)}…`
+function noSessionWhy(pr: PR, key = 't'): string {
+  if (sessionsLoading || sessionsReadAt === 0) return `${key}: still looking for the session that made or worked on ${askLabel(pr)}…`
   const lead = sessionsTrouble
     ? `No session found for ${askLabel(pr)}: ${sessionsTrouble}`
     : `No Claude Code session on this computer made or worked on ${askLabel(pr)}`
@@ -9059,7 +9059,6 @@ export function register(on: On, options: PluginOptions) {
         actions.push(act('act-reviewers', reviewersKeyLabel(pr, now), 'w', () => openPicker($, pr)))
         if (merge && merge !== 'merge') actions.push(act('act-merge', MERGE_LABELS[merge], 'm', () => mergePr($, pr)))
         const session = prSessions.get(pr.url)
-        if (session) actions.push(act('act-session-id', 'session id to prompt', '4', () => toggleSessionId($, session), true))
         if (session && Input) {
           // A session t would only point you to is named so, dimmed
           const busy = sessionBusy(session)
@@ -9073,6 +9072,7 @@ export function register(on: On, options: PluginOptions) {
                 : 'ask its session'
           actions.push(act('act-session', label, 't', () => tellSession($, pr), Boolean(busy)))
         }
+        if (session) actions.push(act('act-session-id', 'session id in/out of prompt', '4', () => toggleSessionId($, pr, session), true))
       }
       // An AI review of your own PR is one to fix before others read it; it never approves
       if (isReview || isMine) actions.push(act('act-ai-review', reviewLabel, 'v', () => aiReview($, pr)))
@@ -9193,7 +9193,7 @@ export function register(on: On, options: PluginOptions) {
           return `w asks for reviews ${ownTab} · b: AI review the bots`
         case '4':
         case 't': {
-          if (pr && mine.some((p) => p.url === pr.url)) return noSessionWhy(pr)
+          if (pr && mine.some((p) => p.url === pr.url)) return noSessionWhy(pr, k)
           const session = 'the Claude Code session that made it or last worked on it'
           return `${k === 't' ? `t asks ${session}` : `4 puts the id of ${session} in the prompt`}, ${ownTab}`
         }
@@ -9816,10 +9816,13 @@ export function register(on: On, options: PluginOptions) {
               "review threads that wait on you (open, someone else's last word): Claude fixes and commits, declines or asks back in a worktree, then y · the fix is pushed (fix_push) and pr-inbox posts its replies to the threads, never resolved (fix_reply auto; with ask: the replies panel, y posts) · a thread Claude should not settle alone (⚑ needs you), and with fix_reply auto a decline to a person (not a bot), is held with its draft: g lists them, 1-9 or x checks the drafts to post, y posts those, the rest stay held, r forgets them and starts over · /pr-inbox address <PR> from the prompt",
             ],
             ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · y in it sends'],
-            ['4', "the session's id in the prompt, in view (again: take it out) · it goes to Claude only if you send it"],
             [
               't',
               "ask the Claude Code session that made it, or last worked on it (“session …” on the row, “last worked on it” when it did not make it): type a request, Enter resumes that session in the background with it (claude --bg --resume), in the permission mode it last ran in, shown in the field (Bypass permissions and Don't ask are lowered to Manual, and so is none noted; Auto and Accept edits stay) · a request that could not go stays in the field · one open now: write to it there",
+            ],
+            [
+              '4',
+              "the session's id in the prompt, in view, for your own command or question (again: take it out) · it goes to Claude only if you send it · a key of the PR, not a tab",
             ],
           ],
         ],
