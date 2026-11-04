@@ -2352,11 +2352,13 @@ async function readSessions($: EngineInterface): Promise<void> {
   // Their titles, read apart from the links so that every session's title rows do not fill the output. A session's rows
   // stay in order: its last title of each kind counts
   const titles = new Map<string, { custom?: string; ai?: string }>()
+  let titlesLost = false
   if (ids.length > 0) {
     const r = await $.process
       .run([rg, ...RG_FLAGS, '-e', SESSION_TITLES, ...ids.map((id) => files.get(id) ?? '')], { timeoutMs: 20000 })
       .catch(() => undefined)
-    if (rgFailed(r) || r.isStdoutTruncated || r.exitCode === 2) sessionsTrouble ||= 'some session titles could not be read'
+    titlesLost = rgFailed(r) || r.isStdoutTruncated || r.exitCode === 2
+    if (titlesLost) sessionsTrouble ||= 'some session titles could not be read'
     for (const { id, match } of grepHits(r?.stdout ?? '')) {
       const row = lastJson(`${match}}`)
       if (!row) continue
@@ -2380,8 +2382,8 @@ async function readSessions($: EngineInterface): Promise<void> {
   prSessions = new Map(
     [...chosen].map(([url, { id, made }]) => {
       const t = titles.get(id)
-      // A title that could not be read this time stays as it was
-      const before = prSessions.get(url)
+      // A title that could not be read this time stays as it was; one that is gone is gone
+      const before = titlesLost ? prSessions.get(url) : undefined
       const title = clean(t?.custom || t?.ai || '') || (before?.id === id ? before.title : id.slice(0, 8))
       return [url, { id, title, cwd: sessionCwds.get(id) ?? '', file: files.get(id) ?? '', made }]
     }),

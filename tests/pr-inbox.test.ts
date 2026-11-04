@@ -6883,6 +6883,8 @@ test('sessions are found with the rg on PATH: its config is ignored, and titles 
   expect(links).not.toContain('custom-title')
   // Only SESSION made the PRs, so only its transcript is read for a title
   expect(reads[1]?.filter((a) => a.endsWith('.jsonl'))).toEqual([`${PROJECTS}/${SESSION}.jsonl`])
+  // Both print the match alone, with -o inside the grouped flags: a whole line would not parse
+  expect(reads.every((c) => c.some((a) => /^-[a-zA-Z]*o/.test(a)))).toBe(true)
   // grep still reads one transcript at a time, never all of them
   expect(s.calls.some((c) => c[0] === 'grep' && c.includes('-r'))).toBe(false)
   await ui.unmount()
@@ -6966,6 +6968,23 @@ test('titles that could not be read leave the session found, by its id, and the 
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   expect(await ui.find({ type: 'Text', text: /session “0f0e0d0c” \(may be incomplete\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a read that finds no title row forgets the old title: only one that could not read them keeps it', async ($, on) => {
+  noOpenSessions(on)
+  let titles = {}
+  const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, sessionLinks(), {}, titles) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /session “login fix”/ })).toBeDefined()
+  titles = { exitCode: 1, stdout: '' }
+  await s.clock.advance(2 * 60 * 1000)
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 5; i++) await s.clock.settle()
+  expect(await ui.find({ type: 'Text', text: /session “0f0e0d0c”/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /may be incomplete/ })).toBeUndefined()
   await ui.unmount()
 })
 
