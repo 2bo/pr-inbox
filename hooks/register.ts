@@ -2302,20 +2302,21 @@ async function readSessions($: EngineInterface): Promise<void> {
   }
   const rg = await findRipgrep($, home)
   if (!rg) {
-    sessionsTrouble = 'ripgrep is needed (brew install ripgrep)'
+    sessionsTrouble = 'ripgrep is not installed (brew install ripgrep, or your package manager)'
     return
   }
   const root = `${home}/.claude/projects`
   const rows = await $.process
     .run([rg, ...RG_FLAGS, '-g', '*.jsonl', '-e', sessionLinks(own.keys()), root], { timeoutMs: MINUTE })
     .catch(() => undefined)
-  // rg says 1 when nothing matched, 2 when a file could not be read (what it found elsewhere still counts)
-  if (!rows || rows.exitCode > 2) {
+  // rg says 1 when nothing matched, 2 on an error: what it found elsewhere still counts, but with nothing found it may
+  // not have looked at all
+  if (!rows || rows.exitCode > 2 || (rows.exitCode === 2 && !rows.stdout)) {
     sessionsTrouble = 'reading the transcripts failed or took too long'
     return
   }
   // What was read still counts: a cut last row just fails to parse
-  if (rows.isStdoutTruncated) sessionsTrouble = 'there were too many transcripts to read them all'
+  if (rows.isStdoutTruncated) sessionsTrouble = "ripgrep's output was cut off, so some sessions may be missing"
   const files = new Map<string, string>()
   // Per PR: its creation, the earliest note (by the session that made it, if it comes near the creation) and the latest
   type Note = { id: string; at: number }
@@ -2425,7 +2426,7 @@ function sessionBusy(s: PrSession): string {
 // if it does
 function sessionNote(pr: PR): string {
   const s = prSessions.get(pr.url)
-  if (!s) return ''
+  if (!s) return sessionsTrouble ? 'session unknown (t: why)' : ''
   const notes = [s.made ? '' : 'last worked on it', sessionBusy(s)].filter(Boolean)
   return `session ${sessionName(s)}${notes.length > 0 ? ` (${notes.join(', ')})` : ''}`
 }
@@ -2433,7 +2434,7 @@ function sessionNote(pr: PR): string {
 function noSessionWhy(pr: PR): string {
   if (sessionsLoading || sessionsReadAt === 0) return `t: still looking for the session that made or worked on ${askLabel(pr)}…`
   const lead = sessionsTrouble
-    ? `Could not look through every session for ${askLabel(pr)}: ${sessionsTrouble}`
+    ? `No session found for ${askLabel(pr)}: ${sessionsTrouble}`
     : `No Claude Code session on this computer made or worked on ${askLabel(pr)}`
   return `${lead} · p: put its link in the prompt here`
 }

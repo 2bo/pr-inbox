@@ -6908,7 +6908,7 @@ test('a link that does not answer as ripgrep is not used: t says ripgrep is need
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   await ui.press({ key: 'unbound-t' })
-  expect(s.toasts.at(-1)).toMatch(/^Could not look through every session for app#\d+: ripgrep is needed \(brew install ripgrep\)/)
+  expect(s.toasts.at(-1)).toMatch(/^No session found for app#\d+: ripgrep is not installed \(brew install ripgrep/)
   expect(s.calls.some((c) => c.includes('*.jsonl'))).toBe(false)
   await ui.unmount()
 })
@@ -6926,14 +6926,16 @@ test('a read cut at the output limit keeps the rows it has: a cut last row is dr
 
 for (const [why, opts, says] of [
   ['failed', { exitCode: 3 }, /: reading the transcripts failed or took too long/],
-  ['cut at the output limit', { isStdoutTruncated: true }, /: there were too many transcripts to read them all/],
+  ['stopped on an error with nothing found', { exitCode: 2 }, /: reading the transcripts failed or took too long/],
+  ['was cut at the output limit', { isStdoutTruncated: true }, /: ripgrep's output was cut off, so some sessions may be missing/],
 ] as const) {
-  test(`on a PR with no session after a read that ${why}, t says so, not that no session made it`, async ($, on) => {
+  test(`on a PR with no session after a read that ${why}, the row and t say so, not that no session made it`, async ($, on) => {
     noOpenSessions(on)
     const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, '', opts) })
     await start($, s.clock)
     const ui = await $.ui.mount(PANE)
     await ui.press({ key: 'tab-mine' })
+    expect(await ui.find({ type: 'Text', text: /session unknown \(t: why\)/ })).toBeDefined()
     await ui.press({ key: 'unbound-t' })
     expect(s.toasts.at(-1)).toMatch(says)
     await ui.unmount()
