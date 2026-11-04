@@ -2155,24 +2155,27 @@ function askLabel(pr: { number: number; repository: { nameWithOwner: string } })
   return `${pr.repository.nameWithOwner.split('/')[1] ?? pr.repository.nameWithOwner}#${pr.number}`
 }
 
+// A word added to the prompt box, in color, with what is there left as it was
+async function addToPrompt($: EngineInterface, box: string, word: string): Promise<void> {
+  const text = `${box && !box.endsWith(' ') ? ' ' : ''}${word} `
+  const start = text.startsWith(' ') ? 1 : 0
+  await $.prompt.fill({ text, mode: 'append', decorations: [{ start, end: start + word.length, color: NEON.cyan }] } as never)
+}
+
+async function dropFromPrompt($: EngineInterface, box: string, word: string): Promise<void> {
+  await $.prompt.fill({ text: box.replace(`${word} `, '').replace(word, '') })
+}
+
 // p: the link goes in the prompt → the link comes out again
 async function toggleAsk($: EngineInterface, of: PR | Issue, kind: AskTarget['kind'] = 'PR'): Promise<void> {
   const pr: AskTarget = { url: of.url, number: of.number, repository: of.repository, kind }
   const box = await $.prompt.read()
   if (!asking || asking.pr.url !== pr.url) {
     asking = { pr }
-    if (!box.text.includes(pr.url)) {
-      const text = `${box.text && !box.text.endsWith(' ') ? ' ' : ''}${pr.url} `
-      const start = box.text.length + (text.startsWith(' ') ? 1 : 0)
-      await $.prompt.fill({
-        text,
-        mode: 'append',
-        decorations: [{ start: start - box.text.length, end: start - box.text.length + pr.url.length, color: NEON.cyan }],
-      } as never)
-    }
+    if (!box.text.includes(pr.url)) await addToPrompt($, box.text, pr.url)
   } else {
     asking = undefined
-    await $.prompt.fill({ text: box.text.replace(`${pr.url} `, '').replace(pr.url, '') })
+    await dropFromPrompt($, box.text, pr.url)
   }
   $.ui.toast(
     asking
@@ -2425,6 +2428,23 @@ async function refreshOpenSessions($: EngineInterface): Promise<void> {
 // A session's title, the same width everywhere it is named
 function sessionName(s: PrSession): string {
   return `“${fit(s.title, 32)}”`
+}
+
+// 4: the id of the PR's session goes in the prompt, in view → it comes out again. Only what the person then sends with
+// it reaches a model
+async function toggleSessionId($: EngineInterface, pr: PR): Promise<void> {
+  const s = prSessions.get(pr.url)
+  if (!s) {
+    $.ui.toast(noSessionWhy(pr), { timeoutMs: 6000 })
+    return
+  }
+  const box = await $.prompt.read()
+  const inBox = box.text.includes(s.id)
+  await (inBox ? dropFromPrompt($, box.text, s.id) : addToPrompt($, box.text, s.id))
+  const name = sessionName(s)
+  $.ui.toast(inBox ? `Took the id of ${name} out of the prompt` : `The id of ${name} is in the prompt: Esc, then type around it`, {
+    timeoutMs: 6000,
+  })
 }
 
 // Why t would only refuse on this PR's session, in a few words (open now, or this session); '' when t can ask it
@@ -9052,6 +9072,7 @@ export function register(on: On, options: PluginOptions) {
                   : 'session open'
                 : 'ask its session'
           actions.push(act('act-session', label, 't', () => tellSession($, pr), Boolean(busy)))
+          actions.push(act('act-session-id', 'session id to prompt', '4', () => toggleSessionId($, pr), true))
         }
       }
       // An AI review of your own PR is one to fix before others read it; it never approves
@@ -9171,6 +9192,10 @@ export function register(on: On, options: PluginOptions) {
             : `No AI review findings to send for ${n} · v: AI review`
         case 'w':
           return `w asks for reviews ${ownTab} · b: AI review the bots`
+        case '4':
+          return pr && mine.some((p) => p.url === pr.url)
+            ? noSessionWhy(pr)
+            : `4 puts the id of the Claude Code session that made it or last worked on it in the prompt, ${ownTab}`
         case 't':
           return pr && mine.some((p) => p.url === pr.url)
             ? noSessionWhy(pr)
@@ -9794,6 +9819,7 @@ export function register(on: On, options: PluginOptions) {
               "review threads that wait on you (open, someone else's last word): Claude fixes and commits, declines or asks back in a worktree, then y · the fix is pushed (fix_push) and pr-inbox posts its replies to the threads, never resolved (fix_reply auto; with ask: the replies panel, y posts) · a thread Claude should not settle alone (⚑ needs you), and with fix_reply auto a decline to a person (not a bot), is held with its draft: g lists them, 1-9 or x checks the drafts to post, y posts those, the rest stay held, r forgets them and starts over · /pr-inbox address <PR> from the prompt",
             ],
             ['w', 'reviewers: ask people or a team, ask again after a push, or take a request back · y in it sends'],
+            ['4', "the session's id in the prompt, in view (again: take it out) · it goes to Claude only if you send it"],
             [
               't',
               "ask the Claude Code session that made it, or last worked on it (“session …” on the row, “last worked on it” when it did not make it): type a request, Enter resumes that session in the background with it (claude --bg --resume), in the permission mode it last ran in, shown in the field (Bypass permissions and Don't ask are lowered to Manual, and so is none noted; Auto and Accept edits stay) · a request that could not go stays in the field · one open now: write to it there",

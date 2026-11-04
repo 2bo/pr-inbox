@@ -7012,6 +7012,51 @@ test('a later read that fails forgets the sessions found before; one that only l
   await ui.unmount()
 })
 
+test('4 puts the id of the session in the prompt, in view, and again takes it out; nothing goes until you send', async ($, on) => {
+  const s = sessionStubs(on, false)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'act-session-id' })
+  expect(s.promptBox()).toBe(`${SESSION} `)
+  expect(s.toasts.at(-1)).toBe('The id of “login fix” is in the prompt: Esc, then type around it')
+  // Only the id: no title, path or transcript, and no model saw it
+  expect(s.promptBox()).not.toContain('login fix')
+  expect(s.prompts.join('\n')).not.toContain(SESSION)
+  expect(s.calls.some((c) => c[0] === 'claude')).toBe(false)
+  await ui.press({ key: 'act-session-id' })
+  expect(s.promptBox()).toBe('')
+  expect(s.toasts.at(-1)).toBe('Took the id of “login fix” out of the prompt')
+  await ui.unmount()
+})
+
+test('4 keeps what is typed in the prompt, on a session open now too', async ($, on) => {
+  const s = sessionStubs(on, true)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await $.prompt.fill({ text: 'read' } as never)
+  await ui.press({ key: 'act-session-id' })
+  expect(s.promptBox()).toBe(`read ${SESSION} `)
+  await ui.press({ key: 'act-session-id' })
+  expect(s.promptBox()).toBe('read ')
+  await ui.unmount()
+})
+
+test('4 on a PR with no session says why, and on To review says where it works', async ($, on) => {
+  noOpenSessions(on)
+  const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, '') })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'unbound-4' })
+  expect(s.toasts.at(-1)).toContain('4 puts the id of the Claude Code session')
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'unbound-4' })
+  expect(s.toasts.at(-1)).toMatch(/^No Claude Code session on this computer made or worked on app#\d+/)
+  expect(s.promptBox()).toBe('')
+  await ui.unmount()
+})
+
 test('a session that only pushed to your PR is drawn as having worked on it; the last one is the one t asks', async ($, on) => {
   // Neither session noted the PR when it was created: it was made elsewhere. The other session pushed last, and is open
   const s = sessionStubs(on, false, { made: false })
