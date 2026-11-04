@@ -2452,13 +2452,13 @@ function sessionBusy(s: PrSession): string {
   return openSessions.has(s.id) ? 'open: write to it there' : ''
 }
 
-// Your PR's session, as the list draws it: its title, whether it only worked on the PR, and why t leaves it to you,
-// if it does
+// Your PR's session, as the list draws it: its title, whether it only worked on the PR, why t leaves it to you, if it
+// does, and its id in full, as claude --resume takes it
 function sessionNote(pr: PR): string {
   const s = prSessions.get(pr.url)
   if (!s) return sessionsTrouble ? 'session unknown (t: why)' : ''
   const notes = [s.made ? '' : 'last worked on it', sessionBusy(s), sessionsTrouble ? 'may be incomplete' : ''].filter(Boolean)
-  return `session ${sessionName(s)}${notes.length > 0 ? ` (${notes.join(', ')})` : ''}`
+  return `session ${sessionName(s)}${notes.length > 0 ? ` (${notes.join(', ')})` : ''} · ${s.id}`
 }
 
 function noSessionWhy(pr: PR, key = 't'): string {

@@ -700,7 +700,7 @@ test('on My PRs, the session has a line of its own', async ($, on) => {
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  expect(await ui.find({ type: 'Text', text: /^session “login fix”$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^session “login fix” · ${SESSION}$`) })).toBeDefined()
   await ui.unmount()
 })
 
