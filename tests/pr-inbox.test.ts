@@ -674,20 +674,49 @@ test('the details say each fact once: why the risk on its own line, CI in words,
   // Why the risk is its own line, its label in the risk's color; the facts line stays short
   expect((await ui.find({ type: 'Text', text: /^▲ 根拠$/ }))?.props.color).toBe('#ff5f5f')
   expect(await ui.find({ type: 'Text', text: /^@alice · requested 1d ago · CI passed · \+10 -2$/ })).toBeDefined()
-  // Your PR: what needs you, then the rest; a failed CI is said once
+  // Your PR, one kind to a line: what needs you, its keys, the facts; a failed CI is said once
   await ui.press({ key: 'tab-mine' })
-  expect(
-    await ui.find({
-      type: 'Text',
-      text: /^needs you: changes requested, CI failed · c: fix CI · m: auto-merge when ready · \+10 -2 · updated 1d ago$/,
-    }),
-  ).toBeDefined()
+  const stands = await ui.find({ type: 'Text', text: /^needs you: changes requested, CI failed$/ })
+  expect(stands?.props.bold).toBe(true)
+  expect(stands?.props.color).toBe('#ffff00')
+  expect(await ui.find({ type: 'Text', text: /^c: fix CI · m: auto-merge when ready$/ })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /\+10 -2 · updated 1d ago$/ }))?.props.dimColor).toBe(true)
   expect(await ui.find({ type: 'Text', text: /✗CI/ })).toBeUndefined()
   // Ready: says so, and the key that merges it; waiting: what it waits on
   await ui.press({ key: 'nav-down' })
-  expect(await ui.find({ type: 'Text', text: /^ready to merge · m: merge now · CI passed · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ready to merge$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^m: merge now$/ })).toBeDefined()
+  // CI that passed is a fact, under what the PR needs
+  expect(await ui.find({ type: 'Text', text: /CI passed · updated / })).toBeDefined()
   await ui.press({ key: 'nav-down' })
-  expect(await ui.find({ type: 'Text', text: /^waiting for reviews · m: auto-merge when ready · CI passed · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^waiting for reviews$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^m: auto-merge when ready$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('on My PRs, the session has a line of its own', async ($, on) => {
+  noOpenSessions(on)
+  const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, sessionLinks()) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /^session “login fix”$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('on My PRs, a CI still running stands with what the PR waits on, not among the facts', async ($, on) => {
+  const running = pr({
+    number: 25,
+    title: 'CI 待ち',
+    url: 'https://github.com/acme/app/pull/25',
+    commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING' } } }] },
+  })
+  const s = stubs(on, { graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [running] } } }) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  const state = await ui.find({ type: 'Text', text: /CI running/ })
+  expect(state?.props.bold).toBe(true)
   await ui.unmount()
 })
 
@@ -2704,9 +2733,8 @@ test('a PR with auto-merge on says so, and m turns it off after y in its panel',
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  expect(
-    await ui.find({ type: 'Text', text: /^waiting for reviews · auto-merge on \(squash\) · m: turn it off · CI passed · / }),
-  ).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^waiting for reviews · auto-merge on \(squash\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^m: turn it off$/ })).toBeDefined()
   expect((await ui.find({ key: 'act-merge' }))?.props.label).toBe('auto-merge off')
   // The row says so at a glance
   expect(await lineOf(ui, 23)).toContain('⇢ AUTO')
@@ -4353,7 +4381,8 @@ test('a conflict fix that stops halfway through the merge says so, and how to go
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  expect(await ui.find({ type: 'Text', text: /needs you: conflict · c: fix conflict/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^needs you: conflict/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^c: fix conflict/ })).toBeDefined()
   await pressCi(ui, s, '3')
   await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'merge2' })
   await $.turn.complete({ turnId: 'merge2', answer: '' } as never)
@@ -4665,7 +4694,8 @@ test('g on your PR names the threads that wait on you; y starts a fix that names
   // CI passes and there is no conflict: c is not offered, g is
   expect(await ui.find({ key: 'act-ci' })).toBeUndefined()
   expect((await ui.find({ key: 'act-comments' }))?.props.label).toBe('address 2 threads')
-  expect(await lineOf(ui, 21)).toContain('2 unresolved threads · g: address')
+  expect(await lineOf(ui, 21)).toContain('2 unresolved threads')
+  expect(await lineOf(ui, 21)).toContain('g: address')
   await ui.press({ key: 'act-comments' })
   for (let i = 0; i < 5; i++) await s.clock.settle()
   const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
@@ -4991,7 +5021,8 @@ test('threads past the first page are read on, and a page GitHub refuses leaves 
   const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
   expect(panel).toContain('app/late.rb:9 · @mika')
   await ui.press({ key: 'panel-cancel' })
-  expect(await lineOf(ui, 21)).toContain('1 unresolved thread · g: address · review threads not all read · r: refresh')
+  expect(await lineOf(ui, 21)).toContain('1 unresolved thread · review threads not all read')
+  expect(await lineOf(ui, 21)).toContain('g: address · r: refresh')
   expect(panel).toContain('g again for the rest')
   await ui.unmount()
 })
@@ -5007,7 +5038,8 @@ test('a PR whose threads were not all read says so, even with none waiting in wh
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  expect(await lineOf(ui, 21)).toContain('review threads not all read · r: refresh')
+  expect(await lineOf(ui, 21)).toContain('review threads not all read')
+  expect(await lineOf(ui, 21)).toContain('r: refresh')
   expect(await ui.find({ key: 'act-comments' })).toBeUndefined()
   const out = await $.command.run({
     command: 'pr-inbox',
@@ -5027,7 +5059,8 @@ test('threads that could not be read say so on the row and to /pr-inbox address'
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  expect(await lineOf(ui, 21)).toContain('review threads not all read · r: refresh')
+  expect(await lineOf(ui, 21)).toContain('review threads not all read')
+  expect(await lineOf(ui, 21)).toContain('r: refresh')
   const out = await $.command.run({
     command: 'pr-inbox',
     args: 'address app#21',
@@ -5240,6 +5273,11 @@ test('a thread Claude should not settle alone is held with its draft: auto posts
   expect(s.toasts.at(-1)).toContain('⇡ acme/app#21: pushed 1 commit, posted 1 reply · ⚑ 1 thread needs you · g: read it')
   expect(await ui.find({ key: 'panel' })).toBeUndefined()
   expect(await lineOf(ui, 21)).toContain('⚑ 1 thread needs you · g')
+  // The lead is the one line in yellow: what the PR needs stays plain beside it
+  expect((await ui.find({ type: 'Text', text: /^⚑ 1 thread needs you · g$/ }))?.props.color).toBe('#ffff00')
+  const stands = await ui.find({ type: 'Text', text: /^needs you: / })
+  expect(stands?.props.bold).toBe(true)
+  expect(stands?.props.color).toBeUndefined()
   expect((await ui.find({ key: 'act-comments' }))?.props.label).toBe('read 1 held draft')
   await ui.unmount()
 })
@@ -6025,7 +6063,8 @@ test('your PR that waits on reviews with nobody asked says so: ○ ASK, and w as
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   expect(await lineOf(ui, 25)).toContain('○ ASK')
-  expect(await lineOf(ui, 25)).toContain('no reviewer asked · w: ask someone')
+  expect(await lineOf(ui, 25)).toContain('no reviewer asked')
+  expect(await lineOf(ui, 25)).toContain('w: ask someone')
   expect((await ui.find({ key: 'act-reviewers' }))?.props.label).toBe('ask a reviewer')
   expect((await ui.find({ key: 'act-reviewers' }))?.props.hotkey).toBe('w')
   // One a team assigned: whom it waits on, and through which team
