@@ -674,20 +674,47 @@ test('the details say each fact once: why the risk on its own line, CI in words,
   // Why the risk is its own line, its label in the risk's color; the facts line stays short
   expect((await ui.find({ type: 'Text', text: /^▲ 根拠$/ }))?.props.color).toBe('#ff5f5f')
   expect(await ui.find({ type: 'Text', text: /^@alice · requested 1d ago · CI passed · \+10 -2$/ })).toBeDefined()
-  // Your PR: what needs you, then the rest; a failed CI is said once
+  // Your PR, one kind to a line: what needs you, its keys, the facts; a failed CI is said once
   await ui.press({ key: 'tab-mine' })
-  expect(
-    await ui.find({
-      type: 'Text',
-      text: /^needs you: changes requested, CI failed · c: fix CI · m: auto-merge when ready · \+10 -2 · updated 1d ago$/,
-    }),
-  ).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^needs you: changes requested, CI failed$/ }))?.props.bold).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /^c: fix CI · m: auto-merge when ready$/ })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /\+10 -2 · updated 1d ago$/ }))?.props.dimColor).toBe(true)
   expect(await ui.find({ type: 'Text', text: /✗CI/ })).toBeUndefined()
   // Ready: says so, and the key that merges it; waiting: what it waits on
   await ui.press({ key: 'nav-down' })
-  expect(await ui.find({ type: 'Text', text: /^ready to merge · m: merge now · CI passed · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ready to merge$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^m: merge now$/ })).toBeDefined()
+  // CI that passed is a fact, under what the PR needs
+  expect(await ui.find({ type: 'Text', text: /CI passed · updated / })).toBeDefined()
   await ui.press({ key: 'nav-down' })
-  expect(await ui.find({ type: 'Text', text: /^waiting for reviews · m: auto-merge when ready · CI passed · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^waiting for reviews$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^m: auto-merge when ready$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('on My PRs, the session has a line of its own', async ($, on) => {
+  noOpenSessions(on)
+  const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, sessionLinks()) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /^session “login fix”$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('on My PRs, a CI still running stands with what the PR waits on, not among the facts', async ($, on) => {
+  const running = pr({
+    number: 25,
+    title: 'CI 待ち',
+    url: 'https://github.com/acme/app/pull/25',
+    commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING' } } }] },
+  })
+  const s = stubs(on, { graphql: JSON.stringify({ data: { viewer: { login: 'me' }, review: { nodes: [] }, mine: { nodes: [running] } } }) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  const state = await ui.find({ type: 'Text', text: /CI running/ })
+  expect(state?.props.bold).toBe(true)
   await ui.unmount()
 })
 
@@ -2704,9 +2731,8 @@ test('a PR with auto-merge on says so, and m turns it off after y in its panel',
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  expect(
-    await ui.find({ type: 'Text', text: /^waiting for reviews · auto-merge on \(squash\) · m: turn it off · CI passed · / }),
-  ).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^waiting for reviews · auto-merge on \(squash\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^m: turn it off$/ })).toBeDefined()
   expect((await ui.find({ key: 'act-merge' }))?.props.label).toBe('auto-merge off')
   // The row says so at a glance
   expect(await lineOf(ui, 23)).toContain('⇢ AUTO')
@@ -4353,7 +4379,8 @@ test('a conflict fix that stops halfway through the merge says so, and how to go
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  expect(await ui.find({ type: 'Text', text: /needs you: conflict · c: fix conflict/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^needs you: conflict/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^c: fix conflict/ })).toBeDefined()
   await pressCi(ui, s, '3')
   await $.turn.start({ text: s.submitted.at(-1) ?? '', turnId: 'merge2' })
   await $.turn.complete({ turnId: 'merge2', answer: '' } as never)
