@@ -14,7 +14,7 @@ Tested with Claude Code v2.1.289. Mods need v2.1.287 or later.
 ## Requirements
 
 - [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`. The mod reads, approves and merges through `gh`, as the account it is signed in to
-- [ripgrep](https://github.com/BurntSushi/ripgrep) (`brew install ripgrep`, or your package manager), to find the Claude Code session that made your PR (`session “…”` on the row, and `t`). Without it, pr-inbox tries the ripgrep inside Claude Code; if that does not work either, the row says `session unknown` and `t` says why
+- Optional: [ripgrep](https://github.com/BurntSushi/ripgrep) (`brew install ripgrep`, or your package manager), to find the Claude Code session that made your PR (`session “…”` on the row, and `t`). Without it, pr-inbox tries the ripgrep inside Claude Code; if that does not work either, the row says `session unknown` and `t` says why
 - Optional: [gh stack](https://github.com/github/gh-stack) (`gh extension install github/gh-stack`) to merge stacked PRs, and [ghq](https://github.com/x-motemen/ghq) so `c` and `g` can find (or fetch) your clone of a repository
 
 ## Install
