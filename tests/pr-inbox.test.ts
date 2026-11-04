@@ -676,7 +676,9 @@ test('the details say each fact once: why the risk on its own line, CI in words,
   expect(await ui.find({ type: 'Text', text: /^@alice · requested 1d ago · CI passed · \+10 -2$/ })).toBeDefined()
   // Your PR, one kind to a line: what needs you, its keys, the facts; a failed CI is said once
   await ui.press({ key: 'tab-mine' })
-  expect((await ui.find({ type: 'Text', text: /^needs you: changes requested, CI failed$/ }))?.props.bold).toBe(true)
+  const stands = await ui.find({ type: 'Text', text: /^needs you: changes requested, CI failed$/ })
+  expect(stands?.props.bold).toBe(true)
+  expect(stands?.props.color).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^c: fix CI · m: auto-merge when ready$/ })).toBeDefined()
   expect((await ui.find({ type: 'Text', text: /\+10 -2 · updated 1d ago$/ }))?.props.dimColor).toBe(true)
   expect(await ui.find({ type: 'Text', text: /✗CI/ })).toBeUndefined()
@@ -6052,7 +6054,8 @@ test('your PR that waits on reviews with nobody asked says so: ○ ASK, and w as
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
   expect(await lineOf(ui, 25)).toContain('○ ASK')
-  expect(await lineOf(ui, 25)).toContain('no reviewer asked · w: ask someone')
+  expect(await lineOf(ui, 25)).toContain('no reviewer asked')
+  expect(await lineOf(ui, 25)).toContain('w: ask someone')
   expect((await ui.find({ key: 'act-reviewers' }))?.props.label).toBe('ask a reviewer')
   expect((await ui.find({ key: 'act-reviewers' }))?.props.hotkey).toBe('w')
   // One a team assigned: whom it waits on, and through which team
