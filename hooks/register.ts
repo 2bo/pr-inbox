@@ -5887,11 +5887,17 @@ function autoMergeWord(pr: PR): string {
   return words[pr.autoMergeRequest?.mergeMethod ?? ''] ?? 'on'
 }
 
+// What m does, as its key
+function mergeKey(merge: MergeAction | undefined): string {
+  if (merge === 'auto-merge off') return 'm: turn it off'
+  return merge ? `m: ${MERGE_LABELS[merge]}` : ''
+}
+
 // On a bot's PR you may merge: what m does, or that auto-merge is on
 function mergeHint(pr: PR): string {
   const merge = mayMerge(pr) ? mergeAction(pr) : undefined
-  if (pr.autoMergeRequest) return `auto-merge on (${autoMergeWord(pr)})${merge === 'auto-merge off' ? ' · m: turn it off' : ''}`
-  return merge ? `m: ${MERGE_LABELS[merge]}` : ''
+  if (pr.autoMergeRequest) return `auto-merge on (${autoMergeWord(pr)})${merge === 'auto-merge off' ? ` · ${mergeKey(merge)}` : ''}`
+  return mergeKey(merge)
 }
 
 // Why the PR is not ready, without the key hint notReadyWhy may add
@@ -9220,9 +9226,12 @@ export function register(on: On, options: PluginOptions) {
       const n = (p.comments?.totalCount ?? 0) + (p.reviewThreads?.totalCount ?? 0)
       return n > 0 ? plural(n, 'comment') : ''
     }
-    // Facts about the PR, one short phrase each, · between them; CI said once, in words
-    // What needs you or is under way comes first and is drawn bright (lead); the facts after it, dim (rest)
-    const metaLine = (p: PR): { lead: string; rest: string } => {
+    const sizeNote = (p: PR) => `+${p.additions} -${p.deletions}`
+    // The lines under the title, each with its style. What needs you or is under way comes first, bright. On My PRs one
+    // kind to a line: where the PR stands, its keys, the facts, the session. Elsewhere the facts, on one line. Each is
+    // short phrases with · between them, and CI is said once, in words
+    const metaLines = (p: PR): { text: string; color?: string; bold?: boolean; dimColor?: boolean }[] => {
+      const line = (parts: string[]) => parts.filter(Boolean).join(' · ')
       // Claude fixing it, a fix or replies waiting for you, or drafts held for you
       const ready = fixReady.get(p.url)
       const fixing =
@@ -9235,23 +9244,64 @@ export function register(on: On, options: PluginOptions) {
               : ''
       const held = tab === 'mine' && !fixing ? heldFor(p).length : 0
       const lead = fixing || (held ? `⚑ ${needYou(held)} · g` : '')
+      const leadLine = { text: lead, color: held ? NEON.yellow : NEON.cyan, bold: true }
+      if (tab !== 'mine') {
+        const text = line([branchNote(p), stackNote(p), ...metaOf(p), talkNote(p), sessionNote(p)])
+        return [leadLine, { text, dimColor: true }].filter((l) => l.text)
+      }
+      const { group, reasons } = classify(p, now)
+      const again = askAgain(p)
+      const fixes = fixTasks(p)
       // Review threads that wait on you, and the key that addresses them (none on a fork: g fixes only branches in the
       // repository); threads that could not be read say so
-      const waiting = tab === 'mine' && !lead && !p.isCrossRepository ? openThreads(p).length : 0
-      const unread = tab === 'mine' && threadsUnread.has(p.url)
-      const threads = [
-        waiting ? `${plural(waiting, 'unresolved thread')} · g: address` : '',
-        unread ? 'review threads not all read · r: refresh' : '',
+      const waiting = !lead && !p.isCrossRepository ? openThreads(p).length : 0
+      const unread = threadsUnread.has(p.url)
+      const [why = '', ...whyKeys] = notReadyWhy(p, now).split(' · ')
+      const stands =
+        group === 'action'
+          ? line([`needs you: ${reasons.join(', ')}`, p.isDraft ? 'a draft' : ''])
+          : group === 'ready'
+            ? 'ready to merge'
+            : group === 'stale'
+              ? `no update for ${cfg.stale_days}+ days`
+              : why
+      // CI that passed is a fact; any other word for it is where the PR stands, unless that says it already
+      const ci = ciWord(p)
+      const passed = ciState(p) === 'SUCCESS'
+      const state = [
+        stands,
+        passed || [...reasons, why].includes(ci) ? '' : ci,
+        p.autoMergeRequest ? `auto-merge on (${autoMergeWord(p)})` : '',
+        waiting ? plural(waiting, 'unresolved thread') : '',
+        unread ? 'review threads not all read' : '',
       ]
-        .filter(Boolean)
-        .join(' · ')
-      return {
-        lead,
-        rest: [branchNote(p), stackNote(p), ...metaOf(p), talkNote(p), threads, sessionNote(p)].filter(Boolean).join(' · '),
-      }
+      const keys = [
+        fixes.length > 0 ? `c: ${fixes.map((t) => FIX_TASKS[t].verb).join(' / ')}` : '',
+        group === 'action' && again.length > 0 ? `w: re-request ${again.map(atName).join(', ')}` : '',
+        group === 'waiting' ? line(whyKeys) : '',
+        mergeKey(mergeAction(p)),
+        waiting ? 'g: address' : '',
+        unread ? 'r: refresh' : '',
+      ]
+      const facts = [
+        branchNote(p),
+        stackNote(p),
+        sizeNote(p),
+        talkNote(p),
+        again.length > 0 ? '' : reviewsNote(p),
+        passed ? ci : '',
+        `updated ${short(p.updatedAt, now)} ago`,
+      ]
+      return [
+        leadLine,
+        { text: line(state), bold: true, ...(group === 'action' && !lead ? { color: NEON.yellow } : {}) },
+        { text: line(keys), dimColor: true },
+        { text: line(facts), dimColor: true },
+        { text: sessionNote(p), dimColor: true },
+      ].filter((l) => l.text)
     }
     const metaOf = (p: PR): string[] => {
-      const size = `+${p.additions} -${p.deletions}`
+      const size = sizeNote(p)
       const author = `@${p.author?.login ?? '?'}`
       if (isApproved(p)) {
         const a = myApproval(p)
@@ -9260,40 +9310,7 @@ export function register(on: On, options: PluginOptions) {
         const why = approvedWhy(p, now)
         return [author, when, why, /\bCI\b/.test(why) ? '' : ciWord(p), size, mergeHint(p)]
       }
-      if (tab === 'review')
-        return [author, p.isDraft ? 'draft' : '', `requested ${elapsed(requestedAt(p), now)} ago`, ciWord(p), size, mergeHint(p)]
-      // Where it stands first: what needs you, ready, or what it waits on
-      const { group, reasons } = classify(p, now)
-      const again = askAgain(p)
-      const merge = mergeAction(p)
-      // Auto-merge: on, with its method (m turns it off), or the key that turns it on
-      const auto = p.autoMergeRequest
-        ? ` · auto-merge on (${autoMergeWord(p)})${merge === 'auto-merge off' ? ' · m: turn it off' : ''}`
-        : merge === 'auto-merge'
-          ? ' · m: auto-merge when ready'
-          : ''
-      const state =
-        (group === 'action'
-          ? `needs you: ${reasons.join(', ')}${p.isDraft ? ' · a draft' : ''}${
-              fixTasks(p).length > 0
-                ? ` · c: ${fixTasks(p)
-                    .map((t) => FIX_TASKS[t].verb)
-                    .join(' / ')}`
-                : ''
-            }${again.length > 0 ? ` · w: re-request ${again.map(atName).join(', ')}` : ''}`
-          : group === 'ready'
-            ? 'ready to merge · m: merge now'
-            : group === 'stale'
-              ? `no update for ${cfg.stale_days}+ days`
-              : notReadyWhy(p, now)) + auto
-      // The reviews so far, unless the state names who to ask again already
-      return [
-        state,
-        again.length > 0 ? '' : reviewsNote(p),
-        /\bCI\b/.test(state) ? '' : ciWord(p),
-        size,
-        `updated ${short(p.updatedAt, now)} ago`,
-      ]
+      return [author, p.isDraft ? 'draft' : '', `requested ${elapsed(requestedAt(p), now)} ago`, ciWord(p), size, mergeHint(p)]
     }
 
     // The AI review's rows under a review request: its state, then what blocked it
@@ -9478,23 +9495,9 @@ export function register(on: On, options: PluginOptions) {
           )
         }
       }
-      const { lead, rest } = metaLine(p)
-      const meta = [lead, rest].filter(Boolean).join(' · ')
-      add(
-        Box({
-          paddingLeft: INDENT,
-          children: [
-            Text({
-              wrap: 'wrap',
-              children: [
-                ...(lead ? [Text({ color: lead.startsWith('⚑') ? NEON.yellow : NEON.cyan, bold: true, children: [lead] })] : []),
-                Text({ dimColor: true, children: [lead && rest ? ` · ${rest}` : rest] }),
-              ],
-            }),
-          ],
-        }),
-        wrappedLines(meta, bodyColumns),
-      )
+      for (const { text, ...style } of metaLines(p)) {
+        add(Box({ paddingLeft: INDENT, children: [Text({ wrap: 'wrap', ...style, children: [text] })] }), wrappedLines(text, bodyColumns))
+      }
       for (const r of tab === 'review' || reviews.has(p.url) ? reviewRows(p) : []) {
         add(
           Box({
