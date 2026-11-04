@@ -6781,13 +6781,20 @@ const SESSION_TITLES = [
   `${PROJECTS}/${SESSION}.jsonl\0{"type":"custom-title","customTitle":"login fix\\u001b[2J"`,
   `${PROJECTS}/${OTHER_SESSION}.jsonl\0{"type":"custom-title","customTitle":"someone later"`,
 ]
-// What a ripgrep answers (on PATH or through the link): its version, the links across all transcripts, or the titles of
-// the files it is given
-function rgAnswers(argv: readonly string[], links: string, opts: { exitCode?: number; isStdoutTruncated?: boolean } = {}) {
+// What a ripgrep answers (on PATH or through the link): its version, or what its pattern finds, as rg prints it, in the
+// links across all transcripts or in the titles of the files it is given
+function rgAnswers(argv: readonly string[], links: string, opts: { exitCode?: number; isStdoutTruncated?: boolean } = {}, titleOpts = {}) {
   if (!/(^|\/)rg$/.test(argv[0] ?? '')) return undefined
   if (argv.includes('--version')) return { stdout: 'ripgrep 15.2.0\n' }
-  if (argv.includes('*.jsonl')) return { stdout: links, ...opts }
-  return { stdout: SESSION_TITLES.filter((row) => argv.includes(row.split('\0')[0] ?? '')).join('\n') }
+  const pattern = new RegExp(argv[argv.indexOf('-e') + 1] ?? '')
+  const search = argv.includes('*.jsonl')
+  const rows = search ? links.split('\n') : SESSION_TITLES.filter((row) => argv.includes(row.split('\0')[0] ?? ''))
+  const found = rows.flatMap((row) => {
+    const [path, text = ''] = row.split('\0')
+    const hit = text.match(pattern)?.[0]
+    return hit === undefined ? [] : [`${path}\0${hit}`]
+  })
+  return { stdout: found.join('\n'), exitCode: found.length > 0 ? 0 : 1, ...(search ? opts : titleOpts) }
 }
 
 function noOpenSessions(on: TestOn) {
@@ -6941,6 +6948,50 @@ for (const [why, opts, says] of [
     await ui.unmount()
   })
 }
+
+test('a read that could not open some transcripts keeps what it found, and the row says it may be incomplete', async ($, on) => {
+  noOpenSessions(on)
+  const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, sessionLinks(), { exitCode: 2 }) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /session “login fix” \(may be incomplete\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('titles that could not be read leave the session found, by its id, and the row says it may be incomplete', async ($, on) => {
+  noOpenSessions(on)
+  const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, sessionLinks(), {}, { exitCode: 3, stdout: '' }) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /session “0f0e0d0c” \(may be incomplete\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a later read that fails forgets the sessions found before; one that only loses the titles keeps them', async ($, on) => {
+  noOpenSessions(on)
+  let links = {}
+  let titles = {}
+  const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, sessionLinks(), links, titles) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /session “login fix”/ })).toBeDefined()
+  const readAgain = async () => {
+    await s.clock.advance(2 * 60 * 1000)
+    await ui.press({ key: 'refresh' })
+    for (let i = 0; i < 5; i++) await s.clock.settle()
+  }
+  titles = { exitCode: 3, stdout: '' }
+  await readAgain()
+  expect(await ui.find({ type: 'Text', text: /session “login fix” \(may be incomplete\)/ })).toBeDefined()
+  links = { exitCode: 3, stdout: '' }
+  await readAgain()
+  expect(await ui.find({ type: 'Text', text: /login fix/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /session unknown \(t: why\)/ })).toBeDefined()
+  await ui.unmount()
+})
 
 test('a session that only pushed to your PR is drawn as having worked on it; the last one is the one t asks', async ($, on) => {
   // Neither session noted the PR when it was created: it was made elsewhere. The other session pushed last, and is open

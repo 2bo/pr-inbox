@@ -2264,6 +2264,12 @@ function grepHits(stdout: string): { path: string; id: string; match: string }[]
   })
 }
 
+// rg says 1 when nothing matched, 2 on an error: what it found elsewhere still counts, but with nothing found it may not
+// have looked at all
+function rgFailed<R extends { exitCode: number; stdout: string }>(r: R | undefined): r is undefined {
+  return !r || r.exitCode > 2 || (r.exitCode === 2 && !r.stdout)
+}
+
 // ripgrep: the one on PATH, or else the one inside Claude Code, which runs as ripgrep when started under that name, so
 // through a link of ours. Whatever answers must say it is ripgrep. '' when neither does
 async function findRipgrep($: EngineInterface, home: string): Promise<string> {
@@ -2309,14 +2315,14 @@ async function readSessions($: EngineInterface): Promise<void> {
   const rows = await $.process
     .run([rg, ...RG_FLAGS, '-g', '*.jsonl', '-e', sessionLinks(own.keys()), root], { timeoutMs: MINUTE })
     .catch(() => undefined)
-  // rg says 1 when nothing matched, 2 on an error: what it found elsewhere still counts, but with nothing found it may
-  // not have looked at all
-  if (!rows || rows.exitCode > 2 || (rows.exitCode === 2 && !rows.stdout)) {
+  if (rgFailed(rows)) {
     sessionsTrouble = 'reading the transcripts failed or took too long'
+    prSessions = new Map()
     return
   }
   // What was read still counts: a cut last row just fails to parse
   if (rows.isStdoutTruncated) sessionsTrouble = "ripgrep's output was cut off, so some sessions may be missing"
+  else if (rows.exitCode === 2) sessionsTrouble = 'some transcripts could not be read, so some sessions may be missing'
   const files = new Map<string, string>()
   // Per PR: its creation, the earliest note (by the session that made it, if it comes near the creation) and the latest
   type Note = { id: string; at: number }
@@ -2350,6 +2356,7 @@ async function readSessions($: EngineInterface): Promise<void> {
     const r = await $.process
       .run([rg, ...RG_FLAGS, '-e', SESSION_TITLES, ...ids.map((id) => files.get(id) ?? '')], { timeoutMs: 20000 })
       .catch(() => undefined)
+    if (rgFailed(r) || r.isStdoutTruncated || r.exitCode === 2) sessionsTrouble ||= 'some session titles could not be read'
     for (const { id, match } of grepHits(r?.stdout ?? '')) {
       const row = lastJson(`${match}}`)
       if (!row) continue
@@ -2373,7 +2380,9 @@ async function readSessions($: EngineInterface): Promise<void> {
   prSessions = new Map(
     [...chosen].map(([url, { id, made }]) => {
       const t = titles.get(id)
-      const title = clean(t?.custom || t?.ai || '') || id.slice(0, 8)
+      // A title that could not be read this time stays as it was
+      const before = prSessions.get(url)
+      const title = clean(t?.custom || t?.ai || '') || (before?.id === id ? before.title : id.slice(0, 8))
       return [url, { id, title, cwd: sessionCwds.get(id) ?? '', file: files.get(id) ?? '', made }]
     }),
   )
@@ -2427,7 +2436,7 @@ function sessionBusy(s: PrSession): string {
 function sessionNote(pr: PR): string {
   const s = prSessions.get(pr.url)
   if (!s) return sessionsTrouble ? 'session unknown (t: why)' : ''
-  const notes = [s.made ? '' : 'last worked on it', sessionBusy(s)].filter(Boolean)
+  const notes = [s.made ? '' : 'last worked on it', sessionBusy(s), sessionsTrouble ? 'may be incomplete' : ''].filter(Boolean)
   return `session ${sessionName(s)}${notes.length > 0 ? ` (${notes.join(', ')})` : ''}`
 }
 
