@@ -2211,6 +2211,10 @@ let openSessions = new Map<string, string>()
 // Where each session started, by id: it never changes, so each transcript is read for it once
 const sessionCwds = new Map<string, string>()
 let sessionsReadAt = 0
+// Why the last read could not look through every transcript, for t to say; '' when it could
+let sessionsTrouble = ''
+// The ripgrep that answered, once one has
+let ripgrep = ''
 // This session's own id, which t leaves to you
 let thisSession = ''
 let sessionsLoading: Promise<void> | undefined
@@ -2218,9 +2222,14 @@ const SESSIONS_EVERY = MINUTE
 // The session that runs gh pr create notes the PR a second or two later; the rest allows for clock skew
 const CREATED_WITHIN = 2 * MINUTE
 const CLAUDE_SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-// A whole pr-link row, or the start of a title row up to the title's closing quote. Inside a message (a tool's
+// A whole pr-link row, and the start of a title row up to the title's closing quote. Inside a message (a tool's
 // output that shows a transcript, say) the quotes are escaped, so these match only Claude Code's own rows
-const SESSION_ROWS = String.raw`\{"type":"pr-link",[^{}]*\}|\{"type":"(custom-title|ai-title)","(customTitle|aiTitle)":"([^"\\]|\\.)*"`
+const SESSION_LINKS = String.raw`\{"type":"pr-link",[^{}]*\}`
+const SESSION_TITLES = String.raw`\{"type":"(custom-title|ai-title)","(customTitle|aiTitle)":"([^"\\]|\\.)*"`
+// Prints what grep -H --null -o prints. No config file: one could change what it prints. No ignore files: a transcript is
+// never to be skipped
+const RG_FLAGS = ['--no-config', '-HoN', '--null', '--no-ignore', '--hidden']
+const RG_LINK = '.cache/pr-inbox/bin/rg'
 const SESSION_CWD = String.raw`"cwd":"([^"\\]|\\.)*"`
 // The permission mode the session ran in, a row each time it was set
 // Any value: the last row decides, and one we do not know means Manual
@@ -2253,6 +2262,31 @@ function grepHits(stdout: string): { path: string; id: string; match: string }[]
   })
 }
 
+function parseRow(text: string): Record<string, unknown> | undefined {
+  try {
+    return JSON.parse(text) as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+}
+
+// ripgrep: the one on PATH, or else the one inside Claude Code, which runs as ripgrep when started under that name, so
+// through a link of ours. Whatever answers must say it is ripgrep. '' when neither does
+async function findRipgrep($: EngineInterface, home: string): Promise<string> {
+  if (ripgrep) return ripgrep
+  const answers = async (rg: string) => (await $.process.run([rg, '--version']).catch(() => undefined))?.stdout.startsWith('ripgrep ')
+  if (await answers('rg')) ripgrep = 'rg'
+  else {
+    const claude = await $.env.get('CLAUDE_CODE_EXECPATH')
+    if (!claude?.startsWith('/')) return ''
+    const link = `${home}/${RG_LINK}`
+    await $.process.run(['mkdir', '-p', link.slice(0, link.lastIndexOf('/'))]).catch(() => undefined)
+    await $.process.run(['ln', '-sfn', claude, link]).catch(() => undefined)
+    if (await answers(link)) ripgrep = link
+  }
+  return ripgrep
+}
+
 // Which session made each of your PRs, and which sessions are open: read after each fetch of the list, at most once
 // a minute, in interactive sessions only (nothing draws it otherwise)
 function loadSessions($: EngineInterface): Promise<void> {
@@ -2267,17 +2301,27 @@ async function readSessions($: EngineInterface): Promise<void> {
   thisSession = await $.session.id().catch(() => '')
   const home = await homeDir($)
   const own = new Map(mine.map((p) => [p.url, Date.parse(p.createdAt)]))
+  sessionsTrouble = ''
   if (!home || own.size === 0) {
     prSessions = new Map()
     return
   }
+  const rg = await findRipgrep($, home)
+  if (!rg) {
+    sessionsTrouble = 'ripgrep is needed (brew install ripgrep)'
+    return
+  }
   const root = `${home}/.claude/projects`
   const rows = await $.process
-    .run(['grep', '-rHoE', '--null', '--include=*.jsonl', SESSION_ROWS, root], { timeoutMs: 20000 })
+    .run([rg, ...RG_FLAGS, '-g', '*.jsonl', '-e', SESSION_LINKS, root], { timeoutMs: 20000 })
     .catch(() => undefined)
-  // grep says 1 when nothing matched, 2 when a file could not be read (what it found elsewhere still counts)
-  if (!rows || rows.exitCode > 2) return
-  const titles = new Map<string, { custom?: string; ai?: string }>()
+  // rg says 1 when nothing matched, 2 when a file could not be read (what it found elsewhere still counts)
+  if (!rows || rows.exitCode > 2) {
+    sessionsTrouble = 'reading the transcripts failed or took too long'
+    return
+  }
+  // What was read still counts: a cut last row just fails to parse
+  if (rows.isStdoutTruncated) sessionsTrouble = 'there were too many transcripts to read them all'
   const files = new Map<string, string>()
   // Per PR: its creation, the earliest note (by the session that made it, if it comes near the creation) and the latest
   type Note = { id: string; at: number }
@@ -2285,17 +2329,8 @@ async function readSessions($: EngineInterface): Promise<void> {
   for (const { path, id, match } of grepHits(rows.stdout)) {
     if (!CLAUDE_SESSION.test(id) || !path.startsWith(`${root}/`)) continue
     files.set(id, path)
-    let row: Record<string, unknown>
-    try {
-      row = JSON.parse(match.endsWith('}') ? match : `${match}}`) as Record<string, unknown>
-    } catch {
-      continue
-    }
-    const title = titles.get(id) ?? {}
-    titles.set(id, title)
-    if (row.type === 'custom-title' && typeof row.customTitle === 'string') title.custom = row.customTitle
-    if (row.type === 'ai-title' && typeof row.aiTitle === 'string') title.ai = row.aiTitle
-    if (row.type !== 'pr-link' || row.sessionId !== id || typeof row.prUrl !== 'string') continue
+    const row = parseRow(match)
+    if (row?.type !== 'pr-link' || row.sessionId !== id || typeof row.prUrl !== 'string') continue
     const url = safeHref(row.prUrl)
     const at = Date.parse(String(row.timestamp))
     const created = url ? own.get(url) : undefined
@@ -2312,8 +2347,25 @@ async function readSessions($: EngineInterface): Promise<void> {
       return [url, { id: (made ? n.first : n.last).id, made }]
     }),
   )
+  const ids = [...new Set([...chosen.values()].map((f) => f.id))]
+  // Their titles, read apart from the links so that every session's title rows do not fill the output. A session's rows
+  // stay in order: its last title of each kind counts
+  const titles = new Map<string, { custom?: string; ai?: string }>()
+  if (ids.length > 0) {
+    const r = await $.process
+      .run([rg, ...RG_FLAGS, '-e', SESSION_TITLES, ...ids.map((id) => files.get(id) ?? '')], { timeoutMs: 20000 })
+      .catch(() => undefined)
+    for (const { id, match } of grepHits(r?.stdout ?? '')) {
+      const row = parseRow(`${match}}`)
+      if (!row) continue
+      const title = titles.get(id) ?? {}
+      titles.set(id, title)
+      if (row.type === 'custom-title' && typeof row.customTitle === 'string') title.custom = row.customTitle
+      if (row.type === 'ai-title' && typeof row.aiTitle === 'string') title.ai = row.aiTitle
+    }
+  }
   // Where those sessions started (claude --resume finds a session under the folder it started in), for the new ones
-  const unread = [...new Set([...chosen.values()].map((f) => f.id))].filter((id) => !sessionCwds.has(id))
+  const unread = ids.filter((id) => !sessionCwds.has(id))
   if (unread.length > 0) {
     const r = await $.process
       .run(['grep', '-m1', '-HoE', '--null', SESSION_CWD, ...unread.map((id) => files.get(id) ?? '')], { timeoutMs: 20000 })
@@ -2388,6 +2440,8 @@ function sessionNote(pr: PR): string {
 
 function noSessionWhy(pr: PR): string {
   if (sessionsLoading || sessionsReadAt === 0) return `t: still looking for the session that made or worked on ${askLabel(pr)}…`
+  if (sessionsTrouble)
+    return `Could not look through every session for ${askLabel(pr)}: ${sessionsTrouble} · p: put its link in the prompt here`
   return `No Claude Code session on this computer made or worked on ${askLabel(pr)} · p: put its link in the prompt here`
 }
 

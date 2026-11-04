@@ -141,7 +141,7 @@ type StubOptions = {
   // The same for particular gh calls
   gh?: (argv: readonly string[]) => { stdout?: string; exitCode?: number } | undefined
   // The same for any other command (grep, ps, claude)
-  run?: (argv: readonly string[]) => { stdout?: string; exitCode?: number } | undefined
+  run?: (argv: readonly string[]) => { stdout?: string; exitCode?: number; isStdoutTruncated?: boolean } | undefined
   // Commands (argv[0]) that exit with an error
   fail?: string[]
   // stderr of a failing command
@@ -237,12 +237,13 @@ function stubs(on: TestOn, opts: StubOptions = {}) {
       })
     const content = e.argv.find((a) => a.includes('/contents/'))?.match(/\/contents\/([^?]+)/)?.[1]
     if (content !== undefined) stdout = opts.files?.[decodeURIComponent(content)] ?? ''
-    const answered =
+    const answered: { stdout?: string; exitCode?: number; isStdoutTruncated?: boolean } | undefined =
       e.argv[0] === 'git' || e.argv[0] === 'ghq' ? opts.git?.(e.argv) : e.argv[0] === 'gh' ? opts.gh?.(e.argv) : opts.run?.(e.argv)
     if (answered?.stdout !== undefined) stdout = answered.stdout
     const exitCode =
       answered?.exitCode ?? (opts.fail?.includes(e.argv[0] ?? '') || opts.fail?.includes(e.argv.slice(0, 2).join(' ')) ? 1 : 0)
-    return { value: { exitCode, stdout, stderr: exitCode ? (opts.stderr ?? '') : '', isStdoutTruncated: false, isStderrTruncated: false } }
+    const isStdoutTruncated = answered?.isStdoutTruncated ?? false
+    return { value: { exitCode, stdout, stderr: exitCode ? (opts.stderr ?? '') : '', isStdoutTruncated, isStderrTruncated: false } }
   })
   on('model.complete', async (_, e) => {
     const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
@@ -6761,23 +6762,33 @@ test('on your own PR the findings panel offers comment only: r says why', async 
 const SESSION = '0f0e0d0c-1111-4222-8333-444455556666'
 const OTHER_SESSION = '9a9b9c9d-1111-4222-8333-444455556666'
 const PROJECTS = '/home/me/.claude/projects/-work-app'
-// What grep finds in the transcripts: Claude Code's pr-link and title rows, by file. The other session noted the
+// What rg finds in the transcripts: Claude Code's pr-link and title rows, by file. The other session noted the
 // PRs later (it only worked on them); a row inside a message, with its quotes escaped, is not one
 const prLink = (id: string, p: { number: number; url: string }, at: string) =>
   `${PROJECTS}/${id}.jsonl\0{"type":"pr-link","sessionId":"${id}","prNumber":${p.number},"prUrl":"${p.url}","prRepository":"acme/app","timestamp":"${at}"}`
 // The PRs were created 2026-09-30T00:00Z. made: SESSION noted them two minutes later (it made them), the other session
 // a day after (it pushed); otherwise both only pushed, and the other session last
-const sessionRows = (made = true) =>
-  [
-    // The other session comes first in grep's output
-    ...[CHANGES, READY, WAITING, STALE].flatMap((p) => [
+const sessionLinks = (made = true) =>
+  [CHANGES, READY, WAITING, STALE]
+    .flatMap((p) => [
+      // The other session comes first in rg's output
       prLink(OTHER_SESSION, p, '2026-10-01T00:00:00.000Z'),
       prLink(SESSION, p, made ? '2026-09-30T00:02:00.000Z' : '2026-09-30T12:00:00.000Z'),
-    ]),
-    `${PROJECTS}/${SESSION}.jsonl\0{"type":"ai-title","aiTitle":"an older title"`,
-    `${PROJECTS}/${SESSION}.jsonl\0{"type":"custom-title","customTitle":"login fix\\u001b[2J"`,
-    `${PROJECTS}/${OTHER_SESSION}.jsonl\0{"type":"custom-title","customTitle":"someone later"`,
-  ].join('\n')
+    ])
+    .join('\n')
+const SESSION_TITLES = [
+  `${PROJECTS}/${SESSION}.jsonl\0{"type":"ai-title","aiTitle":"an older title"`,
+  `${PROJECTS}/${SESSION}.jsonl\0{"type":"custom-title","customTitle":"login fix\\u001b[2J"`,
+  `${PROJECTS}/${OTHER_SESSION}.jsonl\0{"type":"custom-title","customTitle":"someone later"`,
+]
+// What a ripgrep answers (on PATH or through the link): its version, the links across all transcripts, or the titles of
+// the files it is given
+function rgAnswers(argv: readonly string[], links: string, opts: { exitCode?: number; isStdoutTruncated?: boolean } = {}) {
+  if (!/(^|\/)rg$/.test(argv[0] ?? '')) return undefined
+  if (argv.includes('--version')) return { stdout: 'ripgrep 15.2.0\n' }
+  if (argv.includes('*.jsonl')) return { stdout: links, ...opts }
+  return { stdout: SESSION_TITLES.filter((row) => argv.includes(row.split('\0')[0] ?? '')).join('\n') }
+}
 
 function sessionStubs(
   on: TestOn,
@@ -6791,7 +6802,7 @@ function sessionStubs(
   return stubs(on, {
     locale: { HOME: '/home/me' },
     run: (argv) => {
-      if (argv[0] === 'grep' && argv.includes('-rHoE')) return { stdout: sessionRows(made) }
+      if (argv[0] === 'rg') return rgAnswers(argv, sessionLinks(made))
       if (argv[0] === 'grep' && argv.includes('-m1'))
         return {
           stdout: argv
@@ -6844,6 +6855,98 @@ test('t asks the session that made your PR: Enter resumes it in the background w
   await ui.unmount()
 })
 
+test('sessions are found with the rg on PATH: its config is ignored, and titles are read only from the sessions chosen', async ($, on) => {
+  const s = sessionStubs(on, false)
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  const reads = s.calls.filter((c) => c[0] === 'rg' && !c.includes('--version'))
+  expect(reads).toHaveLength(2)
+  expect(reads.every((c) => c.includes('--no-config'))).toBe(true)
+  expect(reads[0]?.join(' ')).toContain('pr-link')
+  expect(reads[0]?.join(' ')).not.toContain('custom-title')
+  // Only SESSION made the PRs, so only its transcript is read for a title
+  expect(reads[1]?.filter((a) => a.endsWith('.jsonl'))).toEqual([`${PROJECTS}/${SESSION}.jsonl`])
+  // grep still reads one transcript at a time, never all of them
+  expect(s.calls.some((c) => c[0] === 'grep' && c.includes('-r'))).toBe(false)
+  await ui.unmount()
+})
+
+test('with no rg on PATH, sessions are found with the ripgrep inside Claude Code, through a link of ours', async ($, on) => {
+  on('fs.list', () => ({ value: [] }) as never)
+  on('fs.exists', () => ({ value: true }) as never)
+  on('session.id', () => ({ value: 'this-session' }) as never)
+  const link = '/home/me/.cache/pr-inbox/bin/rg'
+  const s = stubs(on, {
+    locale: { HOME: '/home/me', CLAUDE_CODE_EXECPATH: '/opt/claude/2.1.318' },
+    fail: ['rg'],
+    run: (argv) => (argv[0] === link ? rgAnswers(argv, sessionLinks()) : undefined),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(s.calls).toContainEqual(['ln', '-sfn', '/opt/claude/2.1.318', link])
+  expect(await ui.find({ type: 'Text', text: /session “login fix”/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a link that does not answer as ripgrep is not used: t says ripgrep is needed', async ($, on) => {
+  on('fs.list', () => ({ value: [] }) as never)
+  on('fs.exists', () => ({ value: true }) as never)
+  on('session.id', () => ({ value: 'this-session' }) as never)
+  const s = stubs(on, {
+    locale: { HOME: '/home/me', CLAUDE_CODE_EXECPATH: '/opt/claude/2.1.318' },
+    fail: ['rg'],
+    run: (argv) => (argv.includes('--version') ? { stdout: '2.1.318 (Claude Code)\n' } : undefined),
+  })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'unbound-t' })
+  expect(s.toasts.at(-1)).toMatch(/^Could not look through every session for app#\d+: ripgrep is needed \(brew install ripgrep\)/)
+  expect(s.calls.some((c) => c.includes('*.jsonl'))).toBe(false)
+  await ui.unmount()
+})
+
+test('a read of the transcripts that fails says so on t', async ($, on) => {
+  on('fs.list', () => ({ value: [] }) as never)
+  on('fs.exists', () => ({ value: true }) as never)
+  on('session.id', () => ({ value: 'this-session' }) as never)
+  const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, '', { exitCode: 3 }) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'unbound-t' })
+  expect(s.toasts.at(-1)).toMatch(/: reading the transcripts failed or took too long/)
+  await ui.unmount()
+})
+
+test('a read cut at the output limit keeps the rows it has: a cut last row is dropped', async ($, on) => {
+  on('fs.list', () => ({ value: [] }) as never)
+  on('fs.exists', () => ({ value: true }) as never)
+  on('session.id', () => ({ value: 'this-session' }) as never)
+  const rows = `${sessionLinks()}\n${prLink(SESSION, READY, '2026-09-30T00:02:00.000Z').slice(0, 60)}`
+  const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, rows, { isStdoutTruncated: true }) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  expect(await ui.find({ type: 'Text', text: /session “login fix”/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a PR with no session after a cut read: t says the rest was not read, not that no session made it', async ($, on) => {
+  on('fs.list', () => ({ value: [] }) as never)
+  on('fs.exists', () => ({ value: true }) as never)
+  on('session.id', () => ({ value: 'this-session' }) as never)
+  const s = stubs(on, { locale: { HOME: '/home/me' }, run: (argv) => rgAnswers(argv, '', { isStdoutTruncated: true }) })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'tab-mine' })
+  await ui.press({ key: 'unbound-t' })
+  expect(s.toasts.at(-1)).toMatch(/: there were too many transcripts to read them all/)
+  await ui.unmount()
+})
+
 test('a session that only pushed to your PR is drawn as having worked on it; the last one is the one t asks', async ($, on) => {
   // Neither session noted the PR when it was created: it was made elsewhere. The other session pushed last, and is open
   const s = sessionStubs(on, false, { made: false })
@@ -6876,7 +6979,7 @@ test('only the first note of a PR can make it: a later one near the creation, af
   const s = stubs(on, {
     locale: { HOME: '/home/me' },
     run: (argv) => {
-      if (argv[0] === 'grep' && argv.includes('-rHoE')) return { stdout: rows }
+      if (argv[0] === 'rg') return rgAnswers(argv, rows)
       return undefined
     },
   })
@@ -6986,7 +7089,7 @@ test('t keeps a request that could not go in the field, for Enter to try again; 
     locale: { HOME: '/home/me' },
     stderr: 'No conversation found',
     run: (argv) => {
-      if (argv[0] === 'grep' && argv.includes('-rHoE')) return { stdout: sessionRows() }
+      if (argv[0] === 'rg') return rgAnswers(argv, sessionLinks())
       if (argv[0] === 'grep' && argv.includes('-m1')) return { stdout: `${PROJECTS}/${SESSION}.jsonl\0"cwd":"/work/app"` }
       if (argv[0] === 'claude') return fails ? { exitCode: 1 } : { stdout: 'bg-1a2b\n' }
       return undefined
