@@ -4694,7 +4694,8 @@ test('g on your PR names the threads that wait on you; y starts a fix that names
   // CI passes and there is no conflict: c is not offered, g is
   expect(await ui.find({ key: 'act-ci' })).toBeUndefined()
   expect((await ui.find({ key: 'act-comments' }))?.props.label).toBe('address 2 threads')
-  expect(await lineOf(ui, 21)).toContain('2 unresolved threads · g: address')
+  expect(await lineOf(ui, 21)).toContain('2 unresolved threads')
+  expect(await lineOf(ui, 21)).toContain('g: address')
   await ui.press({ key: 'act-comments' })
   for (let i = 0; i < 5; i++) await s.clock.settle()
   const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
@@ -5020,7 +5021,8 @@ test('threads past the first page are read on, and a page GitHub refuses leaves 
   const panel = ((await ui.find({ key: 'panel' })) as { text?: string } | undefined)?.text ?? ''
   expect(panel).toContain('app/late.rb:9 · @mika')
   await ui.press({ key: 'panel-cancel' })
-  expect(await lineOf(ui, 21)).toContain('1 unresolved thread · g: address · review threads not all read · r: refresh')
+  expect(await lineOf(ui, 21)).toContain('1 unresolved thread · review threads not all read')
+  expect(await lineOf(ui, 21)).toContain('g: address · r: refresh')
   expect(panel).toContain('g again for the rest')
   await ui.unmount()
 })
@@ -5036,7 +5038,8 @@ test('a PR whose threads were not all read says so, even with none waiting in wh
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  expect(await lineOf(ui, 21)).toContain('review threads not all read · r: refresh')
+  expect(await lineOf(ui, 21)).toContain('review threads not all read')
+  expect(await lineOf(ui, 21)).toContain('r: refresh')
   expect(await ui.find({ key: 'act-comments' })).toBeUndefined()
   const out = await $.command.run({
     command: 'pr-inbox',
@@ -5056,7 +5059,8 @@ test('threads that could not be read say so on the row and to /pr-inbox address'
   await start($, s.clock)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'tab-mine' })
-  expect(await lineOf(ui, 21)).toContain('review threads not all read · r: refresh')
+  expect(await lineOf(ui, 21)).toContain('review threads not all read')
+  expect(await lineOf(ui, 21)).toContain('r: refresh')
   const out = await $.command.run({
     command: 'pr-inbox',
     args: 'address app#21',

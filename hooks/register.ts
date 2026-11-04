@@ -9255,7 +9255,8 @@ export function register(on: On, options: PluginOptions) {
       // Review threads that wait on you, and the key that addresses them (none on a fork: g fixes only branches in the
       // repository); threads that could not be read say so
       const waiting = !lead && !p.isCrossRepository ? openThreads(p).length : 0
-      const [why = '', whyKey = ''] = notReadyWhy(p, now).split(' · ')
+      const unread = threadsUnread.has(p.url)
+      const [why = '', ...whyKeys] = notReadyWhy(p, now).split(' · ')
       const stands =
         group === 'action'
           ? line([`needs you: ${reasons.join(', ')}`, p.isDraft ? 'a draft' : ''])
@@ -9271,14 +9272,16 @@ export function register(on: On, options: PluginOptions) {
         stands,
         passed || [...reasons, why].includes(ci) ? '' : ci,
         p.autoMergeRequest ? `auto-merge on (${autoMergeWord(p)})` : '',
+        waiting ? plural(waiting, 'unresolved thread') : '',
+        unread ? 'review threads not all read' : '',
       ]
       const keys = [
         fixes.length > 0 ? `c: ${fixes.map((t) => FIX_TASKS[t].verb).join(' / ')}` : '',
         group === 'action' && again.length > 0 ? `w: re-request ${again.map(atName).join(', ')}` : '',
-        group === 'waiting' ? whyKey : '',
+        group === 'waiting' ? line(whyKeys) : '',
         mergeKey(mergeAction(p)),
-        waiting ? `${plural(waiting, 'unresolved thread')} · g: address` : '',
-        threadsUnread.has(p.url) ? 'review threads not all read · r: refresh' : '',
+        waiting ? 'g: address' : '',
+        unread ? 'r: refresh' : '',
       ]
       const facts = [
         branchNote(p),
@@ -9291,7 +9294,7 @@ export function register(on: On, options: PluginOptions) {
       ]
       return [
         leadLine,
-        { text: line(state), bold: true, ...(group === 'action' ? { color: NEON.yellow } : {}) },
+        { text: line(state), bold: true, ...(group === 'action' && !lead ? { color: NEON.yellow } : {}) },
         { text: line(keys), dimColor: true },
         { text: line(facts), dimColor: true },
         { text: sessionNote(p), dimColor: true },

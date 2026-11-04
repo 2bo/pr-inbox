@@ -55,6 +55,8 @@ Under the list, the selected PR's details: the summary, why that risk, the relea
 
 A stack is listed together, bottom first, so the PR that merges next comes first. Besides stacks made with [gh stack](https://github.com/github/gh-stack), a PR whose base branch is the head branch of another open PR in the repository counts as stacked on it (`stack · 2/3 on #101`), among the PRs pr-inbox lists (yours, your review requests and the ones you approved). Branches of forks are left out, and so are long-lived branches (the repository's default branch, `main`, `master`, `develop`, `development`, `dev`, `staging`, `production`, `trunk`): PRs into `develop` do not sit on a `develop → main` release PR.
 
+Under the list, the details of one of your PRs take up to four lines: where it stands (yellow when it needs you), its keys, the facts, and the Claude Code session. A review request keeps its facts on one line.
+
 ## Keys
 
 **Anywhere** (the bottom line shows the keys for the selected PR, the most used first)
