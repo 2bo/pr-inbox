@@ -229,10 +229,14 @@ const LINE_TALK = {
   ],
 }
 
+const DEMO_IMAGE = '00000000-0000-4000-8000-000000000001'
+
 const DETAILS = {
   'billing-api/1281': {
     body: [
       '## What',
+      '',
+      `![The invoice list, with its pages](https://github.com/user-attachments/assets/${DEMO_IMAGE})`,
       '',
       '- `GET /v2/invoices` takes `page` and `per_page` (at most **100**)',
       '- Each response carries a `Link` header with the next and previous pages',
@@ -624,7 +628,14 @@ if (args[0] === 'api' && args[1] === 'graphql' && args.includes('--input')) {
     latestReviews: p.latestReviews,
   })
   const issueUrl = (args.find((a) => a.startsWith('url=')) ?? '').slice('url='.length)
-  if (issueUrl) {
+  if (query.includes('bodyHTML')) {
+    // The reader's picture: the fake curl next to this script answers the address, and nothing is fetched
+    out({
+      data: {
+        resource: { bodyHTML: `<img src="https://private-user-images.githubusercontent.com/1/2-${DEMO_IMAGE}.png?jwt=demo&amp;x=1">` },
+      },
+    })
+  } else if (issueUrl) {
     const talk = ISSUE_TALK[issueUrl] ?? []
     const subs = (SUBS[issueUrl] ?? []).map((x) => (issueClosed(x.url) ? { ...x, state: 'CLOSED' } : x))
     out({

@@ -4479,7 +4479,12 @@ type DiffView = {
   loading: boolean
   error: string
   showGenerated: Set<string>
+  // The pictures of the description by attachment id (readerImages)
+  images: Map<string, ReaderImage>
 }
+
+// A picture of the description in the reader: on its way, read, or not to be had
+type ReaderImage = 'loading' | 'failed' | { png: string; width: number; height: number }
 
 // A PR description made safe for the Markdown element: control characters out (newlines and tabs kept), template
 // comments out, local file links not clickable, cut to what the element takes
@@ -4503,6 +4508,167 @@ function cleanBody(text: string): string {
   return body.length > 9000 ? `${body.slice(0, 9000)}\n\n…` : body
 }
 let diffView: DiffView | undefined
+
+// Pictures attached to a PR on GitHub, as a description names them: `![alt](url)` or `<img src="url">`. Only GitHub's own
+// attachment addresses, by the id in them: a picture at any other address stays as written and is never fetched. A code
+// block is matched first, so one written in it stays as written too. The text is someone else's: the runs are bounded
+const ATTACHMENT =
+  'https://github\\.com/(?:user-attachments/assets|[\\w.-]+/[\\w.-]+/assets/\\d+)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\\?[^\\s"\')]*)?'
+const IMAGE_REF = new RegExp(
+  [
+    '^[ \\t]*(`{3,}|~{3,})[^\\n]*\\n[\\s\\S]*?(?:^[ \\t]*\\1[`~]*[ \\t]*$|(?![\\s\\S]))',
+    `!\\[([^\\]\\n]{0,300})\\]\\(\\s*${ATTACHMENT}(?:\\s+"[^"\\n]*")?\\s*\\)`,
+    `<img\\b[^>]{0,500}?\\bsrc=["']${ATTACHMENT}["'][^>]{0,500}>`,
+  ].join('|'),
+  'gim',
+)
+// The one address a picture is read from, as GitHub signs it for you in bodyHTML: anchored, so nothing can be added to
+// what curl is given. PNG only: it is all Image draws
+const SIGNED_IMAGE = /^https:\/\/private-user-images\.githubusercontent\.com\/\d+\/\d+-([0-9a-f-]{36})\.png\?[\w.=&%-]+$/
+const IMAGES_QUERY = 'query($url: URI!) { resource(url: $url) { ... on PullRequest { bodyHTML } } }'
+const MAX_IMAGES = 8
+// What Image takes, decoded
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024
+const MAX_IMAGE_PIXELS = 40_000_000
+// The tallest a picture is drawn, in rows, and roughly the pixels of a terminal cell
+const MAX_IMAGE_ROWS = 30
+const CELL_PIXELS = 9
+
+// What a picture says, safe to put in a line of markdown
+function imageAlt(words: string): string {
+  return fit(
+    clean(words)
+      .replace(/[[\]()<>`*_]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+    60,
+  )
+}
+
+// The pictures written in a text, in order
+function imageTags(text: string): { at: number; end: number; id: string; alt: string }[] {
+  if (!/\/assets\//i.test(text)) return []
+  return [...text.matchAll(IMAGE_REF)].flatMap((m) =>
+    m[1]
+      ? []
+      : [
+          {
+            at: m.index,
+            end: m.index + m[0].length,
+            id: m[3] ?? m[4] ?? '',
+            alt: imageAlt(m[2] ?? m[0].match(/\balt=["']([^"']*)["']/i)?.[1] ?? ''),
+          },
+        ],
+  )
+}
+
+// A text cut at its pictures
+type BodyPart = { text: string } | { image: string; alt: string }
+function bodyParts(text: string): BodyPart[] {
+  const parts: BodyPart[] = []
+  let from = 0
+  for (const tag of imageTags(text)) {
+    parts.push({ text: text.slice(from, tag.at) }, { image: tag.id, alt: tag.alt })
+    from = tag.end
+  }
+  parts.push({ text: text.slice(from) })
+  return parts
+}
+
+const imageName = (alt: string) => (alt ? `image: ${alt}` : 'image')
+
+// Where no picture is drawn (the details, the conversation, issues): its name, not its tag
+function imagesInWords(text: string): string {
+  return bodyParts(text)
+    .map((p) => ('image' in p ? `[${imageName(p.alt)}]` : p.text))
+    .join('')
+}
+
+// The ids of the pictures GitHub signed for you, with the address of each. These addresses work for anyone who has them
+// and expire: read for one load, never drawn, logged or stored
+function signedImages(html: string): Map<string, string> {
+  const urls = new Map<string, string>()
+  for (const [raw] of html.matchAll(/https:\/\/[^"'\s<>]+/g)) {
+    const url = raw.replaceAll('&amp;', '&')
+    const id = url.match(SIGNED_IMAGE)?.[1]
+    if (id && !urls.has(id)) urls.set(id, url)
+  }
+  return urls
+}
+
+// The size in a PNG's header, or undefined when these bytes are not a PNG of a size worth drawing. The pane refuses its
+// whole tree over a PNG without a complete header, so a picture in someone's PR must pass this before it is drawn
+function pngSize(base64: string): { width: number; height: number } | undefined {
+  let head: string
+  try {
+    head = atob(base64.slice(0, 44))
+  } catch {
+    return undefined
+  }
+  // Signature, chunk length 13, IHDR, its 13 bytes and its checksum: 33 bytes
+  if (head.length < 33 || !head.startsWith('\x89PNG\r\n\x1a\n\0\0\0\rIHDR')) return undefined
+  const number = (at: number) => [0, 1, 2, 3].reduce((n, i) => n * 256 + head.charCodeAt(at + i), 0)
+  const [width, height] = [number(16), number(20)]
+  return width > 0 && height > 0 && width * height <= MAX_IMAGE_PIXELS ? { width, height } : undefined
+}
+
+// The cells a picture takes: as wide as its pixels, within the pane and MAX_IMAGE_ROWS. A cell is about twice as tall as wide
+function imageCells(width: number, height: number, room: number): { columns: number; rows: number } {
+  const fits = Math.round((2 * MAX_IMAGE_ROWS * width) / height)
+  const columns = Math.max(1, Math.min(room, 255, Math.ceil(width / CELL_PIXELS), fits))
+  return { columns, rows: Math.max(1, Math.min(MAX_IMAGE_ROWS, Math.round((columns * height) / width / 2))) }
+}
+
+// One picture, through a file that lives only for this call: curl writes it (the bytes cannot come through stdout, which
+// is text), the name is random, and only https to that one address goes, with no redirect and no curlrc
+async function readImage($: EngineInterface, url: string, dir: string): Promise<ReaderImage> {
+  const file = `${dir}/${crypto.randomUUID()}.png`
+  try {
+    // biome-ignore format: the flags that keep this to one address read best together
+    const got = await $.process.run(
+      ['curl', '-q', '-sf', '--proto', '=https', '--max-redirs', '0', '--max-time', '20', '--max-filesize', String(MAX_IMAGE_BYTES), '--create-dirs', '-o', file, '--url', url],
+      { timeoutMs: 25_000 },
+    )
+    if (got.exitCode !== 0) return 'failed'
+    const { base64 } = await $.fs.read(file, { as: 'bytes' })
+    const size = pngSize(base64)
+    return size && (base64.length / 4) * 3 <= MAX_IMAGE_BYTES ? { png: base64, ...size } : 'failed'
+  } catch {
+    return 'failed'
+  } finally {
+    await $.process.run(['rm', '-f', '--', file]).catch(() => undefined)
+  }
+}
+
+// The addresses in GitHub's answer to IMAGES_QUERY; none when it cannot be read, and the pictures stay words
+function imageUrls(stdout: string): Map<string, string> {
+  try {
+    const html = (JSON.parse(stdout) as { data?: { resource?: { bodyHTML?: unknown } } }).data?.resource?.bodyHTML
+    return typeof html === 'string' ? signedImages(html) : new Map()
+  } catch {
+    return new Map()
+  }
+}
+
+// The reader opened: the description's pictures, one at a time, each drawn as it comes. Only GitHub is asked, only for
+// what the description attaches, and nothing goes further than the pane: no model, no store
+async function readerImages($: EngineInterface, view: DiffView): Promise<void> {
+  const wanted = new Set(imageTags(view.body ?? '').map((tag) => tag.id))
+  const ids = [...wanted].slice(0, MAX_IMAGES).filter((id) => typeof view.images.get(id) !== 'object')
+  if (ids.length === 0) return
+  const home = await homeDir($)
+  if (!home) return
+  for (const id of ids) view.images.set(id, 'loading')
+  $.ui.invalidate('ui.render')
+  const r = await $.process.run(['gh', 'api', 'graphql', '-f', `query=${IMAGES_QUERY}`, '-f', `url=${view.pr.url}`]).catch(ghMissing)
+  const urls = r.exitCode === 0 ? imageUrls(r.stdout) : new Map<string, string>()
+  for (const id of ids) {
+    if (diffView !== view) return
+    const url = urls.get(id)
+    view.images.set(id, url ? await readImage($, url, `${home}/.cache/pr-inbox/images`) : 'failed')
+    $.ui.invalidate('ui.render')
+  }
+}
 
 // Lockfiles, minified and generated files: folded until asked for
 function isGenerated(path: string): boolean {
@@ -4655,6 +4821,7 @@ async function openDiff($: EngineInterface, pr: PR, mode: 'auto' | 'since' | 'al
     loading: true,
     error: '',
     showGenerated: keep?.showGenerated ?? new Set(),
+    images: keep?.images ?? new Map(),
   }
   $.ui.invalidate('ui.render')
   const view = diffView
@@ -4695,6 +4862,7 @@ async function openDiff($: EngineInterface, pr: PR, mode: 'auto' | 'since' | 'al
   const firstFinding = view.files.findIndex((f) => findingsIn(pr, f.path).length > 0)
   view.at = since && view.files.length > 0 ? FIRST_FILE : firstFinding >= 0 ? firstFinding + FIRST_FILE : 0
   $.ui.invalidate('ui.render')
+  void readerImages($, view)
 }
 
 // The changed files as a tree: directories first, then files, each by name; a directory with a single directory
@@ -5164,6 +5332,7 @@ async function setIssueState($: EngineInterface, issue: Issue, to: 'close' | 're
 
 // y: markdown drawn as GitHub would, or the text as written (plain), in the details and the reader alike
 let plainText = false
+const asDrawn = (text: string) => (plainText ? text : imagesInWords(text))
 
 // Markdown cut into blocks of a few lines, so the details can page through it (n): at blank lines, and in a long
 // paragraph, list or code block after `max` lines (a code block is closed and opened again; a table stays whole)
@@ -6938,6 +7107,7 @@ async function openFixDiff($: EngineInterface, job: FixJob): Promise<void> {
     loading: false,
     error: r.exitCode === 0 ? '' : clean(r.stderr) || 'git diff failed',
     showGenerated: new Set(),
+    images: new Map(),
   }
   $.ui.invalidate('ui.render')
 }
@@ -8018,6 +8188,7 @@ export function register(on: On, options: PluginOptions) {
     if (e.requestId !== PANE || !diffView || picker || writePanel) return next(e)
     const kit = $.ui.resolve(e)
     const { Box, Link, Code, Markdown } = kit
+    const Image = 'Image' in kit ? kit.Image : undefined
     const { Text, Button } = glyphed(kit)
     type El = ReturnType<typeof Box>
     const redraw = () => $.ui.invalidate('ui.render')
@@ -8061,7 +8232,21 @@ export function register(on: On, options: PluginOptions) {
     const rule = Text({ color: focused ? NEON.violet : NEON.rule, children: ['━'.repeat(columns)] })
     const toast = (text: string) => $.ui.toast(text, { timeoutMs: 4000 })
     // The description and comments as markdown, or as written (y)
-    const prose = (text: string) => (plainText ? Text({ wrap: 'wrap', children: [text] }) : Markdown({ text }))
+    const prose = (text: string) => (plainText ? Text({ wrap: 'wrap', children: [text] }) : Markdown({ text: imagesInWords(text) }))
+    // A picture of the description, where the surface draws one and it came; its words in its place until then
+    const picture = (id: string, alt: string) => {
+      const image = v.images.get(id)
+      const name = imageName(alt)
+      if (typeof image === 'object' && Image)
+        return Image({ source: { png: image.png }, ...imageCells(image.width, image.height, Math.min(columns, 100)), alt: name })
+      const note = image === 'loading' ? ' · loading…' : image === 'failed' ? ' · not shown, o opens it on GitHub' : ''
+      return Text({ dimColor: true, wrap: 'wrap', children: [`[${name}]${note}`] })
+    }
+    // A block of the description: its text, with its pictures where they are written. Plain text is as written
+    const descBlock = (block: string) =>
+      plainText
+        ? [prose(block)]
+        : bodyParts(block).flatMap((p) => ('image' in p ? [picture(p.image, p.alt)] : p.text.trim() ? [prose(p.text.trim())] : []))
     // n: the next PR in the list, read the same way
     const nextPr = () => {
       if (fromIssue) return toast(`Opened from ${issueOf ? askLabel(issueOf) : 'an issue'} · q: back to the issue`)
@@ -8366,7 +8551,7 @@ export function register(on: On, options: PluginOptions) {
         ],
       })
       const text = descBlocks.length
-        ? descBlocks.map((b, i) => Box({ key: `block-${i}`, marginTop: i > 0 ? 1 : 0, children: [prose(b)] }))
+        ? descBlocks.map((b, i) => Box({ key: `block-${i}`, flexDirection: 'column', marginTop: i > 0 ? 1 : 0, children: descBlock(b) }))
         : [Text({ color: NEON.muted, children: ['No description'] })]
       return done([...head, keys, rule, ...sinceNote, title, ...text], notHere)
     }
@@ -8460,7 +8645,9 @@ export function register(on: On, options: PluginOptions) {
             Text({ color: NEON.cyan, children: ['  » '] }),
             Text({
               wrap: 'wrap',
-              children: [`${t.line ? `L${t.line} ` : ''}@${t.author}: ${fit(t.body.replace(/\s+/g, ' '), Math.max(20, columns * 2))}`],
+              children: [
+                `${t.line ? `L${t.line} ` : ''}@${t.author}: ${fit(asDrawn(t.body).replace(/\s+/g, ' '), Math.max(20, columns * 2))}`,
+              ],
             }),
           ],
         }),
@@ -8548,7 +8735,7 @@ export function register(on: On, options: PluginOptions) {
       void $.ui.scroll({ to: 'start', in: PANE }).catch(() => undefined)
       redraw()
     }
-    const prose = (text: string) => (plainText ? Text({ wrap: 'wrap', children: [text] }) : Markdown({ text }))
+    const prose = (text: string) => (plainText ? Text({ wrap: 'wrap', children: [text] }) : Markdown({ text: imagesInWords(text) }))
     const section = (name: string, note: string) =>
       Box({
         marginTop: 1,
@@ -9588,7 +9775,7 @@ export function register(on: On, options: PluginOptions) {
         )
       // A blank line between blocks, as the reader draws them
       const prose = (text: string, indent: number, most = Number.POSITIVE_INFINITY) => {
-        const blocks = markdownBlocks(text)
+        const blocks = markdownBlocks(asDrawn(text))
         for (const [i, block] of blocks.slice(0, most).entries()) {
           const width = bodyColumns - indent
           add(
@@ -10166,7 +10353,7 @@ export function register(on: On, options: PluginOptions) {
             1 + wrappedLines(`${name}  ${note}`, bodyColumns),
           )
         const prose = (text: string, indent: number) => {
-          for (const [k, block] of markdownBlocks(text).entries()) {
+          for (const [k, block] of markdownBlocks(asDrawn(text)).entries()) {
             add(
               Box({
                 paddingLeft: INDENT + indent,

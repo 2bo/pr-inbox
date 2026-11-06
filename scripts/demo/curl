@@ -1,0 +1,54 @@
+#!/usr/bin/env node
+import fs from 'node:fs'
+import path from 'node:path'
+import { deflateSync } from 'node:zlib'
+
+// A fake curl for pnpm run demo: the reader's picture is drawn here, a made-up chart, and nothing is fetched.
+// Handles only the call the mod makes; everything else fails.
+
+const args = process.argv.slice(2)
+const file = args[args.indexOf('-o') + 1]
+if (!args.includes('-o') || !file) process.exit(2)
+
+const crcTable = Array.from({ length: 256 }, (_, n) => {
+  let c = n
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+  return c >>> 0
+})
+const crc = (bytes) => (bytes.reduce((c, b) => crcTable[(c ^ b) & 255] ^ (c >>> 8), 0xffffffff) ^ 0xffffffff) >>> 0
+const chunk = (type, data) => {
+  const body = Buffer.concat([Buffer.from(type), data])
+  const length = Buffer.alloc(4)
+  length.writeUInt32BE(data.length)
+  const sum = Buffer.alloc(4)
+  sum.writeUInt32BE(crc(body))
+  return Buffer.concat([length, body, sum])
+}
+
+const [width, height] = [640, 320]
+const bars = [90, 150, 120, 220, 180, 260]
+const rows = []
+for (let y = 0; y < height; y++) {
+  const row = Buffer.alloc(1 + width * 3)
+  for (let x = 0; x < width; x++) {
+    const bar = bars[Math.floor((x - 40) / 95)]
+    const inBar = bar !== undefined && (x - 40) % 95 < 70 && height - y <= bar
+    const pixel = inBar ? [255, 90, 170] : [24, 20, 40]
+    row.set(pixel, 1 + x * 3)
+  }
+  rows.push(row)
+}
+const header = Buffer.alloc(13)
+header.writeUInt32BE(width, 0)
+header.writeUInt32BE(height, 4)
+header.set([8, 2, 0, 0, 0], 8)
+fs.mkdirSync(path.dirname(file), { recursive: true })
+fs.writeFileSync(
+  file,
+  Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', header),
+    chunk('IDAT', deflateSync(Buffer.concat(rows))),
+    chunk('IEND', Buffer.alloc(0)),
+  ]),
+)

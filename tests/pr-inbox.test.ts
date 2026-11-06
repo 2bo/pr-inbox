@@ -5657,6 +5657,169 @@ test('a description that could not be fetched says so under one heading, and the
   await ui.unmount()
 })
 
+// The reader's pictures: a description naming two attachments, what GitHub answers for them, and a real PNG header
+const IMG_A = '11111111-1111-4111-8111-111111111111'
+const IMG_B = '22222222-2222-4222-8222-222222222222'
+const ONE_PICTURE = `![x](https://github.com/user-attachments/assets/${IMG_A})`
+const signed = (id: string) => `https://private-user-images.githubusercontent.com/1/2-${id}.png?jwt=abc.def-_&amp;x=1`
+const signedPlain = (id: string) => signed(id).replace('&amp;', '&')
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAyAAAAGQCAYAAABWJQQ0'
+function imageStubs(on: TestOn, opts: { body: string; html?: string; png?: string; fail?: readonly string[]; graphqlFails?: boolean }) {
+  on('fs.read', () => ({ value: { base64: opts.png ?? PNG } }) as never)
+  return stubs(on, {
+    body: opts.body,
+    locale: { HOME: '/home/me' },
+    gh: (argv) =>
+      argv.some((a) => a.includes('bodyHTML'))
+        ? opts.graphqlFails
+          ? { exitCode: 1 }
+          : { stdout: JSON.stringify({ data: { resource: { bodyHTML: opts.html ?? `<img src="${signed(IMG_A)}">` } } }) }
+        : undefined,
+    ...(opts.fail ? { fail: [...opts.fail] } : {}),
+  })
+}
+const curls = (s: Stubs) => s.calls.filter((c) => c[0] === 'curl')
+async function openReader($: TestEngine, s: Stubs) {
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await s.clock.advance(500)
+  await ui.press({ key: 'act-diff' })
+  for (let i = 0; i < 8; i++) await s.clock.settle()
+  return ui
+}
+
+test('the reader draws a picture attached to the description where it is written, through one signed address', async ($, on) => {
+  const s = imageStubs(on, {
+    body: `before\n\n<img width="669" alt="the login page" src="https://github.com/user-attachments/assets/${IMG_A}" />\n\nafter`,
+  })
+  const ui = await openReader($, s)
+  const image = await ui.find({ type: 'Image' })
+  expect(image?.props.source).toEqual({ png: PNG })
+  expect(image?.props.alt).toBe('image: the login page')
+  // 800 x 400 pixels: as wide as its pixels, half as many rows as columns for a 2:1 picture over tall cells
+  expect(image?.props.columns).toBe(89)
+  expect(image?.props.rows).toBe(22)
+  const [curl] = curls(s)
+  expect(curl?.at(-1)).toBe(signedPlain(IMG_A))
+  expect(curl?.at(-2)).toBe('--url')
+  for (const flag of ['-q', '--proto', '=https', '--max-redirs']) expect(curl).toContain(flag)
+  // The file goes as soon as it was read
+  expect(s.calls.find((c) => c[0] === 'rm')?.at(-1)).toBe(curl?.[curl.indexOf('-o') + 1])
+  expect(curl?.[curl.indexOf('-o') + 1]).toMatch(/^\/home\/me\/\.cache\/pr-inbox\/images\/[0-9a-f-]{36}\.png$/)
+  await ui.unmount()
+})
+
+test('a markdown picture is read too, and plain text stays as written', async ($, on) => {
+  const body = `![a chart](https://github.com/user-attachments/assets/${IMG_A})`
+  const s = imageStubs(on, { body })
+  const ui = await openReader($, s)
+  expect(await ui.find({ type: 'Image' })).toBeDefined()
+  await ui.press({ key: 'diff-plain' })
+  expect(await ui.find({ type: 'Image' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: body })).toBeDefined()
+  await ui.unmount()
+})
+
+test('only attachments are read: another host, a code block or a description without any fetch nothing', async ($, on) => {
+  const s = imageStubs(on, {
+    body: [
+      `![x](https://evil.example/${IMG_A})`,
+      '<img src="https://evil.example/a.png">',
+      '```',
+      `![y](https://github.com/user-attachments/assets/${IMG_B})`,
+      '```',
+    ].join('\n\n'),
+  })
+  const ui = await openReader($, s)
+  expect(s.calls.some((c) => c.some((a) => a.includes('bodyHTML')))).toBe(false)
+  expect(curls(s)).toEqual([])
+  await ui.unmount()
+})
+
+test('an address that is not GitHub signed attachment is refused, whatever bodyHTML says', async ($, on) => {
+  const body = ONE_PICTURE
+  const html = [
+    `<img src="https://evil.example/1/2-${IMG_A}.png?jwt=a">`,
+    `<img src="https://private-user-images.githubusercontent.com.evil.example/1/2-${IMG_A}.png?jwt=a">`,
+    `<img src="https://private-user-images.githubusercontent.com/1/2-${IMG_A}.png?jwt=a;touch-x">`,
+    `<img src="https://private-user-images.githubusercontent.com/1/2-${IMG_A}.jpg?jwt=a">`,
+  ].join('')
+  const s = imageStubs(on, { body, html })
+  const ui = await openReader($, s)
+  expect(curls(s)).toEqual([])
+  expect(await ui.find({ type: 'Text', text: '[image: x] · not shown, o opens it on GitHub' })).toBeDefined()
+  await ui.unmount()
+})
+
+for (const [why, opts] of [
+  ['GitHub does not answer', { graphqlFails: true }],
+  ['curl fails', { fail: ['curl'] }],
+  ['the bytes are no PNG', { png: btoa('<html>not a picture</html>') }],
+  // The pane refuses a whole tree over a PNG cut before its header ends: this must never reach it
+  ['a PNG is cut inside its header', { png: PNG.slice(0, 36) }],
+] as const) {
+  test(`a picture says so in its place when ${why}`, async ($, on) => {
+    const s = imageStubs(on, { body: ONE_PICTURE, ...opts })
+    const ui = await openReader($, s)
+    expect(await ui.find({ type: 'Image' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: '[image: x] · not shown, o opens it on GitHub' })).toBeDefined()
+    await ui.unmount()
+  })
+}
+
+test('a PNG too big to draw is refused, and the temp file still goes', async ($, on) => {
+  const huge = 'iVBORw0KGgoAAAANSUhEUgABhqAAAYagCAYAAACoUgvI'
+  const s = imageStubs(on, { body: ONE_PICTURE, png: huge })
+  const ui = await openReader($, s)
+  expect(await ui.find({ type: 'Image' })).toBeUndefined()
+  expect(s.calls.filter((c) => c[0] === 'rm')).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('at most eight pictures are read, each once', async ($, on) => {
+  const id = (n: number) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`
+  const ids = Array.from({ length: 10 }, (_, n) => id(n))
+  const s = imageStubs(on, {
+    body: [...ids, ids[0]].map((i) => `![p](https://github.com/user-attachments/assets/${i})`).join('\n\n'),
+    html: ids.map((i) => `<img src="${signed(i)}">`).join(''),
+  })
+  const ui = await openReader($, s)
+  expect(curls(s)).toHaveLength(8)
+  await ui.unmount()
+})
+
+test('a signed address and a picture reach no model, no store and no log', async ($, on) => {
+  const s = imageStubs(on, { body: ONE_PICTURE })
+  const ui = await openReader($, s)
+  expect(await ui.find({ type: 'Image' })).toBeDefined()
+  expect(JSON.stringify([s.prompts, s.logs, s.toasts])).not.toContain('jwt=')
+  expect(s.prompts.join('')).not.toContain(PNG)
+  await ui.unmount()
+})
+
+test('a picture written in a code block stays as written, in the details and the reader', async ($, on) => {
+  const block = ['```', ONE_PICTURE, '```'].join('\n')
+  const s = imageStubs(on, { body: block })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await s.clock.advance(500)
+  expect(markdownIn(await lineOf(ui, 11))).toEqual([block])
+  await ui.press({ key: 'act-diff' })
+  for (let i = 0; i < 8; i++) await s.clock.settle()
+  expect(await ui.find({ type: 'Markdown', text: block })).toBeDefined()
+  expect(s.calls.some((c) => c.some((a) => a.includes('bodyHTML')))).toBe(false)
+  await ui.unmount()
+})
+
+test('where no picture is drawn, the details say its name and not its tag', async ($, on) => {
+  const s = stubs(on, { body: `<img alt="the [login](x) page" src="https://github.com/user-attachments/assets/${IMG_A}" />` })
+  await start($, s.clock)
+  const ui = await $.ui.mount(PANE)
+  await s.clock.advance(500)
+  expect(markdownIn(await lineOf(ui, 11))).toEqual(['[image: the login x page]'])
+  await ui.unmount()
+})
+
 test('comments on lines keep brackets in their text, across pages', async ($, on) => {
   const line = (body: string, at: string) => JSON.stringify({ user: { login: 'rev' }, created_at: at, path: 'app/x.rb', line: 3, body })
   const s = stubs(on, {
