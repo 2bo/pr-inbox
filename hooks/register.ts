@@ -4517,15 +4517,20 @@ function cleanBody(text: string): string {
 let diffView: DiffView | undefined
 
 // Pictures attached to a PR on GitHub, as a description names them: `![alt](url)` or `<img src="url">`. Only GitHub's own
-// attachment addresses, by the id in them: a picture at any other address stays as written and is never fetched. A code
-// block is matched first, so one written in it stays as written too. The text is someone else's: the runs are bounded
+// attachment addresses, by the id in them: a picture at any other address stays as written and is never fetched. Code is
+// matched first (a fenced block, inline code, an indented block after a blank line), so one written in it stays as
+// written too. An img is read attribute by attribute: only its real src counts, not data-src or a word in another's value.
+// The text is someone else's: the runs are bounded
 const ATTACHMENT =
   'https://github\\.com/(?:user-attachments/assets|[\\w.-]+/[\\w.-]+/assets/\\d+)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\\?[^\\s"\')]*)?'
+const IMG_ATTR = `\\s+(?!src\\s*=)[\\w:-]{1,40}(?:=(?:"[^"]{0,500}"|'[^']{0,500}'|[^\\s"'>]{1,500}))?`
 const IMAGE_REF = new RegExp(
   [
     '^[ \\t]*(`{3,}|~{3,})[^\\n]*\\n[\\s\\S]*?(?:^[ \\t]*\\1[`~]*[ \\t]*$|(?![\\s\\S]))',
+    '(`+)[^`\\n][^\\n]{0,500}?\\2(?!`)',
+    '(?<![^\\n]\\n)^(?: {4}|\\t)[^\\n]*',
     `!\\[([^\\]\\n]{0,300})\\]\\(\\s*${ATTACHMENT}(?:\\s+"[^"\\n]*")?\\s*\\)`,
-    `<img\\b[^>]{0,500}?\\bsrc=["']${ATTACHMENT}["'][^>]{0,500}>`,
+    `<img(?:${IMG_ATTR}){0,12}\\s+src=["']${ATTACHMENT}["'](?:${IMG_ATTR}){0,12}\\s*/?>`,
   ].join('|'),
   'gim',
 )
@@ -4555,18 +4560,13 @@ function imageAlt(words: string): string {
 // The pictures written in a text, in order
 function imageTags(text: string): { at: number; end: number; id: string; alt: string }[] {
   if (!/\/assets\//i.test(text)) return []
-  return [...text.matchAll(IMAGE_REF)].flatMap((m) =>
-    m[1]
-      ? []
-      : [
-          {
-            at: m.index,
-            end: m.index + m[0].length,
-            id: m[3] ?? m[4] ?? '',
-            alt: imageAlt(m[2] ?? m[0].match(/\balt=["']([^"']*)["']/i)?.[1] ?? ''),
-          },
-        ],
-  )
+  return [...text.matchAll(IMAGE_REF)].flatMap((m) => {
+    const id = m[4] ?? m[5]
+    // No id: code, which stays as written
+    if (!id) return []
+    const alt = imageAlt(m[3] ?? m[0].match(/(?<![\w-])alt=["']([^"']*)["']/i)?.[1] ?? '')
+    return [{ at: m.index, end: m.index + m[0].length, id, alt }]
+  })
 }
 
 // A text cut at its pictures
@@ -4646,7 +4646,9 @@ async function readImage($: EngineInterface, url: string, dir: string): Promise<
   } catch {
     return 'failed'
   } finally {
-    await $.process.run(['rm', '-f', '--', file]).catch(() => undefined)
+    const gone = await $.process.run(['rm', '-f', '--', file]).catch(ghMissing)
+    // A picture from a private repository left on disk is yours to know about
+    if (gone.exitCode !== 0) $.ui.toast(`Could not remove a picture of the PR: delete ${dir}`, { timeoutMs: 8000 })
   }
 }
 

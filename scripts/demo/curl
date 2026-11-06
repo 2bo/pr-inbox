@@ -7,8 +7,12 @@ import { deflateSync } from 'node:zlib'
 // Handles only the call the mod makes; everything else fails.
 
 const args = process.argv.slice(2)
-const file = args[args.indexOf('-o') + 1]
-if (!args.includes('-o') || !file) process.exit(2)
+const file = args[args.indexOf('-o') + 1] ?? ''
+const url = args.at(-1) ?? ''
+// The one address scripts/demo/gh names, into the mod's own folder: nothing else is written
+const demoUrl = /^https:\/\/private-user-images\.githubusercontent\.com\/1\/2-00000000-0000-4000-8000-000000000001\.png\?/
+const demoFile = /\/\.cache\/pr-inbox\/images\/[0-9a-f-]{36}\.png$/
+if (args.at(-2) !== '--url' || !demoUrl.test(url) || !demoFile.test(file)) process.exit(2)
 
 const crcTable = Array.from({ length: 256 }, (_, n) => {
   let c = n

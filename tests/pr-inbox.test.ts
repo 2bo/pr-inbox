@@ -5813,6 +5813,45 @@ test('a picture written in a code block stays as written, in the details and the
   await ui.unmount()
 })
 
+for (const [where, body] of [
+  ['inline code', `the tag \`${ONE_PICTURE}\` is shown as it is`],
+  ['an indented block', `Write this:\n\n    ${ONE_PICTURE}`],
+  [
+    'data-src, with the real src elsewhere',
+    `<img data-src="https://github.com/user-attachments/assets/${IMG_A}" src="https://evil.example/a.png">`,
+  ],
+  [
+    'the value of another attribute',
+    `<img title=" src='https://github.com/user-attachments/assets/${IMG_A}'" src="https://evil.example/a.png">`,
+  ],
+] as const) {
+  test(`a picture in ${where} is not read`, async ($, on) => {
+    const s = imageStubs(on, { body })
+    const ui = await openReader($, s)
+    expect(await ui.find({ type: 'Image' })).toBeUndefined()
+    expect(s.calls.some((c) => c.some((a) => a.includes('bodyHTML')))).toBe(false)
+    expect(curls(s)).toEqual([])
+    await ui.unmount()
+  })
+}
+
+test('a picture after a list or a line of text is still read, wherever src stands in its tag', async ($, on) => {
+  const s = imageStubs(on, {
+    body: `Before\n\n<img src="https://github.com/user-attachments/assets/${IMG_A}" alt="after src" width="10" />`,
+  })
+  const ui = await openReader($, s)
+  expect((await ui.find({ type: 'Image' }))?.props.alt).toBe('image: after src')
+  await ui.unmount()
+})
+
+test('a temp file that cannot be removed is said, with the folder to delete', async ($, on) => {
+  const s = imageStubs(on, { body: ONE_PICTURE, fail: ['rm'] })
+  const ui = await openReader($, s)
+  expect(await ui.find({ type: 'Image' })).toBeDefined()
+  expect(s.toasts.at(-1)).toBe('Could not remove a picture of the PR: delete /home/me/.cache/pr-inbox/images')
+  await ui.unmount()
+})
+
 test('where no picture is drawn, the details say its name and not its tag', async ($, on) => {
   const s = stubs(on, { body: `<img alt="the [login](x) page" src="https://github.com/user-attachments/assets/${IMG_A}" />` })
   await start($, s.clock)
