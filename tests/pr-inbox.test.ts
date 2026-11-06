@@ -5796,6 +5796,9 @@ test('a signed address and a picture reach no model, no store and no log', async
   expect(await ui.find({ type: 'Image' })).toBeDefined()
   expect(JSON.stringify([s.prompts, s.logs, s.toasts])).not.toContain('jwt=')
   expect(s.prompts.join('')).not.toContain(PNG)
+  const stored = JSON.stringify([...s.store])
+  expect(stored).not.toContain('jwt=')
+  expect(stored).not.toContain(PNG)
   await ui.unmount()
 })
 
