@@ -5747,22 +5747,22 @@ test('an address that is not GitHub signed attachment is refused, whatever bodyH
   const s = imageStubs(on, { body, html })
   const ui = await openReader($, s)
   expect(curls(s)).toEqual([])
-  expect(await ui.find({ type: 'Text', text: '[image: x] · not shown, o opens it on GitHub' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '[image: x] · not a PNG, o opens the PR on GitHub' })).toBeDefined()
   await ui.unmount()
 })
 
-for (const [why, opts] of [
-  ['GitHub does not answer', { graphqlFails: true }],
-  ['curl fails', { fail: ['curl'] }],
-  ['the bytes are no PNG', { png: btoa('<html>not a picture</html>') }],
+for (const [why, opts, words] of [
+  ['GitHub does not answer', { graphqlFails: true }, 'could not load'],
+  ['curl fails', { fail: ['curl'] }, 'could not load'],
+  ['the bytes are no PNG', { png: btoa('<html>not a picture</html>') }, 'not a PNG'],
   // The pane refuses a whole tree over a PNG cut before its header ends: this must never reach it
-  ['a PNG is cut inside its header', { png: PNG.slice(0, 36) }],
+  ['a PNG is cut inside its header', { png: PNG.slice(0, 36) }, 'not a PNG'],
 ] as const) {
   test(`a picture says so in its place when ${why}`, async ($, on) => {
     const s = imageStubs(on, { body: ONE_PICTURE, ...opts })
     const ui = await openReader($, s)
     expect(await ui.find({ type: 'Image' })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: '[image: x] · not shown, o opens it on GitHub' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: `[image: x] · ${words}, o opens the PR on GitHub` })).toBeDefined()
     await ui.unmount()
   })
 }
@@ -5772,6 +5772,7 @@ test('a PNG too big to draw is refused, and the temp file still goes', async ($,
   const s = imageStubs(on, { body: ONE_PICTURE, png: huge })
   const ui = await openReader($, s)
   expect(await ui.find({ type: 'Image' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '[image: x] · too large, o opens the PR on GitHub' })).toBeDefined()
   expect(s.calls.filter((c) => c[0] === 'rm')).toHaveLength(1)
   await ui.unmount()
 })
@@ -5785,6 +5786,7 @@ test('at most eight pictures are read, each once', async ($, on) => {
   })
   const ui = await openReader($, s)
   expect(curls(s)).toHaveLength(8)
+  expect(await ui.find({ type: 'Text', text: '[image: p] · over the limit of 8 pictures, o opens the PR on GitHub' })).toBeDefined()
   await ui.unmount()
 })
 

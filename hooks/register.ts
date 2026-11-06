@@ -4483,8 +4483,15 @@ type DiffView = {
   images: Map<string, ReaderImage>
 }
 
-// A picture of the description in the reader: on its way, read, or not to be had
-type ReaderImage = 'loading' | 'failed' | { png: string; width: number; height: number }
+// A picture of the description in the reader: read, on its way, or why it is not there
+type ImageTrouble = 'failed' | 'format' | 'big' | 'skipped'
+type ReaderImage = 'loading' | ImageTrouble | { png: string; width: number; height: number }
+const IMAGE_TROUBLE: Record<ImageTrouble, string> = {
+  failed: 'could not load',
+  format: 'not a PNG',
+  big: 'too large',
+  skipped: 'over the limit of 8 pictures',
+}
 
 // A PR description made safe for the Markdown element: control characters out (newlines and tabs kept), template
 // comments out, local file links not clickable, cut to what the element takes
@@ -4596,7 +4603,7 @@ function signedImages(html: string): Map<string, string> {
   return urls
 }
 
-// The size in a PNG's header, or undefined when these bytes are not a PNG of a size worth drawing. The pane refuses its
+// The size in a PNG's header, or undefined when these bytes are not a PNG. The pane refuses its
 // whole tree over a PNG without a complete header, so a picture in someone's PR must pass this before it is drawn
 function pngSize(base64: string): { width: number; height: number } | undefined {
   let head: string
@@ -4609,7 +4616,7 @@ function pngSize(base64: string): { width: number; height: number } | undefined 
   if (head.length < 33 || !head.startsWith('\x89PNG\r\n\x1a\n\0\0\0\rIHDR')) return undefined
   const number = (at: number) => [0, 1, 2, 3].reduce((n, i) => n * 256 + head.charCodeAt(at + i), 0)
   const [width, height] = [number(16), number(20)]
-  return width > 0 && height > 0 && width * height <= MAX_IMAGE_PIXELS ? { width, height } : undefined
+  return width > 0 && height > 0 ? { width, height } : undefined
 }
 
 // The cells a picture takes: as wide as its pixels, within the pane and MAX_IMAGE_ROWS. A cell is about twice as tall as wide
@@ -4629,10 +4636,13 @@ async function readImage($: EngineInterface, url: string, dir: string): Promise<
       ['curl', '-q', '-sf', '--proto', '=https', '--max-redirs', '0', '--max-time', '20', '--max-filesize', String(MAX_IMAGE_BYTES), '--create-dirs', '-o', file, '--url', url],
       { timeoutMs: 25_000 },
     )
-    if (got.exitCode !== 0) return 'failed'
+    // 63: over --max-filesize
+    if (got.exitCode !== 0) return got.exitCode === 63 ? 'big' : 'failed'
     const { base64 } = await $.fs.read(file, { as: 'bytes' })
     const size = pngSize(base64)
-    return size && (base64.length / 4) * 3 <= MAX_IMAGE_BYTES ? { png: base64, ...size } : 'failed'
+    if (!size) return 'format'
+    const fits = (base64.length / 4) * 3 <= MAX_IMAGE_BYTES && size.width * size.height <= MAX_IMAGE_PIXELS
+    return fits ? { png: base64, ...size } : 'big'
   } catch {
     return 'failed'
   } finally {
@@ -4653,8 +4663,9 @@ function imageUrls(stdout: string): Map<string, string> {
 // The reader opened: the description's pictures, one at a time, each drawn as it comes. Only GitHub is asked, only for
 // what the description attaches, and nothing goes further than the pane: no model, no store
 async function readerImages($: EngineInterface, view: DiffView): Promise<void> {
-  const wanted = new Set(imageTags(view.body ?? '').map((tag) => tag.id))
-  const ids = [...wanted].slice(0, MAX_IMAGES).filter((id) => typeof view.images.get(id) !== 'object')
+  const wanted = [...new Set(imageTags(view.body ?? '').map((tag) => tag.id))]
+  for (const id of wanted.slice(MAX_IMAGES)) view.images.set(id, 'skipped')
+  const ids = wanted.slice(0, MAX_IMAGES).filter((id) => typeof view.images.get(id) !== 'object')
   if (ids.length === 0) return
   const home = await homeDir($)
   if (!home) return
@@ -4665,7 +4676,9 @@ async function readerImages($: EngineInterface, view: DiffView): Promise<void> {
   for (const id of ids) {
     if (diffView !== view) return
     const url = urls.get(id)
-    view.images.set(id, url ? await readImage($, url, `${home}/.cache/pr-inbox/images`) : 'failed')
+    // GitHub named it, but not at an address of a PNG (SIGNED_IMAGE)
+    const missing = r.stdout.includes(id) ? 'format' : 'failed'
+    view.images.set(id, url ? await readImage($, url, `${home}/.cache/pr-inbox/images`) : missing)
     $.ui.invalidate('ui.render')
   }
 }
@@ -8239,7 +8252,8 @@ export function register(on: On, options: PluginOptions) {
       const name = imageName(alt)
       if (typeof image === 'object' && Image)
         return Image({ source: { png: image.png }, ...imageCells(image.width, image.height, Math.min(columns, 100)), alt: name })
-      const note = image === 'loading' ? ' · loading…' : image === 'failed' ? ' · not shown, o opens it on GitHub' : ''
+      const why = image === undefined || image === 'loading' ? '' : typeof image === 'object' ? 'not drawn here' : IMAGE_TROUBLE[image]
+      const note = image === 'loading' ? ' · loading…' : why ? ` · ${why}, o opens the PR on GitHub` : ''
       return Text({ dimColor: true, wrap: 'wrap', children: [`[${name}]${note}`] })
     }
     // A block of the description: its text, with its pictures where they are written. Plain text is as written

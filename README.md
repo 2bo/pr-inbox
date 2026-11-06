@@ -110,7 +110,9 @@ Under the list, the details of one of your PRs are split by kind, one line each:
 
 **In the reader (`d`)**
 
-PNG pictures attached to the description are drawn where they are written, once they arrive, with no key to press (up to 8 per PR, 2 MiB each). In a terminal that draws no images, a picture that is not a PNG or one that could not be read, its name is there instead and `o` opens the PR on GitHub. Pictures in comments and everywhere else are named in words. If a picture's name is there in plain `image: …` although your terminal draws images, Claude Code did not recognize the terminal: set [`CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1`](https://code.claude.com/docs/en/plugins/mods/gallery#image-and-client). Not inside GNU screen, tmux older than 3.3, a tmux popup or tmux with `allow-passthrough` off: there it draws an empty box.
+PNG pictures attached to the description are drawn where they are written, with no key: up to 8 per PR, 2 MiB each, at most 30 rows tall (`j` / `k` scroll past one). While one loads you see `[image: name] · loading…`. When it cannot be drawn you see the reason, such as `[image: name] · not a PNG, o opens the PR on GitHub`. Everywhere else (the details under the list, the conversation, line comments, issues) a picture is its name, `[image: name]`.
+
+If you see a dim `image: name` where the picture should be, Claude Code did not recognize your terminal as one that draws images. When it does draw them, set [`CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1`](https://code.claude.com/docs/en/plugins/mods/gallery#image-and-client). Not inside GNU screen, tmux older than 3.3, a tmux popup or tmux with `allow-passthrough` off: there it draws an empty box.
 
 Three tabs, `1` description, `2` conversation (comments and reviews, oldest first, each with its verdict), `3` files (the diff one file at a time); `h` / `l` walk through them page by page. Comments on lines show above the file they are on (`»` in the file tree), and the diff is drawn like Claude Code's own. On a `↻ RE` PR, it opens at what changed since your approval.
 
@@ -254,7 +256,7 @@ claude --plugin-dir .   # run the working copy; loading once also writes the typ
 pnpm run check          # validate (--strict) → tsc → Biome → claude plugin test
 ```
 
-`pnpm run demo` starts Claude Code with the mod against made-up PRs: a fake `gh` (`scripts/demo/gh`) answers every GitHub call, and a fake `ghq` knows no clone and a fake `curl` draws its picture, so nothing real is read or written, and approvals and merges go nowhere. The mod's real state is set aside and put back when you `/exit`. It is also how the screenshot is taken.
+`pnpm run demo` starts Claude Code with the mod against made-up PRs: a fake `gh` (`scripts/demo/gh`) answers every GitHub call, and a fake `ghq` knows no clone and a fake `curl` answers with a made-up chart, so nothing real is read or written, and approvals and merges go nowhere. The mod's real state is set aside and put back when you `/exit`. It is also how the screenshot is taken.
 
 Tests live in `tests/*.test.ts`. GitHub, the model, the store and the environment are all stubbed, so tests make no network calls.
 
