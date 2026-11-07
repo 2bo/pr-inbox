@@ -28,7 +28,7 @@ const run = (name, conclusion, id) => ({
 // them in English in any repository
 const TITLES_JA = {
   'Rate-limit login attempts per IP and account': 'ログイン試行を IP とアカウント単位で制限する',
-  'Add order history page behind new_order_history flag': '注文履歴ページを追加（new_order_history フラグの裏）',
+  'Add order history page behind new_order_history flag': '注文履歴ページを追加（new_order_history フラグで切り替え）',
   'Fix broken links in the onboarding guide': 'オンボーディングガイドのリンク切れを直す',
   'Add CSV export for invoices': '請求書の CSV エクスポートを追加',
   'Raise the worker pool to 12': 'ワーカープールを 12 に増やす',
@@ -36,7 +36,7 @@ const TITLES_JA = {
   'Paginate GET /v2/invoices': 'GET /v2/invoices にページネーションを追加',
   'Show invoice pages in the dashboard': 'ダッシュボードに請求書のページを表示',
   'Remember the page size per user': 'ページサイズをユーザーごとに覚える',
-  'Extract feature flag helpers into a module': 'フラグのヘルパーをモジュールに切り出す',
+  'Extract feature flag helpers into a module': 'フィーチャーフラグのヘルパーをモジュールに切り出す',
   'Rename cart events to checkout events': 'cart イベントを checkout に改名',
   'Tune autoscaling thresholds for queue workers': 'オートスケールのしきい値を調整',
   'Export queue depth metrics': 'キュー長のメトリクスを出力',
@@ -50,6 +50,7 @@ const TITLES_JA = {
   'Checkout button stays disabled after a coupon is removed': 'クーポンを外すとチェックアウトのボタンが押せないままになる',
   'Saved cards on the payment step': '支払いステップで保存済みカードを使う',
   'Retry webhook deliveries with backoff': 'Webhook の配信をバックオフ付きでリトライする',
+  'Webhooks v2': 'Webhook v2 対応',
   'Document the feature flag rollout steps': 'フィーチャーフラグの展開手順を文書にする',
   'Invoice PDF shows the old tax rate after a plan change': 'プラン変更後も請求書 PDF に古い税率が出る',
   'Date picker cannot be used with the keyboard': '日付ピッカーをキーボードで操作できない',
@@ -195,7 +196,7 @@ const MINE = [
     deletions: 9,
   }),
   pr('billing-api', 1286, 'Remember the page size per user', 'you', {
-    updatedAt: ago(9),
+    updatedAt: ago(1),
     ...nobody,
     ...asked(user('mtanaka')),
     baseRefName: 'feature/billing-api-1284',
@@ -204,7 +205,7 @@ const MINE = [
     ...ci('PENDING'),
   }),
   pr('storefront', 470, 'Extract feature flag helpers into a module', 'you', {
-    updatedAt: ago(8),
+    updatedAt: ago(1),
     ...nobody,
     ...asked(user('lena-park')),
     ...viaTeam('web', 'lena-park', 8),
@@ -236,7 +237,7 @@ const MINE = [
     ...stacked(1),
   }),
   pr('infra', 96, 'Autoscale workers on queue depth', 'you', { updatedAt: ago(30), ...nobody, ...asked(user('rkumar')), additions: 41, deletions: 12, ...stacked(2) }),
-  pr('infra', 97, 'Queue dashboard', 'you', { updatedAt: ago(52), ...nobody, ...asked(user('rkumar')), additions: 120, deletions: 0, ...ci('PENDING'), ...stacked(3) }),
+  pr('infra', 97, 'Queue dashboard', 'you', { updatedAt: ago(3), ...nobody, ...asked(user('rkumar')), additions: 120, deletions: 0, ...ci('PENDING'), ...stacked(3) }),
   pr('docs', 61, 'API versioning guide', 'you', { ...nobody, isDraft: true, updatedAt: ago(24 * 45), additions: 240, deletions: 0 }),
 ]
 

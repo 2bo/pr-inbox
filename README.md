@@ -256,7 +256,7 @@ claude --plugin-dir .   # run the working copy; loading once also writes the typ
 pnpm run check          # validate (--strict) → tsc → Biome → claude plugin test
 ```
 
-`pnpm run demo` starts Claude Code with the mod against made-up PRs: a fake `gh` (`scripts/demo/gh`) answers every GitHub call, and a fake `ghq` knows no clone and a fake `curl` answers with a made-up chart, so nothing real is read or written, and approvals and merges go nowhere. The mod's real state is set aside and put back when you `/exit`. It is also how the screenshot is taken. `DEMO_LANG=ja pnpm run demo` shows the made-up PR and issue titles and the AI analysis in Japanese.
+`pnpm run demo` starts Claude Code with the mod against made-up PRs: a fake `gh` (`scripts/demo/gh`) answers every GitHub call, and a fake `ghq` knows no clone and a fake `curl` answers with a made-up chart, so nothing real is read or written, and approvals and merges go nowhere. The mod's real state is set aside and put back when you `/exit`. It is also how the screenshot is taken. `DEMO_LANG=ja pnpm run demo` shows the made-up titles, the AI analysis and Claude's answers in Japanese; bot PR titles, descriptions, comments and the menus stay in English.
 
 Tests live in `tests/*.test.ts`. GitHub, the model, the store and the environment are all stubbed, so tests make no network calls.
 
