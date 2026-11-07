@@ -50,17 +50,16 @@ const TITLES_JA = {
   'Checkout button stays disabled after a coupon is removed': 'クーポンを外すとチェックアウトのボタンが押せないままになる',
   'Saved cards on the payment step': '支払いステップで保存済みカードを使う',
   'Retry webhook deliveries with backoff': 'Webhook の配信をバックオフ付きでリトライする',
-  'Webhooks v2': 'Webhooks v2',
   'Document the feature flag rollout steps': 'フィーチャーフラグの展開手順を文書にする',
   'Invoice PDF shows the old tax rate after a plan change': 'プラン変更後も請求書 PDF に古い税率が出る',
   'Date picker cannot be used with the keyboard': '日付ピッカーをキーボードで操作できない',
 }
-const localTitle = (title) => (process.env.DEMO_LANG === 'ja' && TITLES_JA[title]) || title
+const TITLES = process.env.DEMO_LANG === 'ja' ? TITLES_JA : {}
 
 const pr = (repo, number, title, author, extra) => ({
   id: `PR_${repo}_${number}`,
   number,
-  title: localTitle(title),
+  title,
   url: `https://github.com/acme/${repo}/pull/${number}`,
   isDraft: false,
   createdAt: ago(24 * 7),
@@ -179,7 +178,7 @@ const MINE = [
     ]),
   }),
   pr('billing-api', 1281, 'Paginate GET /v2/invoices', 'you', {
-    updatedAt: ago(6),
+    updatedAt: ago(4),
     ...nobody,
     ...reviewed('mtanaka', 'APPROVED', 5, oid(1281)),
     additions: 97,
@@ -228,7 +227,7 @@ const MINE = [
   pr('infra', 88, 'Tune autoscaling thresholds for queue workers', 'you', { updatedAt: ago(100), ...nobody, additions: 14, deletions: 8 }),
   // A stack made with gh stack: metrics, then autoscaling on them, then a dashboard
   pr('infra', 95, 'Export queue depth metrics', 'you', {
-    updatedAt: ago(11),
+    updatedAt: ago(9),
     ...nobody,
     ...reviewed('rkumar', 'APPROVED', 10, oid(95)),
     additions: 64,
@@ -509,7 +508,8 @@ const byUrl = (url) => all.find((p) => p.url === url)
 const key = (p) => `${p.repository.nameWithOwner.split('/')[1]}/${p.number}`
 
 const args = process.argv.slice(2)
-const out = (v) => process.stdout.write(typeof v === 'string' ? v : JSON.stringify(v))
+// Every title leaves through here, so this is the one place DEMO_LANG changes them
+const out = (v) => process.stdout.write(typeof v === 'string' ? v : JSON.stringify(v, (k, x) => (k === 'title' ? (TITLES[x] ?? x) : x)))
 
 const fail = (msg) => {
   process.stderr.write(`${msg}\n`)
@@ -538,7 +538,7 @@ const WEB_TEAM = ['lena-park', 'mtanaka', 'rkumar']
 // Open issues assigned to you (tab 3)
 const issue = (repo, number, title, author, hours, labels, comments, extra = {}) => ({
   number,
-  title: localTitle(title),
+  title,
   url: `https://github.com/acme/${repo}/issues/${number}`,
   createdAt: ago(hours + 24 * 5),
   updatedAt: ago(hours),
@@ -551,7 +551,7 @@ const issue = (repo, number, title, author, hours, labels, comments, extra = {})
 })
 const ref = (repo, number, title, state = 'OPEN') => ({
   number,
-  title: localTitle(title),
+  title,
   url: `https://github.com/acme/${repo}/issues/${number}`,
   state,
   repository: { nameWithOwner: `acme/${repo}` },
@@ -620,7 +620,7 @@ const ISSUE_TALK = {
 // PRs linked to an issue: closing it, or mentioning it
 const linkedPr = (repo, number, title, state = 'OPEN', isDraft = false) => ({
   number,
-  title: localTitle(title),
+  title,
   url: `https://github.com/acme/${repo}/pull/${number}`,
   state,
   isDraft,
