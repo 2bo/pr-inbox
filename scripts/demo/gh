@@ -24,6 +24,39 @@ const run = (name, conclusion, id) => ({
   detailsUrl: `https://github.com/acme/storefront/actions/runs/${id}`,
 })
 
+// DEMO_LANG=ja shows the titles in Japanese (run.sh sets the analysis language to match). Bot PRs keep theirs: bots write
+// them in English in any repository
+const TITLES_JA = {
+  'Rate-limit login attempts per IP and account': 'ログイン試行を IP とアカウント単位で制限する',
+  'Add order history page behind new_order_history flag': '注文履歴ページを追加（new_order_history フラグで切り替え）',
+  'Fix broken links in the onboarding guide': 'オンボーディングガイドのリンク切れを直す',
+  'Add CSV export for invoices': '請求書の CSV エクスポートを追加',
+  'Raise the worker pool to 12': 'ワーカープールを 12 に増やす',
+  'Move session storage to Redis': 'セッションの保存先を Redis に移す',
+  'Paginate GET /v2/invoices': 'GET /v2/invoices にページネーションを追加',
+  'Show invoice pages in the dashboard': 'ダッシュボードに請求書のページを表示',
+  'Remember the page size per user': 'ページサイズをユーザーごとに覚える',
+  'Extract feature flag helpers into a module': 'フィーチャーフラグのヘルパーをモジュールに切り出す',
+  'Rename cart events to checkout events': 'cart イベントを checkout に改名',
+  'Tune autoscaling thresholds for queue workers': 'オートスケールのしきい値を調整',
+  'Export queue depth metrics': 'キュー長のメトリクスを出力',
+  'Autoscale workers on queue depth': 'キュー長でワーカーをオートスケール',
+  'Queue dashboard': 'キューのダッシュボード',
+  'API versioning guide': 'API バージョニングのガイド',
+  'Reset canSubmit when a coupon is removed': 'クーポン削除時に canSubmit をリセットする',
+  'Coupon field on the cart page': 'カートページのクーポン欄',
+  'Checkout redesign': 'チェックアウトの刷新',
+  'New coupon field': '新しいクーポン欄',
+  'Checkout button stays disabled after a coupon is removed': 'クーポンを外すとチェックアウトのボタンが押せないままになる',
+  'Saved cards on the payment step': '支払いステップで保存済みカードを使う',
+  'Retry webhook deliveries with backoff': 'Webhook の配信をバックオフ付きでリトライする',
+  'Webhooks v2': 'Webhook v2 対応',
+  'Document the feature flag rollout steps': 'フィーチャーフラグの展開手順を文書にする',
+  'Invoice PDF shows the old tax rate after a plan change': 'プラン変更後も請求書 PDF に古い税率が出る',
+  'Date picker cannot be used with the keyboard': '日付ピッカーをキーボードで操作できない',
+}
+const TITLES = process.env.DEMO_LANG === 'ja' ? TITLES_JA : {}
+
 const pr = (repo, number, title, author, extra) => ({
   id: `PR_${repo}_${number}`,
   number,
@@ -121,6 +154,7 @@ const nobody = { reviewRequests: { nodes: [] }, requestEvents: { nodes: [] }, la
 
 const MINE = [
   pr('storefront', 475, 'Move session storage to Redis', 'you', {
+    updatedAt: ago(5),
     ...nobody,
     ...viaTeam('web', 'mtanaka', 30),
     ...reviewed('mtanaka', 'CHANGES_REQUESTED', 20, oid(4750)),
@@ -145,6 +179,7 @@ const MINE = [
     ]),
   }),
   pr('billing-api', 1281, 'Paginate GET /v2/invoices', 'you', {
+    updatedAt: ago(4),
     ...nobody,
     ...reviewed('mtanaka', 'APPROVED', 5, oid(1281)),
     additions: 97,
@@ -153,6 +188,7 @@ const MINE = [
   }),
   // A stack made by hand: each PR opened on the branch of the one before, so they merge into develop in this order
   pr('billing-api', 1284, 'Show invoice pages in the dashboard', 'you', {
+    updatedAt: ago(26),
     ...nobody,
     ...asked(user('mtanaka')),
     baseRefName: 'feature/billing-api-1281',
@@ -160,6 +196,7 @@ const MINE = [
     deletions: 9,
   }),
   pr('billing-api', 1286, 'Remember the page size per user', 'you', {
+    updatedAt: ago(1),
     ...nobody,
     ...asked(user('mtanaka')),
     baseRefName: 'feature/billing-api-1284',
@@ -168,6 +205,7 @@ const MINE = [
     ...ci('PENDING'),
   }),
   pr('storefront', 470, 'Extract feature flag helpers into a module', 'you', {
+    updatedAt: ago(1),
     ...nobody,
     ...asked(user('lena-park')),
     ...viaTeam('web', 'lena-park', 8),
@@ -179,6 +217,7 @@ const MINE = [
   }),
   // main moved under it: it conflicts, and c offers to resolve it with Claude
   pr('storefront', 478, 'Rename cart events to checkout events', 'you', {
+    updatedAt: ago(72),
     ...nobody,
     ...asked(user('lena-park')),
     additions: 56,
@@ -186,9 +225,10 @@ const MINE = [
     mergeable: 'CONFLICTING',
   }),
   // Nobody asked to review it yet
-  pr('infra', 88, 'Tune autoscaling thresholds for queue workers', 'you', { ...nobody, additions: 14, deletions: 8 }),
+  pr('infra', 88, 'Tune autoscaling thresholds for queue workers', 'you', { updatedAt: ago(100), ...nobody, additions: 14, deletions: 8 }),
   // A stack made with gh stack: metrics, then autoscaling on them, then a dashboard
   pr('infra', 95, 'Export queue depth metrics', 'you', {
+    updatedAt: ago(9),
     ...nobody,
     ...reviewed('rkumar', 'APPROVED', 10, oid(95)),
     additions: 64,
@@ -196,8 +236,8 @@ const MINE = [
     reviewDecision: 'APPROVED',
     ...stacked(1),
   }),
-  pr('infra', 96, 'Autoscale workers on queue depth', 'you', { ...nobody, ...asked(user('rkumar')), additions: 41, deletions: 12, ...stacked(2) }),
-  pr('infra', 97, 'Queue dashboard', 'you', { ...nobody, ...asked(user('rkumar')), additions: 120, deletions: 0, ...ci('PENDING'), ...stacked(3) }),
+  pr('infra', 96, 'Autoscale workers on queue depth', 'you', { updatedAt: ago(30), ...nobody, ...asked(user('rkumar')), additions: 41, deletions: 12, ...stacked(2) }),
+  pr('infra', 97, 'Queue dashboard', 'you', { updatedAt: ago(3), ...nobody, ...asked(user('rkumar')), additions: 120, deletions: 0, ...ci('PENDING'), ...stacked(3) }),
   pr('docs', 61, 'API versioning guide', 'you', { ...nobody, isDraft: true, updatedAt: ago(24 * 45), additions: 240, deletions: 0 }),
 ]
 
@@ -469,7 +509,8 @@ const byUrl = (url) => all.find((p) => p.url === url)
 const key = (p) => `${p.repository.nameWithOwner.split('/')[1]}/${p.number}`
 
 const args = process.argv.slice(2)
-const out = (v) => process.stdout.write(typeof v === 'string' ? v : JSON.stringify(v))
+// Every title leaves through here, so this is the one place DEMO_LANG changes them
+const out = (v) => process.stdout.write(typeof v === 'string' ? v : JSON.stringify(v, (k, x) => (k === 'title' ? (TITLES[x] ?? x) : x)))
 
 const fail = (msg) => {
   process.stderr.write(`${msg}\n`)
