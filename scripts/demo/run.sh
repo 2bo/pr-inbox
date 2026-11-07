@@ -4,8 +4,9 @@
 # The mod's own state in Claude Code's plugin store is set aside first and put back when Claude Code exits.
 set -euo pipefail
 
-# DEMO_LANG=ja: titles (scripts/demo/gh) and the AI analysis in Japanese
-case "${DEMO_LANG:-en}" in
+# DEMO_LANG=ja: titles (scripts/demo/gh) and the AI analysis in Japanese. Set for Claude Code and for pr-inbox too, whose
+# own language setting comes first
+case "${DEMO_LANG-en}" in
   en) language=English ;;
   ja) language=Japanese ;;
   *) echo "DEMO_LANG must be en or ja, not: $DEMO_LANG" >&2; exit 2 ;;
@@ -31,4 +32,4 @@ restore() {
 trap restore EXIT
 
 cd "$root"
-PATH="$here:$PATH" claude --plugin-dir "$root" --settings "{\"language\":\"$language\"}" "$@"
+PATH="$here:$PATH" claude --plugin-dir "$root" --settings "{\"language\":\"$language\",\"pluginConfigs\":{\"pr-inbox@inline\":{\"options\":{\"language\":\"$language\"}}}}" "$@"
