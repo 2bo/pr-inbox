@@ -2611,12 +2611,11 @@ const READ_TOOLS = new Set(['Read', 'Grep', 'Glob', 'AskUserQuestion', 'TodoWrit
 // and gh api reading (GET only: no flag but --paginate) a PR's or issue's comments and reviews
 const READ_GH =
   /^gh (?:(?:pr (?:view|diff|checks)|issue view|run (?:view|list))(?: [^;&|`$<>(){}\\\n\r]*)?|api repos\/[\w.-]+\/[\w.-]+\/(?:pulls|issues)\/\d+\/(?:comments|reviews)(?: --paginate)?)$/
+const ASK_USER_INSTEAD = 'Do not try another way. Tell the user what you would run, and they can ask for it in a new prompt.'
 const GUARD_DENY =
   'pr-inbox: this turn looks into a PR or an issue, so only Read, Grep, Glob and read-only gh commands (gh pr view/diff/checks, gh issue view, gh run view/list, gh api on PR and issue comments and PR reviews) can run. ' +
-  'Do not try another way. Tell the user what you would run, and they can ask for it in a new prompt.'
-
-const GUARD_FAILED =
-  'pr-inbox: its check of this tool call failed, so the call is refused. Do not try another way. Tell the user what you would run, and they can ask for it in a new prompt.'
+  ASK_USER_INSTEAD
+const GUARD_FAILED = `pr-inbox: its check of this tool call failed, so the call is refused. ${ASK_USER_INSTEAD}`
 
 function allowedWhileGuarded(tool: string, command: unknown): boolean {
   if (READ_TOOLS.has(tool)) return true
