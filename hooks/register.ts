@@ -2615,6 +2615,9 @@ const GUARD_DENY =
   'pr-inbox: this turn looks into a PR or an issue, so only Read, Grep, Glob and read-only gh commands (gh pr view/diff/checks, gh issue view, gh run view/list, gh api on PR and issue comments and PR reviews) can run. ' +
   'Do not try another way. Tell the user what you would run, and they can ask for it in a new prompt.'
 
+const GUARD_FAILED =
+  'pr-inbox: its check of this tool call failed, so the call is refused. Do not try another way. Tell the user what you would run, and they can ask for it in a new prompt.'
+
 function allowedWhileGuarded(tool: string, command: unknown): boolean {
   if (READ_TOOLS.has(tool)) return true
   return tool === 'Bash' && typeof command === 'string' && READ_GH.test(command.trim())
@@ -7656,6 +7659,11 @@ export function register(on: On, options: PluginOptions) {
       }
     if (!guardedTurn || allowedWhileGuarded(e.tool, command)) return next(e)
     return { deny: GUARD_DENY }
+  }).catch((_, e, next) => {
+    // The guard above threw or overran: a failed hook is skipped and its tool runs, so while the e guard or a fix is
+    // on, refuse instead. It calls next only to let a call through, so one that did had been judged allowed
+    if (next.called || (!guardedTurn && !fixJob?.turnId)) return next(e)
+    return { deny: GUARD_FAILED }
   })
 
   // The pane closed (q, ctrl+x x, or the engine): the hint under the prompt goes back to normal
