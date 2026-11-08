@@ -5,6 +5,7 @@
   "author": {
     "name": "2bo"
   },
+  "repository": "https://github.com/2bo/pr-inbox",
   "license": "MIT",
   "userConfig": {
     "org_filter": {
