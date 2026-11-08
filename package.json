@@ -13,7 +13,7 @@
     "demo": "bash scripts/demo/run.sh"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.6.3",
+    "@biomejs/biome": "^2.6.4",
     "typescript": "^7.0.2"
   }
 }
