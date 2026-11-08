@@ -6495,6 +6495,9 @@ test('while Claude fixes CI, it cannot push, merge, approve, post or ask for rev
     'gh issue close 5',
     'gh api repos/acme/app/issues/21/comments -f body=hi',
     'gh api repos/acme/app/issues/21/labels --input labels.json',
+    // A GET in the command after it is not its own
+    'gh api repos/acme/app/issues/21/comments -f body=hi; echo -- -X GET',
+    'gh api repos/acme/app/issues/21/comments -f body=hi | grep --method=GET x',
     // Quotes and backslashes do not hide a push
     "git pu''sh origin HEAD",
     'g\\it "push" origin HEAD',
