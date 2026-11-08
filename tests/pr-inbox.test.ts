@@ -6490,11 +6490,27 @@ test('while Claude fixes CI, it cannot push, merge, approve, post or ask for rev
     'gh pr edit 21 --add-reviewer mika',
     'gh api -X POST repos/acme/app/pulls/21/requested_reviewers -f reviewers[]=mika',
     `gh api graphql -f query='mutation { requestReviews(input: {pullRequestId: "x", userIds: ["y"]}) { clientMutationId } }'`,
+    // Nor comment on an issue, nor write through gh api without naming the method (fields make it a POST)
+    'gh issue comment 5 --body hi',
+    'gh issue close 5',
+    'gh api repos/acme/app/issues/21/comments -f body=hi',
+    'gh api repos/acme/app/issues/21/labels --input labels.json',
+    // Quotes and backslashes do not hide a push
+    "git pu''sh origin HEAD",
+    'g\\it "push" origin HEAD',
   ]) {
     expect(await $.tool.call({ tool: 'Bash', command } as never)).toHaveProperty('deny')
   }
   expect(await $.tool.call({ tool: 'Bash', command: 'git commit -am "Fix the spec"' } as never)).toMatchObject({ result: 'ok' })
   expect(await $.tool.call({ tool: 'Bash', command: 'gh run view 1 --log-failed -R acme/app' } as never)).toMatchObject({ result: 'ok' })
+  // Reading stays open: GET with fields, and a GraphQL query
+  for (const command of [
+    'gh api -X GET repos/acme/app/issues -f state=open',
+    'gh issue view 5',
+    `gh api graphql -f query='query { viewer { login } }'`,
+  ]) {
+    expect(await $.tool.call({ tool: 'Bash', command } as never)).toMatchObject({ result: 'ok' })
+  }
   await ui.unmount()
 })
 

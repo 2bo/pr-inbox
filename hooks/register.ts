@@ -6539,8 +6539,13 @@ function oneAtATime(): string {
     : ''
 }
 // What the fix turn may not run: pushes, and gh writes to the PR or the repository
+// gh api without a method sends POST once it is given fields (-f, -F, --field, --raw-field, --input), so those count
+// as writes unless the method is GET; graphql reads (query) take -f too and are judged by the mutation keyword instead
 const FIX_FORBIDDEN =
-  /\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr\s+(?:merge|review|comment|close|ready|edit)|release|repo\s+(?:delete|edit))\b|\bgh\s+api\b[^\n]*(?:-X\s*|--method[=\s]+)(?:POST|PUT|PATCH|DELETE)|\bgh\s+api\s+graphql\b[^\n]*\bmutation\b/i
+  /\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr\s+(?:merge|review|comment|close|ready|edit)|issue\s+(?:comment|create|edit|close|reopen|delete|lock|unlock|transfer|pin|unpin)|release|repo\s+(?:delete|edit))\b|\bgh\s+api\b[^\n]*(?:-X\s*|--method[=\s]+)(?:POST|PUT|PATCH|DELETE)|\bgh\s+api\s+(?!graphql\b)(?![^\n]*(?:-X\s*|--method[=\s]+)GET\b)[^\n]*\s(?:-[fF]|--(?:raw-)?field|--input)\b|\bgh\s+api\s+graphql\b[^\n]*\bmutation\b/i
+// A command as FIX_FORBIDDEN reads it: quotes and backslashes out, so git pu''sh or g\it push still reads as a push.
+// A pattern over the text, not a shell: a command built at run time ($(...), variables, a script) is not caught
+const fixForbidden = (command: string) => FIX_FORBIDDEN.test(command.replace(/['"\\]/g, ''))
 // What a refused command hears back, in the words of fix_push
 const FIX_DENY = (push: Config['fix_push']) =>
   push === 'auto'
@@ -7657,7 +7662,7 @@ export function register(on: On, options: PluginOptions) {
   on('tool.call', async (_, e, next) => {
     const command = (e as { command?: unknown }).command
     // While Claude fixes CI, pushing, merging, approving and commenting stay with you: pr-inbox asks before it pushes
-    if (fixJob?.turnId && e.tool === 'Bash' && typeof command === 'string' && FIX_FORBIDDEN.test(command))
+    if (fixJob?.turnId && e.tool === 'Bash' && typeof command === 'string' && fixForbidden(command))
       return {
         deny: `${FIX_DENY(cfg.fix_push)}${FIX_TASKS[fixJob.task].replies ? ' Replies to the review threads go in the replies file the request names: pr-inbox posts them.' : ''}`,
       }
