@@ -6539,12 +6539,13 @@ function oneAtATime(): string {
     : ''
 }
 // What the fix turn may not run: pushes, and gh writes to the PR or the repository
-// gh api without a method sends POST once it is given fields (-f, -F, --field, --raw-field, --input; -fbody=x too), so any gh api
+// gh api without a method sends POST once it is given fields (-f, -F, --field, --raw-field, --input; -fbody=x and
+// short flags run together, -ifbody=x, too; -X likewise, -iXDELETE), so any gh api
 // with fields counts as a write, even one that says GET: telling a GET of its own from one in a quoted value or in the
 // next command would take a shell parser, and a read can put its parameters in the URL. GraphQL reads (query) take -f
 // too and are judged by the mutation keyword instead
 const FIX_FORBIDDEN =
-  /\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr\s+(?:merge|review|comment|close|ready|edit)|issue\s+(?:comment|create|edit|close|reopen|delete|lock|unlock|transfer|pin|unpin)|release|repo\s+(?:delete|edit))\b|\bgh\s+api\b[^\n]*(?:-X\s*|--method[=\s]+)(?:POST|PUT|PATCH|DELETE)|\bgh\s+api\s+(?!graphql\b)[^\n]*\s(?:-[fF]|--(?:raw-)?field\b|--input\b)|\bgh\s+api\s+graphql\b[^\n]*\bmutation\b/i
+  /\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr\s+(?:merge|review|comment|close|ready|edit)|issue\s+(?:comment|create|edit|close|reopen|delete|lock|unlock|transfer|pin|unpin)|release|repo\s+(?:delete|edit))\b|\bgh\s+api\b[^\n]*(?:\s-[A-Za-z]*X\s*|--method[=\s]+)(?:POST|PUT|PATCH|DELETE)|\bgh\s+api\s+(?!graphql\b)[^\n]*\s(?:-[A-Za-z]*[fF]|--(?:raw-)?field\b|--input\b)|\bgh\s+api\s+graphql\b[^\n]*\bmutation\b/i
 // A command as FIX_FORBIDDEN reads it: quotes and backslashes out, so git pu''sh or g\it push still reads as a push.
 // A pattern over the text, not a shell: a command built at run time ($(...), variables, a script) is not caught
 const fixForbidden = (command: string) => FIX_FORBIDDEN.test(command.replace(/['"\\]/g, ''))

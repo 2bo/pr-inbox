@@ -6502,6 +6502,9 @@ test('while Claude fixes CI, it cannot push, merge, approve, post or ask for rev
     'gh api -X GET repos/acme/app/issues -f state=open',
     'gh api repos/acme/app/issues/21/comments -fbody=hi',
     'gh api repos/acme/app/issues/21/comments -Fbody=@reply.md',
+    // Short flags run together
+    'gh api repos/acme/app/issues/21/comments -ifbody=hi',
+    'gh api -iXDELETE repos/acme/app/issues/21/labels/bug',
     // Quotes and backslashes do not hide a push
     "git pu''sh origin HEAD",
     'g\\it "push" origin HEAD',
