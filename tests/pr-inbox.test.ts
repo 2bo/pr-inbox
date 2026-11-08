@@ -6505,6 +6505,10 @@ test('while Claude fixes CI, it cannot push, merge, approve, post or ask for rev
     // Short flags run together
     'gh api repos/acme/app/issues/21/comments -ifbody=hi',
     'gh api -iXDELETE repos/acme/app/issues/21/labels/bug',
+    // A flag on a continued line, and a GraphQL request read from a file
+    'gh api repos/acme/app/issues/21/comments \\\n  -f body=hi',
+    'gh api graphql -F query=@reply.graphql',
+    'gh api graphql --input request.json',
     // Quotes and backslashes do not hide a push
     "git pu''sh origin HEAD",
     'g\\it "push" origin HEAD',

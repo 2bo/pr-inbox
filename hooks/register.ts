@@ -6545,10 +6545,12 @@ function oneAtATime(): string {
 // next command would take a shell parser, and a read can put its parameters in the URL. GraphQL reads (query) take -f
 // too and are judged by the mutation keyword instead
 const FIX_FORBIDDEN =
-  /\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr\s+(?:merge|review|comment|close|ready|edit)|issue\s+(?:comment|create|edit|close|reopen|delete|lock|unlock|transfer|pin|unpin)|release|repo\s+(?:delete|edit))\b|\bgh\s+api\b[^\n]*(?:\s-[A-Za-z]*X\s*|--method[=\s]+)(?:POST|PUT|PATCH|DELETE)|\bgh\s+api\s+(?!graphql\b)[^\n]*\s(?:-[A-Za-z]*[fF]|--(?:raw-)?field\b|--input\b)|\bgh\s+api\s+graphql\b[^\n]*\bmutation\b/i
-// A command as FIX_FORBIDDEN reads it: quotes and backslashes out, so git pu''sh or g\it push still reads as a push.
-// A pattern over the text, not a shell: a command built at run time ($(...), variables, a script) is not caught
-const fixForbidden = (command: string) => FIX_FORBIDDEN.test(command.replace(/['"\\]/g, ''))
+  /\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr\s+(?:merge|review|comment|close|ready|edit)|issue\s+(?:comment|create|edit|close|reopen|delete|lock|unlock|transfer|pin|unpin)|release|repo\s+(?:delete|edit))\b|\bgh\s+api\b[^\n]*(?:\s-[A-Za-z]*X\s*|--method[=\s]+)(?:POST|PUT|PATCH|DELETE)|\bgh\s+api\s+(?!graphql\b)[^\n]*\s(?:-[A-Za-z]*[fF]|--(?:raw-)?field\b|--input\b)|\bgh\s+api\s+graphql\b[^\n]*(?:\bmutation\b|=@|--input\b)/i
+// A command as FIX_FORBIDDEN reads it: quotes and backslashes out, so git pu''sh or g\it push still reads as a push,
+// and on one line, so a flag on a continued line (\ then a newline) still counts. A GraphQL request read from a file
+// (query=@file, --input) is a write, as its text cannot be seen. A pattern over the text, not a shell: a command built
+// at run time ($(...), variables, a script) is not caught
+const fixForbidden = (command: string) => FIX_FORBIDDEN.test(command.replace(/['"\\]/g, '').replace(/\n/g, ' '))
 // What a refused command hears back, in the words of fix_push
 const FIX_DENY = (push: Config['fix_push']) =>
   push === 'auto'
