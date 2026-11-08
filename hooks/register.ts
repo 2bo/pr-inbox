@@ -6492,6 +6492,8 @@ type FixJob = {
   commits?: string[]
   // The fix turn stopped before it finished: the push panel says so
   interrupted?: boolean
+  // pr-inbox's guard failed on one of its tool calls and refused it: the turn ends as cut short, so nothing goes on its own
+  guardFailed?: boolean
   // g: the threads named in the request (the only ones a reply may go to), the replies Claude wrote once the turn
   // ended (checked), and the commit pushed with them (fixed replies wait for it)
   threads?: OpenThread[]
@@ -7646,7 +7648,8 @@ export function register(on: On, options: PluginOptions) {
 
   on('turn.complete', async ($, e, next) => {
     if (e.turnId === guardedTurn) guardedTurn = undefined
-    if (fixJob?.turnId === e.turnId) void afterFix($, fixJob, e.isAborted || e.reason !== 'answer' ? 'interrupted' : 'done')
+    if (fixJob?.turnId === e.turnId)
+      void afterFix($, fixJob, e.isAborted || e.reason !== 'answer' || fixJob.guardFailed ? 'interrupted' : 'done')
     // A reviewer subagent finished: hand its answer to the review waiting for it
     return next(e)
   })
@@ -7664,6 +7667,8 @@ export function register(on: On, options: PluginOptions) {
     // The guard above threw or overran: Claude Code skips such a hook, so the tool would run. While the e guard or a
     // fix is on, refuse instead. It calls next only to let a call through, so one that did had been judged allowed
     if (next.called || (!guardedTurn && !fixJob?.turnId)) return next(e)
+    // The fix may be half done: fix_push / fix_reply auto must not send it when the turn ends
+    if (fixJob?.turnId) fixJob.guardFailed = true
     return { deny: GUARD_FAILED(!guardedTurn) }
   })
 
