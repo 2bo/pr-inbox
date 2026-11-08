@@ -6495,9 +6495,11 @@ test('while Claude fixes CI, it cannot push, merge, approve, post or ask for rev
     'gh issue close 5',
     'gh api repos/acme/app/issues/21/comments -f body=hi',
     'gh api repos/acme/app/issues/21/labels --input labels.json',
-    // A GET in the command after it is not its own
+    // Fields are a write whatever GET is written near them: in the next command, in a quoted value, or its own
     'gh api repos/acme/app/issues/21/comments -f body=hi; echo -- -X GET',
-    'gh api repos/acme/app/issues/21/comments -f body=hi | grep --method=GET x',
+    `gh api 'repos/acme/app/issues/21/comments?x=;' -f body=hi`,
+    'gh api repos/acme/app/issues/21/comments -f body="-X GET"',
+    'gh api -X GET repos/acme/app/issues -f state=open',
     // Quotes and backslashes do not hide a push
     "git pu''sh origin HEAD",
     'g\\it "push" origin HEAD',
@@ -6506,9 +6508,9 @@ test('while Claude fixes CI, it cannot push, merge, approve, post or ask for rev
   }
   expect(await $.tool.call({ tool: 'Bash', command: 'git commit -am "Fix the spec"' } as never)).toMatchObject({ result: 'ok' })
   expect(await $.tool.call({ tool: 'Bash', command: 'gh run view 1 --log-failed -R acme/app' } as never)).toMatchObject({ result: 'ok' })
-  // Reading stays open: GET with fields, and a GraphQL query
+  // Reading stays open: parameters in the URL, and a GraphQL query
   for (const command of [
-    'gh api -X GET repos/acme/app/issues -f state=open',
+    'gh api "repos/acme/app/issues?state=open" --paginate',
     'gh issue view 5',
     `gh api graphql -f query='query { viewer { login } }'`,
   ]) {
