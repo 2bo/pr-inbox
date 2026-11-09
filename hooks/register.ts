@@ -2611,9 +2611,13 @@ const READ_TOOLS = new Set(['Read', 'Grep', 'Glob', 'AskUserQuestion', 'TodoWrit
 // and gh api reading (GET only: no flag but --paginate) a PR's or issue's comments and reviews
 const READ_GH =
   /^gh (?:(?:pr (?:view|diff|checks)|issue view|run (?:view|list))(?: [^;&|`$<>(){}\\\n\r]*)?|api repos\/[\w.-]+\/[\w.-]+\/(?:pulls|issues)\/\d+\/(?:comments|reviews)(?: --paginate)?)$/
+const ASK_USER_INSTEAD = 'Do not try another way. Tell the user what you would run, and they can ask for it in a new prompt.'
 const GUARD_DENY =
   'pr-inbox: this turn looks into a PR or an issue, so only Read, Grep, Glob and read-only gh commands (gh pr view/diff/checks, gh issue view, gh run view/list, gh api on PR and issue comments and PR reviews) can run. ' +
-  'Do not try another way. Tell the user what you would run, and they can ask for it in a new prompt.'
+  ASK_USER_INSTEAD
+// The call was not judged, so the request says so, and a fix turn stops (its commits are pr-inbox's to show) instead
+const GUARD_FAILED = (fixing: boolean) =>
+  `pr-inbox: its guard failed on this tool call (an error or a timeout), so the call was refused, not judged. Tell the user the guard failed. ${fixing ? 'Stop here and tell them what was refused; pr-inbox shows any commits you made.' : ASK_USER_INSTEAD}`
 
 function allowedWhileGuarded(tool: string, command: unknown): boolean {
   if (READ_TOOLS.has(tool)) return true
@@ -6488,6 +6492,8 @@ type FixJob = {
   commits?: string[]
   // The fix turn stopped before it finished: the push panel says so
   interrupted?: boolean
+  // pr-inbox's guard failed on one of its tool calls and refused it: the turn ends as cut short, so nothing goes on its own
+  guardFailed?: boolean
   // g: the threads named in the request (the only ones a reply may go to), the replies Claude wrote once the turn
   // ended (checked), and the commit pushed with them (fixed replies wait for it)
   threads?: OpenThread[]
@@ -6533,8 +6539,18 @@ function oneAtATime(): string {
     : ''
 }
 // What the fix turn may not run: pushes, and gh writes to the PR or the repository
+// gh api without a method sends POST once it is given fields (-f, -F, --field, --raw-field, --input; -fbody=x and
+// short flags run together, -ifbody=x, too; -X likewise, -iXDELETE), so any gh api
+// with fields counts as a write, even one that says GET: telling a GET of its own from one in a quoted value or in the
+// next command would take a shell parser, and a read can put its parameters in the URL. GraphQL reads (query) take -f
+// too and are judged by the mutation keyword instead
 const FIX_FORBIDDEN =
-  /\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr\s+(?:merge|review|comment|close|ready|edit)|release|repo\s+(?:delete|edit))\b|\bgh\s+api\b[^\n]*(?:-X\s*|--method[=\s]+)(?:POST|PUT|PATCH|DELETE)|\bgh\s+api\s+graphql\b[^\n]*\bmutation\b/i
+  /\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr\s+(?:merge|review|comment|close|ready|edit)|issue\s+(?:comment|create|edit|close|reopen|delete|lock|unlock|transfer|pin|unpin)|release|repo\s+(?:delete|edit))\b|\bgh\s+api\b[^\n]*(?:\s-[A-Za-z]*X\s*|--method[=\s]+)(?:POST|PUT|PATCH|DELETE)|\bgh\s+api\s+(?!graphql\b)[^\n]*\s(?:-[A-Za-z]*[fF]|--(?:raw-)?field\b|--input\b)|\bgh\s+api\s+graphql\b[^\n]*(?:\bmutation\b|=@|--input\b)/i
+// A command as FIX_FORBIDDEN reads it: quotes and backslashes out, so git pu''sh or g\it push still reads as a push,
+// and on one line, so a flag on a continued line (\ then a newline) still counts. A GraphQL request read from a file
+// (query=@file, --input) is a write, as its text cannot be seen. A pattern over the text, not a shell: a command built
+// at run time ($(...), variables, a script) is not caught
+const fixForbidden = (command: string) => FIX_FORBIDDEN.test(command.replace(/['"\\]/g, '').replace(/\n/g, ' '))
 // What a refused command hears back, in the words of fix_push
 const FIX_DENY = (push: Config['fix_push']) =>
   push === 'auto'
@@ -7642,7 +7658,8 @@ export function register(on: On, options: PluginOptions) {
 
   on('turn.complete', async ($, e, next) => {
     if (e.turnId === guardedTurn) guardedTurn = undefined
-    if (fixJob?.turnId === e.turnId) void afterFix($, fixJob, e.isAborted || e.reason !== 'answer' ? 'interrupted' : 'done')
+    if (fixJob?.turnId === e.turnId)
+      void afterFix($, fixJob, e.isAborted || e.reason !== 'answer' || fixJob.guardFailed ? 'interrupted' : 'done')
     // A reviewer subagent finished: hand its answer to the review waiting for it
     return next(e)
   })
@@ -7650,12 +7667,19 @@ export function register(on: On, options: PluginOptions) {
   on('tool.call', async (_, e, next) => {
     const command = (e as { command?: unknown }).command
     // While Claude fixes CI, pushing, merging, approving and commenting stay with you: pr-inbox asks before it pushes
-    if (fixJob?.turnId && e.tool === 'Bash' && typeof command === 'string' && FIX_FORBIDDEN.test(command))
+    if (fixJob?.turnId && e.tool === 'Bash' && typeof command === 'string' && fixForbidden(command))
       return {
         deny: `${FIX_DENY(cfg.fix_push)}${FIX_TASKS[fixJob.task].replies ? ' Replies to the review threads go in the replies file the request names: pr-inbox posts them.' : ''}`,
       }
     if (!guardedTurn || allowedWhileGuarded(e.tool, command)) return next(e)
     return { deny: GUARD_DENY }
+  }).catch((_, e, next) => {
+    // The guard above threw or overran: Claude Code skips such a hook, so the tool would run. While the e guard or a
+    // fix is on, refuse instead. It calls next only to let a call through, so one that did had been judged allowed
+    if (next.called || (!guardedTurn && !fixJob?.turnId)) return next(e)
+    // The fix may be half done: fix_push / fix_reply auto must not send it when the turn ends
+    if (fixJob?.turnId) fixJob.guardFailed = true
+    return { deny: GUARD_FAILED(!guardedTurn) }
   })
 
   // The pane closed (q, ctrl+x x, or the engine): the hint under the prompt goes back to normal
